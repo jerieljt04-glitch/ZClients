@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!--
+    Hardened runtime turns on library validation, which is what stops another
+    local process from injecting a dylib into ZClients and reading every
+    client's signed-in Zoho session out of memory.
+
+    Only the two device entitlements are claimed. Under the hardened runtime an
+    app must declare these before macOS will even show the camera/microphone
+    prompt, and Google Meet needs both. Notably absent, and deliberately so:
+    disable-library-validation, allow-dyld-environment-variables and
+    allow-unsigned-executable-memory, any of which would give the injection
+    path back.
+  -->
+  <key>com.apple.security.device.camera</key><true/>
+  <key>com.apple.security.device.audio-input</key><true/>
+</dict>
+</plist>
