@@ -10,7 +10,7 @@ interface.
 ./build.sh              # test, build universal release, sign, install to /Applications
 ./build.sh --no-install # build and sign into .build/
 ./build.sh --test       # "ZClients Test": separate bundle id and data, safe to experiment
-cargo test              # 46 unit tests (URL policy, model, sessions, vault, downloads)
+cargo test              # 47 unit tests (URL policy, model, sessions, vault, downloads)
 ```
 
 Signing uses the "ZClients Local Signer" identity made by
@@ -26,6 +26,10 @@ Run the test app with its own home so nothing real is touched:
   downloaded PDFs open as tabs, the PDF viewer's download button saves.
 - `perf`: launch time, tab strip/toolbar cost, tab switches and saves with 12
   tabs open (main-thread milliseconds).
+- `input`: ⌘A / Control+A in a text box and on the page, ⌘-click on a plain
+  link and on a link a page script opens (background tabs). Add
+  `ZCLIENTS_REAL_KEYS=1` and send the keys with System Events, because
+  synthesized key events do not behave like a real keyboard here.
 
 ## Layout
 

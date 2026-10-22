@@ -1,11 +1,12 @@
 //! The WebKit layer: one `WKWebView` per awake tab, one persistent data store
 //! per profile, and the delegates that decide what every page may do.
 //!
-//! Lightness comes from here: only a few tabs are kept awake (6 on Macs with
-//! 10 GB of memory or less, 8 up to 20 GB, otherwise 10), and fewer whenever
-//! macOS reports memory pressure. Going back to an awake tab is instant; a
-//! tab that goes to sleep saves its exact place first and wakes up there,
-//! still signed in.
+//! Tabs stay awake like in a browser (10 on Macs with 10 GB of memory or
+//! less, 16 up to 20 GB, otherwise 24): a background tab costs little,
+//! because macOS compresses it, and putting one to sleep means it reloads
+//! when the user comes back, which looks like a refresh nobody asked for.
+//! Only real memory pressure puts tabs to sleep early. A tab that goes to
+//! sleep saves its exact place first and wakes up there, still signed in.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -92,6 +93,10 @@ pub struct ZWebIvars {
     pub workspace: Workspace,
     context: RefCell<Option<ContextTarget>>,
     menu_targets: RefCell<Vec<(String, Option<String>)>>,
+    /// Keys held for the last click in this page, and when. A page's own
+    /// click handler that calls window.open() (most links in Zoho) does
+    /// not pass them on to WebKit's navigation action.
+    last_click: Cell<Option<(objc2_app_kit::NSEventModifierFlags, Instant)>>,
 }
 
 define_class!(
@@ -120,7 +125,23 @@ define_class!(
         // define — ⌘Enter in a Zoho editor, say — still reaches the page.
         #[unsafe(method(performKeyEquivalent:))]
         fn perform_key_equivalent(&self, event: &NSEvent) -> bool {
+            // Control+A selects all too, the way it does in browsers on
+            // Windows (on a Mac it would only move to the start of a line).
+            if is_key(event, "a", objc2_app_kit::NSEventModifierFlags::Control) {
+                unsafe {
+                    let _: () = msg_send![self, selectAll: None::<&AnyObject>];
+                }
+                return true.into();
+            }
             menu_first(event) || unsafe { msg_send![super(self), performKeyEquivalent: event] }
+        }
+
+        #[unsafe(method(mouseDown:))]
+        fn mouse_down(&self, event: &NSEvent) {
+            self.ivars().last_click.set(Some((event.modifierFlags(), Instant::now())));
+            unsafe {
+                let _: () = msg_send![super(self), mouseDown: event];
+            }
         }
 
         #[unsafe(method(zcDownloadContext:))]
@@ -141,6 +162,13 @@ fn menu_first(event: &NSEvent) -> bool {
     }
     let Some(mtm) = MainThreadMarker::new() else { return false };
     NSApplication::sharedApplication(mtm).mainMenu().is_some_and(|m| m.performKeyEquivalent(event))
+}
+
+/// `event` is exactly `mods` + `key` (no other modifier held).
+fn is_key(event: &NSEvent, key: &str, mods: objc2_app_kit::NSEventModifierFlags) -> bool {
+    use objc2_app_kit::NSEventModifierFlags as M;
+    let held = event.modifierFlags() & (M::Command | M::Shift | M::Option | M::Control);
+    held == mods && event.charactersIgnoringModifiers().is_some_and(|c| c.to_string().eq_ignore_ascii_case(key))
 }
 
 impl ZWebView {
@@ -195,6 +223,7 @@ fn new_zweb(mtm: MainThreadMarker, frame: NSRect, cfg: &WKWebViewConfiguration, 
         workspace: ws,
         context: RefCell::new(None),
         menu_targets: RefCell::new(vec![]),
+        last_click: Cell::new(None),
     });
     let web: Retained<ZWebView> = unsafe { msg_send![super(this), initWithFrame: frame, configuration: cfg] };
     unsafe {
@@ -458,6 +487,16 @@ define_class!(
 
         #[unsafe(method(webViewWebContentProcessDidTerminate:))]
         fn process_died(&self, web: &WKWebView) {
+            // macOS ends background pages' processes to free memory. Reloading
+            // them on the spot looked like pages refreshing by themselves and
+            // spent the memory again; a background tab goes to sleep instead
+            // and comes back (at its saved place) when it is next shown.
+            if let Some(tab) = self.ivars().tab_id {
+                if POOL.with_borrow(|p| p.active) != Some(tab) {
+                    util::later(move || release(tab));
+                    return;
+                }
+            }
             let ok = unsafe { web.URL() }.and_then(|u| util::url_string(&u)).and_then(|s| policy::parse(&s))
                 .is_some_and(|u| policy::is_allowed_web(&u, self.ivars().workspace));
             if ok {
@@ -591,6 +630,31 @@ define_class!(
     }
 );
 
+/// The keys held for the click behind `action`: what WebKit recorded with
+/// it, plus the keys of a click in `web` within the last second (a page
+/// script that opens the link itself loses them on the way).
+fn click_modifiers(web: &WKWebView, action: &WKNavigationAction) -> objc2_app_kit::NSEventModifierFlags {
+    let recorded = unsafe { action.modifierFlags() };
+    let clicked = web
+        .downcast_ref::<ZWebView>()
+        .and_then(|z| z.ivars().last_click.get())
+        .filter(|(_, at)| at.elapsed() < Duration::from_secs(1))
+        .map(|(m, _)| m)
+        .unwrap_or(objc2_app_kit::NSEventModifierFlags::empty());
+    recorded | clicked
+}
+
+/// ⌘-click: open in a new tab.
+fn new_tab_click(web: &WKWebView, action: &WKNavigationAction) -> bool {
+    click_modifiers(web, action).contains(objc2_app_kit::NSEventModifierFlags::Command)
+}
+
+/// ⇧⌘-click: that new tab comes to the front.
+fn wants_front(web: &WKWebView, action: &WKNavigationAction) -> bool {
+    use objc2_app_kit::NSEventModifierFlags as M;
+    click_modifiers(web, action).contains(M::Command | M::Shift)
+}
+
 fn origin_allowed(origin: &WKSecurityOrigin, ws: Workspace) -> bool {
     unsafe { policy::is_allowed_origin(&origin.protocol().to_string(), &origin.host().to_string(), origin.port() as i64, ws) }
 }
@@ -677,7 +741,7 @@ impl Coordinator {
         let _ = web;
     }
 
-    fn action_policy(&self, _web: &WKWebView, action: &WKNavigationAction) -> WKNavigationActionPolicy {
+    fn action_policy(&self, web: &WKWebView, action: &WKNavigationAction) -> WKNavigationActionPolicy {
         let iv = self.ivars();
         let main = unsafe { action.targetFrame() }.map(|f| unsafe { f.isMainFrame() }).unwrap_or(true);
         // Subframes are free to load: they are isolated by origin, and every
@@ -697,6 +761,20 @@ impl Coordinator {
             let client = iv.client_id;
             util::later(move || app::open_in_client_workspace(client, url));
             return WKNavigationActionPolicy::Cancel;
+        }
+
+        // ⌘-click on a link: a new tab in the background, the user stays on
+        // this page (⇧⌘-click opens it in front).
+        if user_link && source_trusted && iv.tab_id.is_some() && new_tab_click(web, action) {
+            if policy::is_allowed_web(&url, iv.workspace) {
+                let (client, ws, opener, front) = (iv.client_id, iv.workspace, iv.tab_id, wants_front(web, action));
+                util::later(move || app::open_new_tab_from_page(client, ws, url, opener, !front));
+                return WKNavigationActionPolicy::Cancel;
+            }
+            if policy::is_https(&url) {
+                open_externally(&url);
+                return WKNavigationActionPolicy::Cancel;
+            }
         }
 
         if unsafe { action.shouldPerformDownload() } && source_trusted && policy::is_safe_download(&url, iv.workspace) {
@@ -824,8 +902,11 @@ impl Coordinator {
             // ⌘-click, target=_blank and plain window.open(url) to a page
             // this app shows: a new tab, like any browser.
             if policy::is_allowed_web(u, iv.workspace) && !sized && is_get && iv.tab_id.is_some() {
-                let (client, ws, u) = (iv.client_id, iv.workspace, u.clone());
-                util::later(move || app::open_new_tab_from_page(client, ws, u));
+                // Zoho opens most links from its own click handlers with
+                // window.open; ⌘ held for that click means a background tab.
+                let background = new_tab_click(web, action) && !wants_front(web, action);
+                let (client, ws, u, opener) = (iv.client_id, iv.workspace, u.clone(), iv.tab_id);
+                util::later(move || app::open_new_tab_from_page(client, ws, u, opener, background));
                 return None;
             }
             // A link to an outside website: the default browser.
@@ -1037,9 +1118,10 @@ pub fn view_for(client_id: Uuid, tab: &Tab) -> Retained<ZWebView> {
     app::changed(app::TABS);
 
     // Hold the first load until the profile's cookies are back, otherwise the
-    // request races the restore and lands on a sign-in page. Do not push the
-    // load to a later run-loop turn to make switches feel quicker: WebKit then
-    // never adds its PDF viewer controls (download, zoom) to the view.
+    // request races the restore and lands on a sign-in page. Kept on this
+    // turn of the run loop: loading a turn later made switches feel quicker,
+    // but PDF tabs then went without WebKit's viewer controls (download,
+    // zoom) more often in testing.
     let tab = tab.clone();
     let v = view.clone();
     session::hydrate(&store, store_id, move || {
@@ -1082,9 +1164,9 @@ fn touch(p: &mut Pool, id: Uuid) {
 fn base_live_cap() -> usize {
     const GB: u64 = 1024 * 1024 * 1024;
     match NSProcessInfo::processInfo().physicalMemory() {
-        m if m <= 10 * GB => 6,
-        m if m <= 20 * GB => 8,
-        _ => 10,
+        m if m <= 10 * GB => 10,
+        m if m <= 20 * GB => 16,
+        _ => 24,
     }
 }
 
@@ -1108,13 +1190,14 @@ const PRESSURE_WARN: usize = 2;
 const PRESSURE_CRITICAL: usize = 4;
 
 /// How many tabs stay awake at a macOS memory-pressure level. A warning
-/// can last for hours on an 8 GB Mac with a browser open, so it keeps the
-/// old 4 rather than punishing every switch; critical keeps only 2.
+/// can last for hours on an 8 GB Mac with another browser open, and tabs
+/// slept for it reload when revisited, so it still keeps 8; only critical
+/// pressure cuts down to 3.
 fn cap_for_pressure(level: usize) -> usize {
     if level & PRESSURE_CRITICAL != 0 {
-        2
+        3
     } else if level & PRESSURE_WARN != 0 {
-        base_live_cap().min(4)
+        base_live_cap().min(8)
     } else {
         base_live_cap()
     }
@@ -1169,13 +1252,13 @@ mod pressure_tests {
     use super::*;
 
     #[test]
-    fn pressure_lowers_the_awake_tab_count_but_a_warning_keeps_four() {
+    fn pressure_lowers_the_awake_tab_count_but_a_warning_keeps_eight() {
         let base = base_live_cap();
-        assert!(base >= 6);
+        assert!(base >= 10);
         assert_eq!(cap_for_pressure(PRESSURE_NORMAL), base);
-        assert_eq!(cap_for_pressure(PRESSURE_WARN), 4);
-        assert_eq!(cap_for_pressure(PRESSURE_CRITICAL), 2);
-        assert_eq!(cap_for_pressure(PRESSURE_WARN | PRESSURE_CRITICAL), 2);
+        assert_eq!(cap_for_pressure(PRESSURE_WARN), 8);
+        assert_eq!(cap_for_pressure(PRESSURE_CRITICAL), 3);
+        assert_eq!(cap_for_pressure(PRESSURE_WARN | PRESSURE_CRITICAL), 3);
     }
 }
 

@@ -126,7 +126,13 @@ fn downloads_test() {
     });
     util::after(20.0, || {
         report("after pdf popup");
-        util::log(format!("SELFTEST fresh PDF tab has viewer controls: {}", web::active_view().is_some_and(|v| find_hud(&v).is_some())));
+        let app = NSApplication::sharedApplication(MainThreadMarker::new().unwrap());
+        util::log(format!(
+            "SELFTEST fresh PDF tab has viewer controls: {} (app active={}, window key={})",
+            web::active_view().is_some_and(|v| find_hud(&v).is_some()),
+            app.isActive(),
+            app.keyWindow().is_some()
+        ));
         web::eval_active("(() => 'active page: ' + location.protocol)()", |r| util::log(format!("SELFTEST {r}")));
         web::download_current();
     });
@@ -285,6 +291,119 @@ fn switch_round(pass: usize, i: usize, mut block: Vec<f64>, ready: Vec<f64>) {
     });
 }
 
+/// A real mouse click (down + up through `NSApp.sendEvent`, the path a
+/// physical click takes) at a point given in CSS pixels from the active
+/// page's top-left corner.
+fn click_page(x: f64, y: f64, mods: NSEventModifierFlags) {
+    let Some(view) = web::active_view() else { return };
+    let b = view.bounds();
+    let local = NSPoint::new(x, if view.isFlipped() { y } else { b.size.height - y });
+    let at = view.convertPoint_toView(local, None);
+    let mtm = MainThreadMarker::new().unwrap();
+    let app = NSApplication::sharedApplication(mtm);
+    let window = view.window().map(|w| w.windowNumber()).unwrap_or(0);
+    for kind in [NSEventType::LeftMouseDown, NSEventType::LeftMouseUp] {
+        let e = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+            kind, at, mods, 0.0, window, None, 0, 1, 1.0,
+        );
+        if let Some(e) = e {
+            app.sendEvent(&e);
+        }
+    }
+}
+
+fn eval_log(label: &'static str, js: &str) {
+    web::eval_active(js, move |r| util::log(format!("SELFTEST {label}: {r}")));
+}
+
+fn tab_summary() -> String {
+    app::store(|s| {
+        s.active_client()
+            .map(|c| {
+                let live = web::live_tabs();
+                let titles: Vec<String> = c
+                    .tabs
+                    .iter()
+                    .map(|t| {
+                        let loaded = web::page_state(t.id).map(|p| p.url).filter(|u| !u.is_empty());
+                        format!("{}{} [{}]", if Some(t.id) == c.active_tab_id { "*" } else { "" }, t.url.clone().unwrap_or_default(), match (live.contains(&t.id), loaded) {
+                            (true, Some(_)) => "loaded",
+                            (true, None) => "awake, not loaded",
+                            _ => "asleep",
+                        })
+                    })
+                    .collect();
+                format!("{} tabs {:?}", c.tabs.len(), titles)
+            })
+            .unwrap_or_default()
+    })
+}
+
+/// `ZCLIENTS_SELFTEST=input`: ⌘A in a text box and on the page, ⌘-click on
+/// a plain link and on a link a page script opens itself (Zoho style).
+fn input_test() {
+    let cmd = NSEventModifierFlags::Command;
+    util::after(3.0, || {
+        app::add_client("Input Test", "#228844", None, None);
+        util::after(0.5, || app::address_entered("https://www.zoho.com/"));
+    });
+    util::after(14.0, move || {
+        if let Some(v) = web::active_view() {
+            ui::focus_view(&v);
+        }
+        eval_log("setup", r#"(() => {
+            const t = Object.assign(document.body.appendChild(document.createElement('textarea')), {id: 'zc-t', value: 'hello select all'});
+            t.style.cssText = 'position:fixed;top:120px;left:20px;width:300px;height:40px;z-index:2147483647';
+            const a = Object.assign(document.body.appendChild(document.createElement('a')), {id: 'zc-a', href: 'https://www.zoho.com/crm/', textContent: 'plain link'});
+            a.style.cssText = 'position:fixed;top:20px;left:20px;width:200px;height:30px;display:block;background:#ff0;z-index:2147483647';
+            const b = Object.assign(document.body.appendChild(document.createElement('a')), {id: 'zc-b', href: 'https://www.zoho.com/books/', textContent: 'script link'});
+            b.style.cssText = 'position:fixed;top:60px;left:20px;width:200px;height:30px;display:block;background:#0ff;z-index:2147483647';
+            b.addEventListener('click', e => { e.preventDefault(); if (e.metaKey || e.ctrlKey) { window.open(b.href, '_blank'); } else { location.href = b.href; } });
+            addEventListener('keydown', e => { window.__zcKeys = (window.__zcKeys || '') + (e.metaKey ? 'cmd+' : '') + e.key + ' '; }, true);
+            addEventListener('keydown', e => { if (e.defaultPrevented) { window.__zcKeys += '(page prevented) '; } }, false);
+            t.focus(); t.setSelectionRange(0, 0);
+            return 'ready, focused=' + (document.activeElement === t);
+        })()"#);
+    });
+    // ZCLIENTS_REAL_KEYS=1: the ⌘A presses come from outside (System Events),
+    // the only way to see what a physical key press does.
+    let real = std::env::var_os("ZCLIENTS_REAL_KEYS").is_some();
+    log_keys();
+
+    util::after(15.5, move || {
+        if !real {
+            press("a", 0, cmd);
+        }
+        util::after(0.6, || eval_log("⌘A in text box", "(() => { const t = document.getElementById('zc-t'); return 'selected ' + (t.selectionEnd - t.selectionStart) + ' of ' + t.value.length + '; page saw keys: ' + (window.__zcKeys || 'none') + '; active=' + (document.activeElement && document.activeElement.id); })()"));
+    });
+    util::after(17.0, move || {
+        eval_log("blur", "(() => { document.activeElement.blur(); getSelection().removeAllRanges(); return 'page focused'; })()");
+        util::after(0.4, move || {
+            if !real {
+                press("a", 0, cmd);
+            }
+            util::after(0.6, || eval_log("⌘A on page", "(() => 'page selection length ' + getSelection().toString().length)()"));
+        });
+    });
+    util::after(19.0, move || {
+        util::log(format!("SELFTEST before ⌘-clicks: {}", tab_summary()));
+        click_page(60.0, 35.0, cmd);
+    });
+    util::after(23.0, move || {
+        util::log(format!("SELFTEST after ⌘-click on plain link: {}", tab_summary()));
+        click_page(60.0, 75.0, cmd);
+    });
+    util::after(27.0, || {
+        util::log(format!("SELFTEST after ⌘-click on script link: {}", tab_summary()));
+    });
+    util::after(28.0, || {
+        let live = web::live_tabs().len();
+        util::log(format!("SELFTEST awake tabs: {live}"));
+        util::log("SELFTEST done");
+        NSApplication::sharedApplication(MainThreadMarker::new().unwrap()).terminate(None);
+    });
+}
+
 pub fn start() {
     if !util::is_test_build() {
         return;
@@ -293,6 +412,7 @@ pub fn start() {
         Ok("perf") => return perf_test(),
         Ok("prep") => return prep(),
         Ok("downloads") => return downloads_test(),
+        Ok("input") => return input_test(),
         Ok(_) => {}
         Err(_) => return,
     }

@@ -625,6 +625,17 @@ impl Store {
         Some(id)
     }
 
+    /// A background tab (⌘-click) placed right after `after`, so links opened
+    /// one after another from a page line up in the order they were clicked.
+    pub fn add_tab_after(&mut self, client_id: Uuid, after: Uuid, url: String, title: String, workspace: Option<Workspace>) -> Option<Uuid> {
+        let c = self.client_mut(client_id)?;
+        let i = c.tabs.iter().position(|t| t.id == after)?;
+        let tab = Tab { url: Some(url), title, workspace, ..Tab::default() };
+        let id = tab.id;
+        c.tabs.insert(i + 1, tab);
+        Some(id)
+    }
+
     pub fn can_close_tab(&self, client_id: Uuid, tab_id: Uuid) -> bool {
         let Some(c) = self.client(client_id) else { return false };
         let Some(t) = c.tabs.iter().find(|t| t.id == tab_id) else { return false };
@@ -1019,6 +1030,19 @@ mod tests {
         assert_eq!(store.client(id).unwrap().active_tab_id, Some(first));
         assert!(store.reopen_closed_tab());
         assert_eq!(store.client(id).unwrap().active_tab_id, Some(second));
+    }
+
+    #[test]
+    fn background_tabs_line_up_in_click_order() {
+        let mut store = Store::default();
+        let id = store.add_client("Acme", "#123", None);
+        let page = store.client(id).unwrap().tabs[0].id;
+        let first = store.add_tab(id, Some("https://crm.zoho.com/a".into()), None, None, false).unwrap();
+        let second = store.add_tab_after(id, first, "https://crm.zoho.com/b".into(), "Loading…".into(), None).unwrap();
+        let c = store.client(id).unwrap();
+        assert_eq!(c.tabs.iter().map(|t| t.id).collect::<Vec<_>>(), vec![page, first, second]);
+        assert_eq!(c.active_tab_id, Some(page), "the user stays where they were");
+        assert!(store.add_tab_after(id, Uuid::new_v4(), "https://x".into(), "x".into(), None).is_none());
     }
 
     #[test]

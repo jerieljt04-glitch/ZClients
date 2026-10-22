@@ -339,15 +339,35 @@ pub fn open_in_client_workspace(client: Uuid, url: Url) {
     mutate(ALL, |s| s.open_in_client_workspace(client, &url, None));
 }
 
+thread_local! {
+    /// The last background tab a page opened: (opener tab, new tab).
+    static LAST_BACKGROUND: Cell<Option<(Uuid, Uuid)>> = const { Cell::new(None) };
+}
+
 /// A page opened a new window for a URL this app shows: a new tab after
-/// the current one.
-pub fn open_new_tab_from_page(client: Uuid, ws: Workspace, url: Url) {
+/// the current one. In the background (⌘-click) the user stays on the page
+/// and the tab starts loading straight away, as in any browser; several
+/// background tabs from one page line up in the order they were clicked.
+pub fn open_new_tab_from_page(client: Uuid, ws: Workspace, url: Url, opener: Option<Uuid>, background: bool) {
     let ws = if policy::is_google_search(&url) { Workspace::GoogleSearch } else if ws == Workspace::GoogleSearch && policy::should_open_in_client_workspace(&url) { Workspace::Zoho } else { ws };
     if ws == Workspace::Zoho && client == GOOGLE_SEARCH_ID {
         return open_in_client_workspace(client, url);
     }
-    if let Some(tab) = mutate(ALL, |s| s.add_tab(client, Some(url.to_string()), Some("Loading…".into()), Some(ws), true)) {
-        web::mark_opened_by_page(tab);
+    let after = LAST_BACKGROUND
+        .get()
+        .filter(|(o, t)| background && Some(*o) == opener && store(|s| s.client(client).is_some_and(|c| c.tabs.iter().any(|x| x.id == *t))))
+        .map(|(_, t)| t);
+    let tab = mutate(ALL, |s| match after {
+        Some(a) => s.add_tab_after(client, a, url.to_string(), "Loading…".into(), Some(ws)),
+        None => s.add_tab(client, Some(url.to_string()), Some("Loading…".into()), Some(ws), !background),
+    });
+    let Some(tab) = tab else { return };
+    web::mark_opened_by_page(tab);
+    if background {
+        LAST_BACKGROUND.set(opener.map(|o| (o, tab)));
+        if let Some(t) = store(|s| s.find_tab(tab).cloned()) {
+            web::view_for(client, &t);
+        }
     }
 }
 
