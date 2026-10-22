@@ -111,6 +111,14 @@ pub fn downloads_dir() -> PathBuf {
     home().join("Downloads")
 }
 
+/// PDFs a page opened in a window, kept so they can be shown as a tab.
+/// Each file belongs to one tab and is removed when that tab goes.
+pub fn pdf_previews_dir() -> PathBuf {
+    let dir = support_dir().join("PDF Previews");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
 /// Write via a temporary file and rename, so a crash mid-write can never
 /// leave a half-written file behind.
 pub fn write_atomic(path: &std::path::Path, data: &[u8], mode: u32) -> std::io::Result<()> {

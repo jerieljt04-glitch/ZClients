@@ -314,6 +314,10 @@ define_class!(
         #[unsafe(method(downloadItem:))]
         fn a_download_item(&self, s: Option<&NSMenuItem>) {
             let Some(i) = s.map(|s| s.tag() as usize) else { return };
+            // PDFs open as a tab here, never in Preview.
+            if downloads::show_pdf(i) {
+                return;
+            }
             if let Some(path) = downloads::with_items(|v| v.get(i).and_then(|it| it.path.clone())) {
                 NSWorkspace::sharedWorkspace().openURL(&NSURL::fileURLWithPath(&util::ns(&path.to_string_lossy())));
             }

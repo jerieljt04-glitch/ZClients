@@ -662,6 +662,45 @@ impl Store {
         effects
     }
 
+    /// Close a tab without remembering it for ⌘⇧T: a tab a page opened only
+    /// to start a download has nothing worth bringing back, and reopening it
+    /// would download the file again.
+    pub fn discard_tab(&mut self, client_id: Uuid, tab_id: Uuid) -> Vec<Effect> {
+        let mut effects = self.close_tab(client_id, tab_id);
+        if self.closed.last().is_some_and(|e| e.tab.id == tab_id) {
+            let entry = self.closed.pop().expect("checked above");
+            if let Some(p) = entry.tab.pdf_path {
+                effects.push(Effect::RemoveFile(p));
+            }
+            effects.push(Effect::DropTab(tab_id));
+        }
+        effects
+    }
+
+    /// Show a PDF a page opened as its own tab of `client_id`, right after
+    /// the current tab. `source_url` is where it came from, kept so the tab
+    /// still means something if the saved file is ever gone.
+    pub fn add_pdf_tab(&mut self, client_id: Uuid, pdf_path: &str, title: &str, source_url: Option<String>) -> Option<Uuid> {
+        let c = self.client_mut(client_id)?;
+        let file_url = url::Url::from_file_path(pdf_path).ok().map(|u| u.to_string());
+        let tab = Tab {
+            url: source_url.clone().or(file_url),
+            title: normalized_page_title(Some(title)).unwrap_or_else(|| "PDF".into()),
+            pdf_path: Some(pdf_path.to_string()),
+            pdf_source_url: source_url,
+            workspace: c.is_search().then_some(Workspace::GoogleSearch),
+            ..Tab::default()
+        };
+        let id = tab.id;
+        match c.active_index() {
+            Some(i) => c.tabs.insert(i + 1, tab),
+            None => c.tabs.push(tab),
+        }
+        c.active_tab_id = Some(id);
+        self.active_client_id = Some(client_id);
+        Some(id)
+    }
+
     pub fn reopen_closed_tab(&mut self) -> bool {
         while let Some(entry) = self.closed.pop() {
             let Some(c) = self.client_mut(entry.client_id) else { continue };
@@ -976,6 +1015,43 @@ mod tests {
         assert_eq!(store.client(id).unwrap().active_tab_id, Some(first));
         assert!(store.reopen_closed_tab());
         assert_eq!(store.client(id).unwrap().active_tab_id, Some(second));
+    }
+
+    #[test]
+    fn discarded_tabs_cannot_be_reopened() {
+        let mut store = Store::default();
+        let id = store.add_client("Acme", "#123", None);
+        let first = store.client(id).unwrap().tabs[0].id;
+        let blank = store.add_tab(id, Some("https://workdrive.zoho.com/download/x".into()), None, None, true).unwrap();
+        let effects = store.discard_tab(id, blank);
+        assert_eq!(effects, vec![Effect::ResetTab(blank), Effect::DropTab(blank)]);
+        assert_eq!(store.client(id).unwrap().active_tab_id, Some(first));
+        assert!(!store.reopen_closed_tab(), "nothing to bring back");
+    }
+
+    #[test]
+    fn pdfs_open_as_their_own_tab_after_the_current_one() {
+        let mut store = Store::default();
+        let id = store.add_client("Acme", "#123", None);
+        let first = store.client(id).unwrap().tabs[0].id;
+        let _third = store.add_tab(id, Some("https://crm.zoho.com".into()), None, None, false).unwrap();
+        let pdf = store.add_pdf_tab(id, "/tmp/PDF Previews/a.pdf", "Invoice 12.pdf", Some("https://books.zoho.com/api/inv.pdf".into())).unwrap();
+        let c = store.client(id).unwrap();
+        assert_eq!(c.active_tab_id, Some(pdf));
+        assert_eq!(c.tabs[0].id, first);
+        assert_eq!(c.tabs[1].id, pdf, "inserted next to the tab it came from");
+        let t = &c.tabs[1];
+        assert_eq!(t.display_title(), "Invoice 12.pdf");
+        assert_eq!(t.pdf_path.as_deref(), Some("/tmp/PDF Previews/a.pdf"));
+        assert!(!store.update_tab_meta(pdf, Some("file:///x"), Some("other")), "a PDF tab keeps its name");
+        let effects = store.close_tab(id, pdf);
+        assert_eq!(effects, vec![Effect::ResetTab(pdf)], "file stays while ⌘⇧T can bring it back");
+
+        let blob = store.add_pdf_tab(id, "/tmp/PDF Previews/b.pdf", "", None).unwrap();
+        let t = store.find_tab_mut(blob).unwrap();
+        assert_eq!(t.url.as_deref(), Some("file:///tmp/PDF%20Previews/b.pdf"));
+        assert_eq!(t.title, "PDF");
+        assert!(store.add_pdf_tab(Uuid::new_v4(), "/tmp/x.pdf", "x", None).is_none());
     }
 
     #[test]

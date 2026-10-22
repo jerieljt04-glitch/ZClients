@@ -132,7 +132,7 @@ pub fn apply(effects: Vec<Effect>) {
                 keychain::delete_login(client_id);
             }
             Effect::RemoveFile(path) => {
-                let dir = util::support_dir().join("PDF Previews");
+                let dir = util::pdf_previews_dir();
                 let p = std::path::PathBuf::from(&path);
                 if p.starts_with(&dir) {
                     let _ = std::fs::remove_file(p);
@@ -346,7 +346,51 @@ pub fn open_new_tab_from_page(client: Uuid, ws: Workspace, url: Url) {
     if ws == Workspace::Zoho && client == GOOGLE_SEARCH_ID {
         return open_in_client_workspace(client, url);
     }
-    mutate(ALL, |s| s.add_tab(client, Some(url.to_string()), Some("Loading…".into()), Some(ws), true));
+    if let Some(tab) = mutate(ALL, |s| s.add_tab(client, Some(url.to_string()), Some("Loading…".into()), Some(ws), true)) {
+        web::mark_opened_by_page(tab);
+    }
+}
+
+/// A tab a page opened turned out to be only a download: close it, the way
+/// a browser does.
+pub fn discard_tab(client: Uuid, tab: Uuid) {
+    mutate_apply(ALL, |s| s.discard_tab(client, tab));
+}
+
+/// A PDF finished saving to the previews folder: show it as a tab.
+pub fn open_pdf_tab(client: Uuid, path: std::path::PathBuf, title: String, source_url: Option<String>) -> Option<Uuid> {
+    let p = path.to_string_lossy().into_owned();
+    let tab = mutate(ALL, |s| s.add_pdf_tab(client, &p, &title, source_url));
+    if tab.is_none() {
+        // The profile was deleted while the PDF downloaded.
+        apply(vec![Effect::RemoveFile(p)]);
+    }
+    tab
+}
+
+/// Show a PDF from ~/Downloads as a tab of `client`. The tab gets its own
+/// copy in the previews folder, so closing the tab never touches the user's
+/// file and moving or renaming that file never breaks the tab.
+pub fn open_downloaded_pdf(client: Uuid, path: &std::path::Path, name: &str, source_url: Option<String>) -> Option<Uuid> {
+    store(|s| s.client(client).map(|_| ()))?;
+    let copy = util::pdf_previews_dir().join(format!("{}.pdf", Uuid::new_v4()));
+    if let Err(e) = std::fs::copy(path, &copy) {
+        util::log(format!("could not open {} as a tab: {e}", path.display()));
+        return None;
+    }
+    open_pdf_tab(client, copy, name.to_string(), source_url)
+}
+
+/// Bring a tab (and its profile) to the front. False if it no longer exists.
+pub fn show_tab(client: Uuid, tab: Uuid) -> bool {
+    let exists = store(|s| s.client(client).is_some_and(|c| c.tabs.iter().any(|t| t.id == tab)));
+    if exists {
+        mutate(ALL, |s| {
+            s.select_client(client);
+            s.select_tab(client, tab);
+        });
+    }
+    exists
 }
 
 /// What Enter in the address bar does.

@@ -10,7 +10,7 @@ interface.
 ./build.sh              # test, build universal release, sign, install to /Applications
 ./build.sh --no-install # build and sign into .build/
 ./build.sh --test       # "ZClients Test": separate bundle id and data, safe to experiment
-cargo test              # 34 unit tests (URL policy, model, sessions, vault, downloads)
+cargo test              # 44 unit tests (URL policy, model, sessions, vault, downloads)
 ```
 
 Signing uses the "ZClients Local Signer" identity made by
@@ -30,7 +30,7 @@ same app (camera/mic grants, Keychain access).
 | `keychain.rs` | AES-GCM vault for cookie backups and saved logins, one Keychain key |
 | `tabstate.rs` | Each tab's exact place (history + scroll) across quits |
 | `scripts.rs` | Isolated-world scripts: right-click downloads, sign-in helper |
-| `downloads.rs` | Downloads to ~/Downloads |
+| `downloads.rs` | Downloads to ~/Downloads; PDFs a page opens in a window become tabs |
 | `ui.rs` | Window, sidebar, toolbar, tab strip, launcher, sheets, menus |
 | `suggest.rs` | Address bar: Zoho app names and Google search |
 
@@ -44,3 +44,6 @@ same app (camera/mic grants, Keychain access).
 
 Quit ZClients, then `rm -rf /Applications/ZClients.app && ditto backup/ZClients-Swift.app /Applications/ZClients.app`.
 Profiles and tabs carry over; the Swift app reads `clients.json` unchanged.
+
+To go back to 1.0.0 (before folder downloads and PDF tabs):
+`rm -rf /Applications/ZClients.app && ditto backup/ZClients-1.0.0.app /Applications/ZClients.app`.

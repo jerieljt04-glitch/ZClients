@@ -227,6 +227,7 @@ fn start_context_download(web: &ZWebView, url: &str, name: Option<String>) {
         &[util::any(util::ns(url)), util::any(NSNumber::new_i64(64 * 1024 * 1024))],
     );
     let parsed2 = parsed.clone();
+    let client = web.ivars().client_id;
     let block = RcBlock::new(move |result: *mut AnyObject, _err: *mut NSError| {
         let dict = unsafe { result.as_ref() }.and_then(|r| r.downcast_ref::<NSDictionary>());
         let get = |k: &str| -> Option<String> {
@@ -237,7 +238,7 @@ fn start_context_download(web: &ZWebView, url: &str, name: Option<String>) {
         match get("data").and_then(|b64| decode_base64(&b64)) {
             Some(bytes) => {
                 let name = inline_filename(&parsed2, name.as_deref(), get("type").as_deref());
-                downloads::save_bytes(bytes, &name);
+                downloads::save_bytes(bytes, &name, Some(client));
             }
             None => downloads::record_failure(&fallback),
         }
@@ -393,6 +394,13 @@ pub struct CoordIvars {
     /// Popups opened by a trusted Zoho page may visit other sign-in providers
     /// (OAuth connections in widgets and integrations).
     popup_trusted: bool,
+    /// A page opened this tab or popup and nothing has been shown in it yet.
+    /// If its first load turns out to be a file, it closes once the download
+    /// has started, like a browser tab that only downloaded something.
+    fresh: Cell<bool>,
+    /// The popup's main-frame response is a PDF being fetched to open as a
+    /// tab; holds the address it came from (when that is worth keeping).
+    pending_pdf: RefCell<Option<Option<String>>>,
 }
 
 define_class!(
@@ -417,6 +425,9 @@ define_class!(
         #[unsafe(method(webView:didCommitNavigation:))]
         fn did_commit(&self, web: &WKWebView, _nav: Option<&WKNavigation>) {
             self.ivars().external_probe.set(false);
+            if ns_str_url(unsafe { web.URL() }).is_some_and(|u| u != "about:blank") {
+                self.ivars().fresh.set(false);
+            }
             self.state_changed(web);
         }
 
@@ -459,12 +470,18 @@ define_class!(
 
         #[unsafe(method(webView:navigationResponse:didBecomeDownload:))]
         fn response_became_download(&self, _web: &WKWebView, _r: &WKNavigationResponse, download: &WKDownload) {
-            downloads::adopt(download);
+            let iv = self.ivars();
+            match iv.pending_pdf.take() {
+                Some(source) => downloads::adopt_as_pdf_tab(download, iv.client_id, source),
+                None => downloads::adopt(download),
+            }
+            self.close_if_blank();
         }
 
         #[unsafe(method(webView:navigationAction:didBecomeDownload:))]
         fn action_became_download(&self, _web: &WKWebView, _a: &WKNavigationAction, download: &WKDownload) {
             downloads::adopt(download);
+            self.close_if_blank();
         }
     }
 
@@ -589,7 +606,7 @@ fn ns_str_url(url: Option<Retained<NSURL>>) -> Option<String> {
 }
 
 impl Coordinator {
-    fn new(mtm: MainThreadMarker, client: Uuid, tab: Option<Uuid>, ws: Workspace, popup_trusted: bool) -> Retained<Self> {
+    fn new(mtm: MainThreadMarker, client: Uuid, tab: Option<Uuid>, ws: Workspace, popup_trusted: bool, fresh: bool) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(CoordIvars {
             client_id: client,
             tab_id: tab,
@@ -598,6 +615,8 @@ impl Coordinator {
             external_user: Cell::new(false),
             popup_window: RefCell::new(None),
             popup_trusted,
+            fresh: Cell::new(fresh),
+            pending_pdf: RefCell::new(None),
         });
         unsafe { msg_send![super(this), init] }
     }
@@ -611,6 +630,21 @@ impl Coordinator {
 
     fn trusted_opt(&self, frame: Option<Retained<WKFrameInfo>>) -> bool {
         frame.is_some_and(|f| self.trusted(&f))
+    }
+
+    /// A download started from a tab or popup that never showed anything:
+    /// close it. WebKit keeps the download going without its web view.
+    fn close_if_blank(&self) {
+        let iv = self.ivars();
+        if !iv.fresh.replace(false) {
+            return;
+        }
+        if let Some(win) = iv.popup_window.borrow().clone() {
+            util::later(move || win.close());
+        } else if let Some(tab) = iv.tab_id {
+            let client = iv.client_id;
+            util::later(move || app::discard_tab(client, tab));
+        }
     }
 
     fn state_changed(&self, web: &WKWebView) {
@@ -652,9 +686,9 @@ impl Coordinator {
             return WKNavigationActionPolicy::Cancel;
         }
 
-        // Old PDF previews kept by the Swift build.
+        // PDF tabs (including old previews kept by the Swift build).
         if url.scheme() == "file" {
-            let dir = util::support_dir().join("PDF Previews");
+            let dir = util::pdf_previews_dir();
             let ok = url.to_file_path().is_ok_and(|p| p.starts_with(&dir));
             return if ok { WKNavigationActionPolicy::Allow } else { WKNavigationActionPolicy::Cancel };
         }
@@ -696,9 +730,12 @@ impl Coordinator {
         // Embedded frames (CRM widgets, maps, video, embedded Zoho views)
         // display whatever they load. Only real file responses become
         // downloads. The old build cancelled every off-list frame here, which
-        // is why widgets on zappsusercontent.com never appeared.
+        // is why widgets on zappsusercontent.com never appeared. Zoho starts
+        // many downloads (WorkDrive folders as .zip, exports) in a hidden
+        // frame, often without an "attachment" header: anything WebKit
+        // cannot display there is a file too, or it is silently dropped.
         if !main {
-            return if is_file && disposition.starts_with("attachment") { WKNavigationResponsePolicy::Download } else { WKNavigationResponsePolicy::Allow };
+            return if is_file { WKNavigationResponsePolicy::Download } else { WKNavigationResponsePolicy::Allow };
         }
 
         let url = ns_str_url(response.URL()).and_then(|s| policy::parse(&s));
@@ -709,6 +746,15 @@ impl Coordinator {
         iv.external_probe.set(false);
 
         if is_file {
+            return WKNavigationResponsePolicy::Download;
+        }
+        // A PDF a page opened in a popup window (print previews, invoices,
+        // blob: documents) opens as a tab instead, like any browser. It is
+        // fetched through the popup so cookies, POST bodies and blob: URLs
+        // all still work, then shown from the previews folder.
+        if mime == "application/pdf" && iv.tab_id.is_none() {
+            let source = url.as_ref().filter(|u| policy::is_https(u)).map(|u| u.to_string());
+            *iv.pending_pdf.borrow_mut() = Some(source);
             return WKNavigationResponsePolicy::Download;
         }
         // PDFs display right in the tab (WebKit has a built-in viewer).
@@ -739,18 +785,22 @@ impl Coordinator {
         let source_trusted = self.trusted_opt(unsafe { action.sourceFrame() });
         let user_link = unsafe { action.navigationType() } == WKNavigationType::LinkActivated;
         let sized = unsafe { features.width().is_some() || features.height().is_some() };
+        let request = unsafe { action.request() };
+        // A form posted to a new window (WorkDrive's "download these files
+        // and folders as one .zip" works this way) only works in a web view
+        // that receives the post itself; a new tab would reload it as GET.
+        let is_get = request.HTTPMethod().is_none_or(|m| m.to_string().eq_ignore_ascii_case("GET"));
 
         if let Some(u) = &url {
             if unsafe { action.shouldPerformDownload() } && source_trusted && policy::is_safe_download(u, iv.workspace) {
-                if let Some(nsurl) = util::ns_url(u.as_str()) {
-                    let block = RcBlock::new(|d: NonNull<WKDownload>| downloads::adopt(unsafe { d.as_ref() }));
-                    unsafe { web.startDownloadUsingRequest_completionHandler(&NSURLRequest::requestWithURL(&nsurl), &block) };
-                }
+                // The page's own request, so a POSTed download keeps its body.
+                let block = RcBlock::new(|d: NonNull<WKDownload>| downloads::adopt(unsafe { d.as_ref() }));
+                unsafe { web.startDownloadUsingRequest_completionHandler(&request, &block) };
                 return None;
             }
             // ⌘-click, target=_blank and plain window.open(url) to a page
             // this app shows: a new tab, like any browser.
-            if policy::is_allowed_web(u, iv.workspace) && !sized && iv.tab_id.is_some() {
+            if policy::is_allowed_web(u, iv.workspace) && !sized && is_get && iv.tab_id.is_some() {
                 let (client, ws, u) = (iv.client_id, iv.workspace, u.clone());
                 util::later(move || app::open_new_tab_from_page(client, ws, u));
                 return None;
@@ -784,7 +834,7 @@ impl Coordinator {
         };
         unsafe { window.setReleasedWhenClosed(false) };
         window.setTitle(&util::ns("Loading…"));
-        let coord = Coordinator::new(mtm, iv.client_id, None, iv.workspace, true);
+        let coord = Coordinator::new(mtm, iv.client_id, None, iv.workspace, true, true);
         let popup = new_zweb(mtm, rect, cfg, iv.client_id, iv.workspace);
         unsafe {
             popup.setNavigationDelegate(Some(ProtocolObject::from_ref(&*coord)));
@@ -855,6 +905,9 @@ pub struct Pool {
     lru: Vec<Uuid>,
     active: Option<Uuid>,
     popups: Vec<(Retained<Coordinator>, Retained<ZWebView>)>,
+    /// Tabs a page just opened (target=_blank, window.open) whose web view
+    /// has not been made yet.
+    opened_by_page: HashSet<Uuid>,
     sign_in_attempts: HashMap<Uuid, Vec<Instant>>,
     bridge: Option<Retained<Bridge>>,
     max_live: usize,
@@ -867,6 +920,7 @@ thread_local! {
         lru: vec![],
         active: None,
         popups: vec![],
+        opened_by_page: HashSet::new(),
         sign_in_attempts: HashMap::new(),
         bridge: None,
         max_live: if NSProcessInfo::processInfo().physicalMemory() <= 10 * 1024 * 1024 * 1024 { 4 } else { 6 },
@@ -937,7 +991,8 @@ pub fn view_for(client_id: Uuid, tab: &Tab) -> Retained<ZWebView> {
         let bridge = bridge(p, mtm);
         let cfg = configuration(mtm, &store, &bridge);
         let view = new_zweb(mtm, NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(800.0, 600.0)), &cfg, client_id, ws);
-        let coord = Coordinator::new(mtm, client_id, Some(tab.id), ws, false);
+        let fresh = p.opened_by_page.remove(&tab.id);
+        let coord = Coordinator::new(mtm, client_id, Some(tab.id), ws, false, fresh);
         unsafe {
             view.setNavigationDelegate(Some(ProtocolObject::from_ref(&*coord)));
             view.setUIDelegate(Some(ProtocolObject::from_ref(&*coord)));
@@ -975,7 +1030,7 @@ fn load_tab(view: &ZWebView, tab: &Tab) {
     let ws = tab.effective_workspace();
     if let Some(path) = tab.pdf_path.as_deref().filter(|p| std::path::Path::new(p).exists()) {
         let file = NSURL::fileURLWithPath(&util::ns(path));
-        let dir = NSURL::fileURLWithPath(&util::ns(&util::support_dir().join("PDF Previews").to_string_lossy()));
+        let dir = NSURL::fileURLWithPath(&util::ns(&util::pdf_previews_dir().to_string_lossy()));
         unsafe { view.loadFileURL_allowingReadAccessToURL(&file, &dir) };
         return;
     }
@@ -1090,6 +1145,12 @@ pub fn delete_client(client: Uuid, tabs: &[Uuid]) {
             unsafe { WKWebsiteDataStore::removeDataStoreForIdentifier_completionHandler(&util::ns_uuid(id), &block, MainThreadMarker::new().unwrap()) };
         });
     }
+}
+
+/// The tab was opened by a page, so if all it ever loads is a download it
+/// closes again.
+pub fn mark_opened_by_page(tab: Uuid) {
+    POOL.with_borrow_mut(|p| p.opened_by_page.insert(tab));
 }
 
 pub fn set_active(id: Option<Uuid>) {
@@ -1245,6 +1306,11 @@ pub fn print() {
 
 /// Download whatever the active tab is showing (handy for PDFs).
 pub fn download_current() {
+    // A PDF tab already has the file: save a copy under its own name.
+    if let Some((path, title)) = app::store(|s| s.active_tab().and_then(|(_, t)| Some((t.pdf_path.clone()?, t.title.clone())))) {
+        downloads::save_copy(std::path::Path::new(&path), &downloads::pdf_name(&title));
+        return;
+    }
     let Some(v) = active_view() else { return };
     let Some(url) = ns_str_url(unsafe { v.URL() }) else { return };
     if let Some(nsurl) = util::ns_url(&url) {
