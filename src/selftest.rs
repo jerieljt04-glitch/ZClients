@@ -462,6 +462,114 @@ fn memory_test() {
     });
 }
 
+const CALL_START: &str = r#"
+const s = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 }, audio: true });
+const a = new RTCPeerConnection(), b = new RTCPeerConnection();
+a.onicecandidate = e => e.candidate && b.addIceCandidate(e.candidate);
+b.onicecandidate = e => e.candidate && a.addIceCandidate(e.candidate);
+b.ontrack = e => { window.__zcRemote = e.streams[0]; };
+s.getTracks().forEach(t => a.addTrack(t, s));
+const o = await a.createOffer(); await a.setLocalDescription(o); await b.setRemoteDescription(o);
+const an = await b.createAnswer(); await b.setLocalDescription(an); await a.setRemoteDescription(an);
+window.__zcPc = a; window.__zcStream = s;
+return 'call started: ' + s.getTracks().map(t => t.kind + ' ' + t.readyState).join(', ');
+"#;
+
+const CALL_STATS: &str = r#"
+const r = await window.__zcPc.getStats();
+let v = 0, au = 0;
+r.forEach(x => {
+  if (x.type === 'outbound-rtp' && x.kind === 'video') { v = x.framesEncoded || x.framesSent || 0; }
+  if (x.type === 'outbound-rtp' && x.kind === 'audio') { au = x.packetsSent || 0; }
+});
+const t = window.__zcStream.getTracks().map(t => t.kind + (t.muted ? ' muted' : '') + (t.enabled ? '' : ' disabled') + ' ' + t.readyState).join(', ');
+return JSON.stringify({ v, au, t, pc: window.__zcPc.connectionState, vis: document.visibilityState });
+"#;
+
+fn call_stats(tab: uuid::Uuid, done: impl Fn(serde_json::Value) + 'static) {
+    web::eval_in_tab_async(tab, CALL_STATS, move |r| done(serde_json::from_str(&r).unwrap_or(serde_json::Value::String(r))));
+}
+
+/// Measure a call phase: video frames encoded and audio packets sent per
+/// second over `secs`, read from WebRTC's own counters.
+fn call_phase(tab: uuid::Uuid, label: &'static str, secs: f64) {
+    call_stats(tab, move |a| {
+        util::after(secs, move || {
+            let a = a.clone();
+            call_stats(tab, move |b| {
+                let f = |k: &str, x: &serde_json::Value| x.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0);
+                util::log(format!(
+                    "SELFTEST CALL {label}: video {:.1} fps, audio {:.1} packets/s; tracks [{}] page {} {}; camera={:?} mic={:?} sleep disabler={} tab call icon={:?}",
+                    (f("v", &b) - f("v", &a)) / secs,
+                    (f("au", &b) - f("au", &a)) / secs,
+                    b.get("t").and_then(|v| v.as_str()).unwrap_or("?"),
+                    b.get("vis").and_then(|v| v.as_str()).unwrap_or("?"),
+                    b.get("pc").and_then(|v| v.as_str()).unwrap_or("?"),
+                    web::live_view(tab).map(|v| unsafe { v.cameraCaptureState() }.0),
+                    web::live_view(tab).map(|v| unsafe { v.microphoneCaptureState() }.0),
+                    web::has_sleep_disabler(tab),
+                    web::call_state(tab),
+                ));
+            });
+        });
+    });
+}
+
+/// `ZCLIENTS_SELFTEST=meet` (with ZCLIENTS_MOCK_MEDIA=1): a WebRTC call with
+/// WebKit's fake camera and microphone, measured in front, behind another
+/// tab and with the window minimized; then a screen-share request.
+fn meet_test() {
+    util::after(1.0, || {
+        app::add_client("Call Test", "#aa3355", None, None);
+        app::address_entered(PERF_PAGES[0]);
+    });
+    util::after(12.0, || {
+        let Some(tab) = app::store(|s| s.active_tab().map(|(_, t)| t.id)) else { return };
+        web::eval_in_tab_async(tab, CALL_START, |r| util::log(format!("SELFTEST CALL {r}")));
+        util::after(4.0, move || call_phase(tab, "in front", 4.0));
+        util::after(9.0, move || {
+            app::address_entered_in_new_tab(PERF_PAGES[1]);
+            util::after(2.0, move || call_phase(tab, "behind another tab", 5.0));
+        });
+        util::after(18.0, move || {
+            app::select_tab_index(0);
+            util::after(1.0, || {
+                let app = NSApplication::sharedApplication(MainThreadMarker::new().unwrap());
+                if let Some(w) = app.mainWindow().or_else(|| app.windows().firstObject()) {
+                    w.miniaturize(None);
+                }
+            });
+            util::after(3.0, move || call_phase(tab, "window minimized", 5.0));
+        });
+        util::after(28.0, || {
+            let app = NSApplication::sharedApplication(MainThreadMarker::new().unwrap());
+            if let Some(w) = app.windows().iter().find(|w| w.isMiniaturized()) {
+                w.deminiaturize(None);
+            }
+        });
+        util::after(30.0, move || {
+            // (t = 42 s, after the window is back.) getDisplayMedia needs a
+            // click (user activation) first.
+            web::eval_active("(() => { const b = Object.assign(document.body.appendChild(document.createElement('button')), {id: 'zc-share', textContent: 'share'}); b.style.cssText = 'position:fixed;top:20px;left:20px;width:200px;height:30px;z-index:2147483647'; b.onclick = () => { window.__zcShare = 'asked (no answer yet)'; return navigator.mediaDevices.getDisplayMedia({video: true}).then(s => { window.__zcShare = 'sharing ' + s.getTracks().map(t => t.label || t.kind).join(','); }, e => { window.__zcShare = 'refused: ' + e.name; }); }; return location.host; })()", |r| util::log(format!("SELFTEST CALL share button on {r}")));
+            util::after(0.5, || click_page(60.0, 35.0, NSEventModifierFlags::empty()));
+            util::after(5.5, || web::eval_active("(() => String(window.__zcShare))()", |r| util::log(format!("SELFTEST CALL screen sharing: {r}"))));
+        });
+    });
+    // ⌘D comes from outside: at ~50 s on the Zoho page (control: duplicates
+    // the tab), at ~60 s on a Meet page (must reach Meet, no new tab).
+    util::after(49.0, || util::log(format!("SELFTEST CALL before ⌘D on Zoho: {}", tab_summary())));
+    util::after(52.0, || {
+        util::log(format!("SELFTEST CALL after ⌘D on Zoho: {}", tab_summary()));
+        app::address_entered_in_new_tab("https://meet.google.com/");
+    });
+    util::after(59.0, || util::log(format!("SELFTEST CALL before ⌘D on Meet: {}", tab_summary())));
+    util::after(62.0, || util::log(format!("SELFTEST CALL after ⌘D on Meet: {}", tab_summary())));
+    util::after(64.0, || {
+        util::log("SELFTEST done");
+        NSApplication::sharedApplication(MainThreadMarker::new().unwrap()).terminate(None);
+    });
+}
+
 pub fn start() {
     if !util::is_test_build() {
         return;
@@ -473,6 +581,7 @@ pub fn start() {
         Ok("input") => return input_test(),
         Ok("find") => return find_test(),
         Ok("memory") => return memory_test(),
+        Ok("meet") => return meet_test(),
         Ok(_) => {}
         Err(_) => return,
     }

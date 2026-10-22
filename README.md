@@ -10,7 +10,7 @@ interface.
 ./build.sh              # test, build universal release, sign, install to /Applications
 ./build.sh --no-install # build and sign into .build/
 ./build.sh --test       # "ZClients Test": separate bundle id and data, safe to experiment
-cargo test              # 49 unit tests (URL policy, model, sessions, vault, downloads)
+cargo test              # 50 unit tests (URL policy, model, sessions, vault, downloads)
 ```
 
 Signing uses the "ZClients Local Signer" identity made by
@@ -33,6 +33,11 @@ Run the test app with its own home so nothing real is touched:
 - `find`: logs the find bar and window (full screen, minimized) state twice a
   second while ⌘F / typing / Esc are sent with System Events
   (`ZCLIENTS_FULLSCREEN=1` starts in full screen).
+- `meet`: with `ZCLIENTS_MOCK_MEDIA=1` (WebKit's fake camera, microphone and
+  screens; add `ZCLIENTS_MOCK_PROMPT=1` to keep the app's permission code in
+  the loop) a WebRTC call is measured in front, behind another tab and
+  minimized (video frames / audio packets per second), then screen sharing;
+  ⌘D is sent with System Events on a Zoho page and on a Meet page.
 - `memory`: with `ZCLIENTS_IDLE_SECS=6`, four tabs are shown once and Memory
   Saver should leave only the front tab awake (measure the WebContent
   processes with `footprint`).

@@ -142,6 +142,14 @@ pub fn is_safe_download(url: &Url, workspace: Workspace) -> bool {
     is_https(url) || is_allowed_blob(url, workspace) || url.scheme() == "data"
 }
 
+/// Sites whose camera/microphone (and screen-sharing) requests are granted
+/// without WebKit asking on every call: Google Meet and Zoho's own apps
+/// (Zoho Meeting, Cliq). macOS still asks once per app. Third-party code,
+/// including CRM widgets on zappsusercontent, keeps the per-request prompt.
+pub fn auto_grants_media(url: &Url) -> bool {
+    is_https(url) && (host_lower(url).is_some_and(|h| h == "meet.google.com") || is_zoho_app(url))
+}
+
 /// May an embedded frame turn this response into a download? Only files
 /// served by Zoho itself (WorkDrive folder zips, exports) or a Zoho page's
 /// own blob:/data: URLs. Third-party frames inside a widget (ads, embeds)
@@ -261,6 +269,17 @@ mod tests {
 
     fn u(s: &str) -> Url {
         parse(s).unwrap()
+    }
+
+    #[test]
+    fn calls_on_meet_and_zoho_apps_skip_the_prompt_widgets_do_not() {
+        assert!(auto_grants_media(&u("https://meet.google.com/")));
+        assert!(auto_grants_media(&u("https://meeting.zoho.com/")));
+        assert!(auto_grants_media(&u("https://cliq.zoho.eu/")));
+        assert!(!auto_grants_media(&u("https://123-abc.zappsusercontent.com/")), "third-party widget");
+        assert!(!auto_grants_media(&u("https://www.google.com/")));
+        assert!(!auto_grants_media(&u("http://meet.google.com/")));
+        assert!(!auto_grants_media(&u("https://meet.google.com.evil.net/")));
     }
 
     #[test]

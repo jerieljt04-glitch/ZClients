@@ -42,7 +42,7 @@ use uuid::Uuid;
 use crate::model::{Tab, Workspace};
 use crate::{app, downloads, keychain, policy, scripts, session, tabstate, ui, util};
 
-const KVO_KEYS: &[&str] = &["title", "URL", "canGoBack", "canGoForward", "loading"];
+const KVO_KEYS: &[&str] = &["title", "URL", "canGoBack", "canGoForward", "loading", "cameraCaptureState", "microphoneCaptureState"];
 
 fn safari_user_agent() -> &'static str {
     static UA: std::sync::OnceLock<String> = std::sync::OnceLock::new();
@@ -136,7 +136,8 @@ define_class!(
                 }
                 return true.into();
             }
-            menu_first(event) || unsafe { msg_send![super(self), performKeyEquivalent: event] }
+            let on_meet = ns_str_url(unsafe { self.URL() }).and_then(|u| policy::parse(&u)).is_some_and(|u| policy::is_google_meet(&u));
+            menu_first(event, on_meet) || unsafe { msg_send![super(self), performKeyEquivalent: event] }
         }
 
         #[unsafe(method(mouseDown:))]
@@ -158,9 +159,14 @@ define_class!(
     }
 );
 
-fn menu_first(event: &NSEvent) -> bool {
+fn menu_first(event: &NSEvent, on_meet: bool) -> bool {
     let flags = event.modifierFlags();
     if !flags.intersects(objc2_app_kit::NSEventModifierFlags::Command | objc2_app_kit::NSEventModifierFlags::Control) {
+        return false;
+    }
+    // In Google Meet ⌘D mutes the microphone; the menu's Duplicate Tab must
+    // not take it (it opened a second copy of the call).
+    if is_key(event, "d", objc2_app_kit::NSEventModifierFlags::Command) && on_meet {
         return false;
     }
     let Some(mtm) = MainThreadMarker::new() else { return false };
@@ -402,8 +408,15 @@ define_class!(
 
     impl Observer {
         #[unsafe(method(observeValueForKeyPath:ofObject:change:context:))]
-        fn observe(&self, _key: Option<&NSString>, _object: Option<&AnyObject>, _change: Option<&NSDictionary>, _ctx: *mut c_void) {
+        fn observe(&self, key: Option<&NSString>, _object: Option<&AnyObject>, _change: Option<&NSDictionary>, _ctx: *mut c_void) {
             // Never act inline: KVO can fire from inside our own WebKit calls.
+            if key.is_some_and(|k| k.to_string().ends_with("CaptureState")) {
+                util::later(|| {
+                    refresh_call_state();
+                    app::changed(app::TABS);
+                });
+                return;
+            }
             app::web_state_changed(*self.ivars());
         }
     }
@@ -530,6 +543,21 @@ define_class!(
     }
 
     impl Coordinator {
+        /// Screen sharing (Meet's "Present now"). WebKit only offers
+        /// getDisplayMedia to apps that answer this private delegate method
+        /// (the one Safari implements); without it every request was refused.
+        /// Meet and Zoho's own apps get the system's screen/window picker.
+        #[unsafe(method(_webView:requestDisplayCapturePermissionForOrigin:initiatedByFrame:withSystemAudio:decisionHandler:))]
+        fn display_capture_permission(&self, _web: &WKWebView, origin: &WKSecurityOrigin, _frame: &WKFrameInfo, _audio: Bool, decide: &block2::DynBlock<dyn Fn(isize)>) {
+            const DENY: isize = 0;
+            const SCREEN_PROMPT: isize = 1;
+            let ok = origin_url(origin).is_some_and(|u| policy::auto_grants_media(&u));
+            if util::is_test_build() {
+                util::log(format!("screen sharing requested by {:?}: {}", origin_url(origin).map(|u| u.to_string()), if ok { "picker" } else { "denied" }));
+            }
+            decide.call((if ok { SCREEN_PROMPT } else { DENY },));
+        }
+
         /// The download button in WebKit's PDF viewer. WebKit hands the
         /// document to this (private, Safari-implemented) delegate method and
         /// does nothing at all when it is missing, which is why the button
@@ -597,8 +625,14 @@ define_class!(
 
         #[unsafe(method(webView:requestMediaCapturePermissionForOrigin:initiatedByFrame:type:decisionHandler:))]
         fn media_permission(&self, _web: &WKWebView, origin: &WKSecurityOrigin, _frame: &WKFrameInfo, _kind: WKMediaCaptureType, decide: &block2::DynBlock<dyn Fn(WKPermissionDecision)>) {
-            let allowed = origin_allowed(origin, self.ivars().workspace);
-            decide.call((if allowed { WKPermissionDecision::Prompt } else { WKPermissionDecision::Deny },));
+            let decision = if origin_url(origin).is_some_and(|u| policy::auto_grants_media(&u)) {
+                WKPermissionDecision::Grant
+            } else if origin_allowed(origin, self.ivars().workspace) {
+                WKPermissionDecision::Prompt
+            } else {
+                WKPermissionDecision::Deny
+            };
+            decide.call((decision,));
         }
 
         #[unsafe(method(webView:runOpenPanelWithParameters:initiatedByFrame:completionHandler:))]
@@ -656,6 +690,14 @@ fn new_tab_click(web: &WKWebView, action: &WKNavigationAction) -> bool {
 fn wants_front(web: &WKWebView, action: &WKNavigationAction) -> bool {
     use objc2_app_kit::NSEventModifierFlags as M;
     click_modifiers(web, action).contains(M::Command | M::Shift)
+}
+
+fn origin_url(origin: &WKSecurityOrigin) -> Option<Url> {
+    let (scheme, host, port) = unsafe { (origin.protocol().to_string(), origin.host().to_string(), origin.port()) };
+    if scheme.is_empty() || host.is_empty() {
+        return None;
+    }
+    policy::parse(&if port > 0 { format!("{scheme}://{host}:{port}/") } else { format!("{scheme}://{host}/") })
 }
 
 fn origin_allowed(origin: &WKSecurityOrigin, ws: Workspace) -> bool {
@@ -1070,6 +1112,15 @@ fn configuration(mtm: MainThreadMarker, store: &WKWebsiteDataStore, bridge: &Bri
         let prefs = cfg.preferences();
         prefs.setJavaScriptCanOpenWindowsAutomatically(true);
         prefs.setElementFullscreenEnabled(true);
+        // The call self-test uses WebKit's fake camera, microphone and
+        // screens, so it never touches real devices or raises prompts.
+        if util::is_test_build() && std::env::var_os("ZCLIENTS_MOCK_MEDIA").is_some() {
+            let _: () = msg_send![&*prefs, _setMockCaptureDevicesEnabled: true];
+            // ZCLIENTS_MOCK_PROMPT=1 keeps WebKit asking the UI delegate, so
+            // the app's own permission decisions are exercised too.
+            let ask = std::env::var_os("ZCLIENTS_MOCK_PROMPT").is_some();
+            let _: () = msg_send![&*prefs, _setMockCaptureDevicesPromptEnabled: ask];
+        }
         let ucc = cfg.userContentController();
         let world = WKContentWorld::defaultClientWorld(mtm);
         for (src, main_only) in [(scripts::CONTEXT_HOOK, false), (scripts::LOGIN_HELPER, true)] {
@@ -1180,6 +1231,39 @@ fn touch(p: &mut Pool, id: Uuid) {
 fn in_call(view: &WKWebView) -> bool {
     use objc2_web_kit::WKMediaCaptureState as S;
     unsafe { view.cameraCaptureState() != S::None || view.microphoneCaptureState() != S::None }
+}
+
+/// Camera / microphone in use by a tab (on or muted): `(camera, microphone)`.
+pub fn call_state(tab: Uuid) -> Option<(bool, bool)> {
+    use objc2_web_kit::WKMediaCaptureState as S;
+    let v = live_view(tab)?;
+    let (cam, mic) = unsafe { (v.cameraCaptureState() != S::None, v.microphoneCaptureState() != S::None) };
+    (cam || mic).then_some((cam, mic))
+}
+
+thread_local! {
+    static CALL_ACTIVITY: RefCell<Option<Retained<ProtocolObject<dyn NSObjectProtocol>>>> = const { RefCell::new(None) };
+}
+
+/// While any tab is in a call, keep the display awake and the app out of
+/// App Nap (WebKit holds no sleep assertion for a WebRTC call, so a long
+/// meeting spent listening could dim and sleep the screen). Released as
+/// soon as the last call ends.
+fn refresh_call_state() {
+    let calling = POOL.with_borrow(|p| p.live.values().any(|l| in_call(&l.view)));
+    CALL_ACTIVITY.with_borrow_mut(|a| match (calling, a.is_some()) {
+        (true, false) => {
+            use objc2_foundation::NSActivityOptions as O;
+            let options = O::UserInitiated | O::IdleDisplaySleepDisabled | O::LatencyCritical;
+            *a = Some(NSProcessInfo::processInfo().beginActivityWithOptions_reason(options, &util::ns("A call is in progress")));
+        }
+        (false, true) => {
+            if let Some(activity) = a.take() {
+                unsafe { NSProcessInfo::processInfo().endActivity(&activity) };
+            }
+        }
+        _ => {}
+    });
 }
 
 /// How long a background tab may go unseen before Memory Saver puts it to
@@ -1354,6 +1438,7 @@ pub fn release(id: Uuid) {
         p.live.remove(&id)
     });
     if let Some(l) = live {
+        util::later(refresh_call_state);
         unsafe {
             for key in KVO_KEYS {
                 l.view.removeObserver_forKeyPath(&l.observer, &util::ns(key));
@@ -1556,6 +1641,26 @@ pub fn eval_active(js: &str, done: impl Fn(String) + 'static) {
         done(text);
     });
     unsafe { v.evaluateJavaScript_completionHandler(&util::ns(js), Some(&block)) };
+}
+
+/// Run an async JavaScript function body (it may `await`) in a tab's page,
+/// awake or not in front, and hand back its string result (self-tests).
+pub fn eval_in_tab_async(tab: Uuid, js: &str, done: impl Fn(String) + 'static) {
+    let Some(v) = live_view(tab) else { return done("no web view".into()) };
+    let block = RcBlock::new(move |r: *mut AnyObject, e: *mut NSError| {
+        let text = unsafe { r.as_ref() }
+            .and_then(|r| r.downcast_ref::<NSString>().map(|s| s.to_string()))
+            .or_else(|| unsafe { e.as_ref() }.map(|e| format!("error: {}", e.localizedDescription())))
+            .unwrap_or_else(|| "(no result)".into());
+        done(text);
+    });
+    let world = unsafe { WKContentWorld::pageWorld(MainThreadMarker::new().unwrap()) };
+    unsafe { v.callAsyncJavaScript_arguments_inFrame_inContentWorld_completionHandler(&util::ns(js), None, None, &world, Some(&block)) };
+}
+
+/// WebKit is holding off system sleep for this tab (private, diagnostics).
+pub fn has_sleep_disabler(tab: Uuid) -> bool {
+    live_view(tab).is_some_and(|v| unsafe { msg_send![&*v, _hasSleepDisabler] })
 }
 
 /// Print the active page with the standard print panel.

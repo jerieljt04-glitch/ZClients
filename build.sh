@@ -26,8 +26,8 @@ if [ "$MODE" = "test" ]; then
   APP_NAME="ZClients Test"
   BUNDLE_ID="com.zport.swift.test"
 fi
-VERSION="1.3.0"
-BUILD_NUMBER="13"
+VERSION="1.4.0"
+BUILD_NUMBER="14"
 OUT=".build"
 # Assemble and sign off the Desktop: iCloud/File Provider attaches extended
 # attributes there that codesign rejects.

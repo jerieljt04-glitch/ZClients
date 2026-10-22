@@ -990,7 +990,11 @@ fn layout_chip(chip: &TabChip) {
     let subs = chip.subviews();
     // [dot, title, close?]
     if let Some(dot) = subs.iter().next() {
-        dot.setFrame(rect(10.0, (b.height - 8.0) / 2.0, 8.0, 8.0));
+        if dot.isKindOfClass(<NSImageView as objc2::ClassType>::class()) {
+            dot.setFrame(rect(7.0, (b.height - 14.0) / 2.0, 14.0, 14.0));
+        } else {
+            dot.setFrame(rect(10.0, (b.height - 8.0) / 2.0, 8.0, 8.0));
+        }
     }
     let close_w = if subs.len() > 2 { 22.0 } else { 6.0 };
     if let Some(title) = subs.iter().nth(1) {
@@ -1098,7 +1102,8 @@ fn refresh_tabs() {
         // rebuilding every chip each time was the tab strip's main cost.
         let title = t.display_title();
         let color = tab_color(t);
-        let key = format!("{i}|{is_active}|{closable}|{color}|{title}");
+        let call = web::call_state(t.id);
+        let key = format!("{i}|{is_active}|{closable}|{color}|{title}|{call:?}");
         if *chip.ivars().rendered.borrow() == key {
             continue;
         }
@@ -1107,11 +1112,19 @@ fn refresh_tabs() {
         }
         let bg = if is_active { NSColor::controlAccentColor().colorWithAlphaComponent(0.16) } else { NSColor::clearColor() };
         set_layer_color(chip, &bg, 7.0);
-        let dot = NSView::initWithFrame(NSView::alloc(mtm), rect(0.0, 0.0, 8.0, 8.0));
-        set_layer_color(&dot, &util::color(&color), 4.0);
-        chip.addSubview(&dot);
+        // A tab in a call shows a red camera (or microphone) instead of its
+        // colour dot, so the call is easy to find among the tabs.
+        if let Some((camera, _)) = call {
+            let icon = NSImageView::imageViewWithImage(&symbol(if camera { "video.fill" } else { "mic.fill" }).unwrap_or_else(NSImage::new), mtm);
+            icon.setContentTintColor(Some(&NSColor::systemRedColor()));
+            chip.addSubview(&icon);
+        } else {
+            let dot = NSView::initWithFrame(NSView::alloc(mtm), rect(0.0, 0.0, 8.0, 8.0));
+            set_layer_color(&dot, &util::color(&color), 4.0);
+            chip.addSubview(&dot);
+        }
         chip.addSubview(&label(&title, 12.0, is_active));
-        chip.setToolTip(Some(&util::ns(&title)));
+        chip.setToolTip(Some(&util::ns(&if call.is_some() { format!("{title} — in a call") } else { title.clone() })));
         if *closable {
             let close = sym_button("xmark", "Close tab (⌘W)", sel!(tabClose:));
             close.setTag(i as isize);
