@@ -5,8 +5,11 @@
 //! less, 16 up to 20 GB, otherwise 24): a background tab costs little,
 //! because macOS compresses it, and putting one to sleep means it reloads
 //! when the user comes back, which looks like a refresh nobody asked for.
-//! Only real memory pressure puts tabs to sleep early. A tab that goes to
-//! sleep saves its exact place first and wakes up there, still signed in.
+//! Only real memory pressure puts tabs to sleep early, and Memory Saver puts
+//! a background tab to sleep once nobody has looked at it for two hours (one
+//! when memory is tight). A tab in a call is never put to sleep. A tab that
+//! goes to sleep saves its exact place first and wakes up there, still signed
+//! in.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -1013,6 +1016,10 @@ pub struct Pool {
     lru: Vec<Uuid>,
     active: Option<Uuid>,
     popups: Vec<(Retained<Coordinator>, Retained<ZWebView>)>,
+    /// When each awake tab was last in front (or woken).
+    shown: HashMap<Uuid, Instant>,
+    /// The latest macOS memory-pressure level.
+    pressure: usize,
     /// Tabs a page just opened (target=_blank, window.open) whose web view
     /// has not been made yet.
     opened_by_page: HashSet<Uuid>,
@@ -1028,6 +1035,8 @@ thread_local! {
         lru: vec![],
         active: None,
         popups: vec![],
+        shown: HashMap::new(),
+        pressure: PRESSURE_NORMAL,
         opened_by_page: HashSet::new(),
         sign_in_attempts: HashMap::new(),
         bridge: None,
@@ -1163,6 +1172,41 @@ fn load_tab(view: &ZWebView, tab: &Tab) {
 fn touch(p: &mut Pool, id: Uuid) {
     p.lru.retain(|x| *x != id);
     p.lru.push(id);
+    p.shown.insert(id, Instant::now());
+}
+
+/// A tab in a call (camera or microphone on, e.g. Google Meet) is never put
+/// to sleep: that would hang up.
+fn in_call(view: &WKWebView) -> bool {
+    use objc2_web_kit::WKMediaCaptureState as S;
+    unsafe { view.cameraCaptureState() != S::None || view.microphoneCaptureState() != S::None }
+}
+
+/// How long a background tab may go unseen before Memory Saver puts it to
+/// sleep: two hours (Chrome's default), one while memory is tight.
+fn idle_limit(pressure: usize) -> Duration {
+    // The memory self-test shortens the wait (test builds only).
+    if let Some(secs) = std::env::var("ZCLIENTS_IDLE_SECS").ok().filter(|_| util::is_test_build() && !cfg!(test)).and_then(|s| s.parse().ok()) {
+        return Duration::from_secs(secs);
+    }
+    if pressure & (PRESSURE_WARN | PRESSURE_CRITICAL) != 0 { Duration::from_secs(3600) } else { Duration::from_secs(2 * 3600) }
+}
+
+/// Memory Saver: background tabs nobody has looked at for a long time go to
+/// sleep and give their memory back (a Zoho app holds 0.5 GB or more); they
+/// wake at their saved place when shown. Runs every few minutes.
+pub fn sleep_idle_tabs() {
+    let victims: Vec<Uuid> = POOL.with_borrow(|p| {
+        let limit = idle_limit(p.pressure);
+        p.live
+            .iter()
+            .filter(|(id, l)| Some(**id) != p.active && !in_call(&l.view) && p.shown.get(*id).is_some_and(|t| t.elapsed() > limit))
+            .map(|(id, _)| *id)
+            .collect()
+    });
+    for id in victims {
+        sleep_tab(id);
+    }
 }
 
 fn base_live_cap() -> usize {
@@ -1209,7 +1253,10 @@ fn cap_for_pressure(level: usize) -> usize {
 
 fn set_pressure(level: usize) {
     let cap = cap_for_pressure(level);
-    let changed = POOL.with_borrow_mut(|p| std::mem::replace(&mut p.max_live, cap) != cap);
+    let changed = POOL.with_borrow_mut(|p| {
+        p.pressure = level;
+        std::mem::replace(&mut p.max_live, cap) != cap
+    });
     if changed {
         util::log(format!("memory pressure {level}: keeping {cap} tabs awake"));
     }
@@ -1256,6 +1303,13 @@ mod pressure_tests {
     use super::*;
 
     #[test]
+    fn memory_saver_waits_two_hours_or_one_when_memory_is_tight() {
+        assert_eq!(idle_limit(PRESSURE_NORMAL), Duration::from_secs(7200));
+        assert_eq!(idle_limit(PRESSURE_WARN), Duration::from_secs(3600));
+        assert_eq!(idle_limit(PRESSURE_CRITICAL), Duration::from_secs(3600));
+    }
+
+    #[test]
     fn pressure_lowers_the_awake_tab_count_but_a_warning_keeps_eight() {
         let base = base_live_cap();
         assert!(base >= 10);
@@ -1272,7 +1326,7 @@ fn enforce_cap() {
             if p.live.len() <= p.max_live {
                 return None;
             }
-            p.lru.iter().copied().find(|id| Some(*id) != p.active)
+            p.lru.iter().copied().find(|id| Some(*id) != p.active && !p.live.get(id).is_some_and(|l| in_call(&l.view)))
         });
         match victim {
             Some(id) => sleep_tab(id),
@@ -1292,6 +1346,7 @@ pub fn sleep_tab(id: Uuid) {
 /// to show a different page).
 pub fn release(id: Uuid) {
     let live = POOL.with_borrow_mut(|p| {
+        p.shown.remove(&id);
         p.lru.retain(|x| *x != id);
         if p.active == Some(id) {
             p.active = None;
@@ -1370,6 +1425,11 @@ pub fn set_active(id: Option<Uuid>) {
     let previous = POOL.with_borrow_mut(|p| {
         let prev = p.active;
         p.active = id;
+        // The tab being left was in view until now: Memory Saver counts
+        // from here, not from when it was brought to the front.
+        if let Some(prev) = prev.filter(|prev| Some(*prev) != id && p.live.contains_key(prev)) {
+            p.shown.insert(prev, Instant::now());
+        }
         if let Some(id) = id {
             touch(p, id);
         }

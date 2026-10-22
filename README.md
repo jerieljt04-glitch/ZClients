@@ -10,7 +10,7 @@ interface.
 ./build.sh              # test, build universal release, sign, install to /Applications
 ./build.sh --no-install # build and sign into .build/
 ./build.sh --test       # "ZClients Test": separate bundle id and data, safe to experiment
-cargo test              # 47 unit tests (URL policy, model, sessions, vault, downloads)
+cargo test              # 49 unit tests (URL policy, model, sessions, vault, downloads)
 ```
 
 Signing uses the "ZClients Local Signer" identity made by
@@ -30,6 +30,12 @@ Run the test app with its own home so nothing real is touched:
   link and on a link a page script opens (background tabs). Add
   `ZCLIENTS_REAL_KEYS=1` and send the keys with System Events, because
   synthesized key events do not behave like a real keyboard here.
+- `find`: logs the find bar and window (full screen, minimized) state twice a
+  second while ⌘F / typing / Esc are sent with System Events
+  (`ZCLIENTS_FULLSCREEN=1` starts in full screen).
+- `memory`: with `ZCLIENTS_IDLE_SECS=6`, four tabs are shown once and Memory
+  Saver should leave only the front tab awake (measure the WebContent
+  processes with `footprint`).
 
 ## Layout
 

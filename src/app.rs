@@ -413,6 +413,13 @@ pub fn show_tab(client: Uuid, tab: Uuid) -> bool {
     exists
 }
 
+/// Self-test helper: open `url` in a new tab in front.
+pub fn address_entered_in_new_tab(url: &str) {
+    if let (Some(client), Some(u)) = (store(|s| s.active_client_id), policy::parse(url)) {
+        mutate(ALL, |s| s.add_tab(client, Some(u.to_string()), None, None, true));
+    }
+}
+
 /// What Enter in the address bar does.
 pub fn address_entered(text: &str) {
     let text = text.trim();
@@ -467,6 +474,7 @@ pub fn start_background_work() {
     std::mem::forget(util::every(45.0, || web::capture_sessions(false)));
     std::mem::forget(util::every(60.0, web::save_all_states));
     web::watch_memory_pressure();
+    std::mem::forget(util::every(300.0, web::sleep_idle_tabs));
     util::after(3.0, crate::session::migrate_legacy);
 }
 

@@ -437,6 +437,31 @@ fn find_test() {
     });
 }
 
+/// `ZCLIENTS_SELFTEST=memory` (with ZCLIENTS_IDLE_SECS=6): four tabs are
+/// opened and each shown once; after the idle wait Memory Saver should leave
+/// only the tab in front awake. The script outside measures page memory.
+fn memory_test() {
+    util::after(1.0, || {
+        app::add_client("Memory Test", "#448866", None, None);
+        app::address_entered(PERF_PAGES[0]);
+    });
+    for (i, page) in PERF_PAGES[1..4].iter().enumerate() {
+        util::after(6.0 + i as f64 * 5.0, move || app::address_entered_in_new_tab(page));
+    }
+    util::after(24.0, || {
+        app::select_tab_index(0);
+        util::log(format!("SELFTEST MEMORY awake before idle: {} (pid {})", web::live_tabs().len(), std::process::id()));
+    });
+    util::after(40.0, || {
+        web::sleep_idle_tabs();
+        util::log(format!("SELFTEST MEMORY awake after Memory Saver: {} — {}", web::live_tabs().len(), tab_summary()));
+    });
+    util::after(52.0, || {
+        util::log("SELFTEST done");
+        NSApplication::sharedApplication(MainThreadMarker::new().unwrap()).terminate(None);
+    });
+}
+
 pub fn start() {
     if !util::is_test_build() {
         return;
@@ -447,6 +472,7 @@ pub fn start() {
         Ok("downloads") => return downloads_test(),
         Ok("input") => return input_test(),
         Ok("find") => return find_test(),
+        Ok("memory") => return memory_test(),
         Ok(_) => {}
         Err(_) => return,
     }
