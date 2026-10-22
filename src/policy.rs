@@ -142,6 +142,14 @@ pub fn is_safe_download(url: &Url, workspace: Workspace) -> bool {
     is_https(url) || is_allowed_blob(url, workspace) || url.scheme() == "data"
 }
 
+/// May an embedded frame turn this response into a download? Only files
+/// served by Zoho itself (WorkDrive folder zips, exports) or a Zoho page's
+/// own blob:/data: URLs. Third-party frames inside a widget (ads, embeds)
+/// cannot drop files into ~/Downloads without a click.
+pub fn is_frame_download_allowed(url: &Url, workspace: Workspace) -> bool {
+    is_zoho_family(url) || is_allowed_blob(url, workspace) || url.scheme() == "data"
+}
+
 /// Zoho and Meet results found in Google Search open as normal client tabs, so
 /// they use that client's signed-in profile instead of the Search store.
 pub fn should_open_in_client_workspace(url: &Url) -> bool {
@@ -253,6 +261,16 @@ mod tests {
 
     fn u(s: &str) -> Url {
         parse(s).unwrap()
+    }
+
+    #[test]
+    fn only_zoho_frames_may_download_without_a_click() {
+        assert!(is_frame_download_allowed(&u("https://download.zoho.com/v1/workdrive/download/abc"), Workspace::Zoho));
+        assert!(is_frame_download_allowed(&u("https://workdrive.zohoexternal.com/file/x"), Workspace::Zoho));
+        assert!(is_frame_download_allowed(&u("blob:https://workdrive.zoho.com/1234"), Workspace::Zoho));
+        assert!(!is_frame_download_allowed(&u("https://ads.example.com/setup.dmg"), Workspace::Zoho));
+        assert!(!is_frame_download_allowed(&u("blob:https://evil.example/1234"), Workspace::Zoho));
+        assert!(!is_frame_download_allowed(&u("http://download.zoho.com/x.zip"), Workspace::Zoho));
     }
 
     #[test]

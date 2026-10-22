@@ -836,7 +836,11 @@ impl Coordinator {
         // frame, often without an "attachment" header: anything WebKit
         // cannot display there is a file too, or it is silently dropped.
         if !main {
-            return if is_file { WKNavigationResponsePolicy::Download } else { WKNavigationResponsePolicy::Allow };
+            if !is_file {
+                return WKNavigationResponsePolicy::Allow;
+            }
+            let from_zoho = ns_str_url(response.URL()).and_then(|s| policy::parse(&s)).is_some_and(|u| policy::is_frame_download_allowed(&u, iv.workspace));
+            return if from_zoho { WKNavigationResponsePolicy::Download } else { WKNavigationResponsePolicy::Cancel };
         }
 
         let url = ns_str_url(response.URL()).and_then(|s| policy::parse(&s));

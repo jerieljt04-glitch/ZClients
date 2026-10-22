@@ -79,12 +79,14 @@ pub fn home() -> PathBuf {
 
 /// `~/Library/Application Support/ZPortSwift` — the Swift build's folder, so
 /// profiles carry over untouched.
-/// A test build ("ZClients Test", or any run with ZCLIENTS_SUPPORT_DIR set)
-/// keeps all of its data apart from the real app's.
+/// A test build ("ZClients Test", or `cargo test` with ZCLIENTS_SUPPORT_DIR
+/// set) keeps all of its data apart from the real app's. An environment
+/// variable alone never makes the real app a test build: that would move its
+/// vault key out of the Keychain into a plain file and enable self-tests.
 pub fn is_test_build() -> bool {
     static TEST: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *TEST.get_or_init(|| {
-        std::env::var_os("ZCLIENTS_SUPPORT_DIR").is_some()
+        (cfg!(test) && std::env::var_os("ZCLIENTS_SUPPORT_DIR").is_some())
             || objc2_foundation::NSBundle::mainBundle().bundleIdentifier().is_some_and(|b| b.to_string().ends_with(".test"))
     })
 }

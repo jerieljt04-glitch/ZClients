@@ -49,7 +49,12 @@ pub const CONTEXT_HOOK: &str = r#"
 pub const LOGIN_HELPER: &str = r#"
 (function () {
   if (window.__zcLogin) { return; }
-  if (!/^accounts\.zoho(cloud)?\.[a-z.]+$/i.test(location.hostname)) { return; }
+  // Exactly Zoho's sign-in hosts (as policy::is_zoho_sign_in): a loose
+  // pattern would also match accounts.zoho.example.com.
+  var zoho = ['zoho.com', 'zoho.eu', 'zoho.in', 'zoho.com.au', 'zoho.jp', 'zoho.ca', 'zoho.sa',
+              'zoho.com.cn', 'zoho.uk', 'zohocloud.ca'];
+  var host = location.hostname.toLowerCase();
+  if (location.protocol !== 'https:' || !zoho.some(function (d) { return host === 'accounts.' + d || (host.slice(0, 9) === 'accounts.' && host.slice(-(d.length + 1)) === '.' + d); })) { return; }
   window.__zcLogin = true;
 
   function visible(el) { return !!el && !el.disabled && el.offsetParent !== null && el.getClientRects().length > 0; }

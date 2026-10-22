@@ -113,7 +113,10 @@ fn update(key: usize, f: impl FnOnce(&mut Item)) {
 /// A server controls the suggested name, so reduce it to one plain file name:
 /// no directories, no leading dots, no colons, bounded length.
 pub fn safe_filename(name: &str) -> String {
-    let last = name.replace('\0', "").rsplit('/').find(|s| !s.is_empty()).unwrap_or("").to_string();
+    // Control characters, and the invisible direction marks that can make
+    // "invoice\u{202E}fdp.exe" display as "invoiceexe.pdf", are dropped.
+    let visible: String = name.chars().filter(|c| !c.is_control() && !is_direction_mark(*c)).collect();
+    let last = visible.rsplit('/').find(|s| !s.is_empty()).unwrap_or("").to_string();
     let mut f = last.replace(':', "-").trim().to_string();
     while f.starts_with('.') {
         f.remove(0);
@@ -127,6 +130,10 @@ pub fn safe_filename(name: &str) -> String {
 
 /// A free name in `dir`. Files still downloading count as taken: WebKit only
 /// creates them as bytes arrive, and two downloads given the same path fail.
+fn is_direction_mark(c: char) -> bool {
+    matches!(c, '\u{200E}' | '\u{200F}' | '\u{061C}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+}
+
 pub fn unique_path(dir: &Path, name: &str) -> PathBuf {
     let in_flight: Vec<PathBuf> =
         ITEMS.with_borrow(|v| v.iter().filter(|i| i.state == State::Downloading).filter_map(|i| i.path.clone()).collect());
@@ -387,6 +394,10 @@ mod tests {
         assert_eq!(safe_filename(".hidden"), "hidden");
         assert_eq!(safe_filename("a:b.pdf"), "a-b.pdf");
         assert_eq!(safe_filename("report.pdf"), "report.pdf");
+        assert_eq!(safe_filename("invoice\u{202E}fdp.exe"), "invoicefdp.exe", "no disguised extensions");
+        assert_eq!(safe_filename("a\u{2066}b\u{200F}.zip"), "ab.zip");
+        assert_eq!(safe_filename("line\nbreak\t.pdf"), "linebreak.pdf");
+        assert_eq!(safe_filename("Отчёт 2026.pdf"), "Отчёт 2026.pdf", "ordinary non-Latin names stay");
     }
 
     #[test]
