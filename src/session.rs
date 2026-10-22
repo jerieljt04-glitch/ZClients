@@ -215,6 +215,11 @@ fn write_backup(id: Uuid, cookies: &[StoredCookie]) -> bool {
     keychain::write_session(id, &data)
 }
 
+fn write_backup_soon(id: Uuid, cookies: &[StoredCookie]) -> bool {
+    let data = serde_json::to_vec(&Jar { version: 2, cookies: cookies.to_vec() }).unwrap_or_default();
+    keychain::write_session_soon(id, &data)
+}
+
 /// Put back any backed-up cookie `store` is missing, then call `done` on the
 /// main thread. Repeat calls never restore twice; callers that arrive while a
 /// restore is running are queued behind it, which is what lets a tab hold its
@@ -303,7 +308,7 @@ pub fn capture(store: &WKWebsiteDataStore, id: Uuid, done: Option<Box<dyn FnOnce
             }
             let hash = jar_hash(&backup);
             let changed = KEEPER.with_borrow(|k| k.last_written.get(&id) != Some(&hash));
-            if changed && write_backup(id, &backup) {
+            if changed && write_backup_soon(id, &backup) {
                 KEEPER.with_borrow_mut(|k| k.last_written.insert(id, hash));
             }
         }

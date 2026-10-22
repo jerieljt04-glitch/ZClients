@@ -10,12 +10,22 @@ interface.
 ./build.sh              # test, build universal release, sign, install to /Applications
 ./build.sh --no-install # build and sign into .build/
 ./build.sh --test       # "ZClients Test": separate bundle id and data, safe to experiment
-cargo test              # 44 unit tests (URL policy, model, sessions, vault, downloads)
+cargo test              # 46 unit tests (URL policy, model, sessions, vault, downloads)
 ```
 
 Signing uses the "ZClients Local Signer" identity made by
 `../zport-swift/setup_signing_identity.sh`, so macOS treats every build as the
 same app (camera/mic grants, Keychain access).
+
+## Self-tests (test build only)
+
+Run the test app with its own home so nothing real is touched:
+`HOME=/tmp/zc ZCLIENTS_SELFTEST=<mode> ".build/ZClients Test.app/Contents/MacOS/ZClients"`
+
+- `downloads`: PDF popups become tabs, hidden-frame and popup zips download,
+  downloaded PDFs open as tabs, the PDF viewer's download button saves.
+- `perf`: launch time, tab strip/toolbar cost, tab switches and saves with 12
+  tabs open (main-thread milliseconds).
 
 ## Layout
 

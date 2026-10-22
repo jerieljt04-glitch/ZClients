@@ -446,6 +446,7 @@ pub fn start_background_work() {
     // macOS can batch the wake-ups.
     std::mem::forget(util::every(45.0, || web::capture_sessions(false)));
     std::mem::forget(util::every(60.0, web::save_all_states));
+    web::watch_memory_pressure();
     util::after(3.0, crate::session::migrate_legacy);
 }
 
@@ -459,4 +460,5 @@ pub fn app_will_quit() {
     web::save_all_states();
     web::capture_sessions(true);
     save_now(true);
+    util::flush_writes();
 }

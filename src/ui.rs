@@ -94,6 +94,8 @@ pub struct ChipIvars {
     tab: Uuid,
     down: Cell<Option<NSPoint>>,
     dragged: Cell<bool>,
+    /// What the chip currently shows; it is only rebuilt when this changes.
+    rendered: RefCell<String>,
 }
 
 define_class!(
@@ -614,8 +616,17 @@ pub(crate) fn label(text: &str, size: f64, bold: bool) -> Retained<NSTextField> 
     l
 }
 
+/// SF Symbols images, made once each: every tab chip's close button and the
+/// toolbar's reload/stop icon used to build a fresh image on each refresh.
 pub(crate) fn symbol(name: &str) -> Option<Retained<NSImage>> {
-    NSImage::imageWithSystemSymbolName_accessibilityDescription(&util::ns(name), None)
+    thread_local! {
+        static CACHE: RefCell<std::collections::HashMap<String, Option<Retained<NSImage>>>> = RefCell::new(std::collections::HashMap::new());
+    }
+    CACHE.with_borrow_mut(|c| {
+        c.entry(name.to_string())
+            .or_insert_with(|| NSImage::imageWithSystemSymbolName_accessibilityDescription(&util::ns(name), None))
+            .clone()
+    })
 }
 
 pub(crate) fn sym_button(name: &str, tip: &str, action: Sel) -> Retained<NSButton> {
@@ -864,8 +875,11 @@ pub fn build() {
     };
     UI.with_borrow_mut(|u| *u = Some(ui));
     build_menu();
-    refresh(app::ALL);
+    // Window first, page second: creating the first web view (and starting
+    // its web content process) used to happen before anything was on screen.
+    refresh(app::SIDEBAR | app::TABS | app::TOOLBAR);
     window.makeKeyAndOrderFront(None);
+    util::later(|| refresh(app::CONTENT | app::TABS));
     if std::env::var_os("ZCLIENTS_DEBUG").is_some() {
         let f = window.frame();
         let close = window.standardWindowButton(objc2_app_kit::NSWindowButton::CloseButton);
@@ -875,6 +889,7 @@ pub fn build() {
         ));
         if let Some(screen) = window.screen() { util::log(format!("screen {:?}", screen.frame())); }
     }
+
 }
 
 // ---------------------------------------------------------------------------
@@ -993,6 +1008,7 @@ pub fn refresh(what: u8) {
     if what & app::TABS != 0 {
         refresh_tabs();
     }
+
     if what & (app::TOOLBAR | app::CONTENT) != 0 {
         refresh_toolbar();
     }
@@ -1045,7 +1061,7 @@ fn refresh_tabs() {
     } else {
         tabs.iter()
             .map(|(t, _)| {
-                let this = TabChip::alloc(mtm).set_ivars(ChipIvars { client, tab: t.id, down: Cell::new(None), dragged: Cell::new(false) });
+                let this = TabChip::alloc(mtm).set_ivars(ChipIvars { client, tab: t.id, down: Cell::new(None), dragged: Cell::new(false), rendered: RefCell::new(String::new()) });
                 let chip: Retained<TabChip> = unsafe { msg_send![super(this), initWithFrame: rect(0.0, 0.0, 150.0, 28.0)] };
                 chip
             })
@@ -1053,22 +1069,29 @@ fn refresh_tabs() {
     };
 
     for (i, ((t, closable), chip)) in tabs.iter().zip(chips.iter()).enumerate() {
-        for v in chip.subviews().iter() {
-            v.removeFromSuperview();
-        }
         let is_active = Some(t.id) == active;
-        let bg = if is_active { NSColor::controlAccentColor().colorWithAlphaComponent(0.16) } else { NSColor::clearColor() };
-        set_layer_color(chip, &bg, 7.0);
         // A sleeping tab is dimmed; it wakes, signed in and at its place,
         // when selected.
         let asleep = t.url.is_some() && !live.contains(&t.id) && !is_active;
         if !chip.ivars().dragged.get() {
             chip.setAlphaValue(if asleep { 0.55 } else { 1.0 });
         }
-        let dot = NSView::initWithFrame(NSView::alloc(mtm), rect(0.0, 0.0, 8.0, 8.0));
-        set_layer_color(&dot, &util::color(&tab_color(t)), 4.0);
-        chip.addSubview(&dot);
+        // Pages retitle themselves constantly (unread counts, loading);
+        // rebuilding every chip each time was the tab strip's main cost.
         let title = t.display_title();
+        let color = tab_color(t);
+        let key = format!("{i}|{is_active}|{closable}|{color}|{title}");
+        if *chip.ivars().rendered.borrow() == key {
+            continue;
+        }
+        for v in chip.subviews().iter() {
+            v.removeFromSuperview();
+        }
+        let bg = if is_active { NSColor::controlAccentColor().colorWithAlphaComponent(0.16) } else { NSColor::clearColor() };
+        set_layer_color(chip, &bg, 7.0);
+        let dot = NSView::initWithFrame(NSView::alloc(mtm), rect(0.0, 0.0, 8.0, 8.0));
+        set_layer_color(&dot, &util::color(&color), 4.0);
+        chip.addSubview(&dot);
         chip.addSubview(&label(&title, 12.0, is_active));
         chip.setToolTip(Some(&util::ns(&title)));
         if *closable {
@@ -1077,6 +1100,7 @@ fn refresh_tabs() {
             chip.addSubview(&close);
         }
         layout_chip(chip);
+        chip.ivars().rendered.replace(key);
     }
 
     if existing != wanted {

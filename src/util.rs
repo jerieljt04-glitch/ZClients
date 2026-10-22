@@ -95,15 +95,29 @@ pub fn support_dir() -> PathBuf {
         None if is_test_build() => home().join("Library/Application Support/ZPortSwift Test"),
         None => home().join("Library/Application Support/ZPortSwift"),
     };
-    let _ = std::fs::create_dir_all(&dir);
+    ensure_dir(&dir, None);
     dir
 }
 
-pub fn private_dir(name: &str) -> PathBuf {
+/// Create a folder (and set its mode) once per run, not on every file
+/// access: these paths are hit on every tab switch and save.
+fn ensure_dir(dir: &std::path::Path, mode: Option<u32>) {
     use std::os::unix::fs::PermissionsExt;
+    static MADE: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+    let mut made = MADE.lock().unwrap_or_else(|e| e.into_inner());
+    if made.iter().any(|d| d == dir) && dir.exists() {
+        return;
+    }
+    let _ = std::fs::create_dir_all(dir);
+    if let Some(m) = mode {
+        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(m));
+    }
+    made.push(dir.to_path_buf());
+}
+
+pub fn private_dir(name: &str) -> PathBuf {
     let dir = support_dir().join(name);
-    let _ = std::fs::create_dir_all(&dir);
-    let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    ensure_dir(&dir, Some(0o700));
     dir
 }
 
@@ -115,8 +129,62 @@ pub fn downloads_dir() -> PathBuf {
 /// Each file belongs to one tab and is removed when that tab goes.
 pub fn pdf_previews_dir() -> PathBuf {
     let dir = support_dir().join("PDF Previews");
-    let _ = std::fs::create_dir_all(&dir);
+    ensure_dir(&dir, None);
     dir
+}
+
+enum Write {
+    File { path: PathBuf, data: Vec<u8>, mode: u32 },
+    Remove(PathBuf),
+    Flush(std::sync::mpsc::Sender<()>),
+}
+
+/// One background thread does the app's routine disk writes (tab places,
+/// session backups) in the order they were asked for, so a write and a
+/// later delete of the same file can never swap. Each write syncs to disk,
+/// which used to stall the window on every tab switch.
+fn writer() -> &'static std::sync::Mutex<std::sync::mpsc::Sender<Write>> {
+    static W: std::sync::OnceLock<std::sync::Mutex<std::sync::mpsc::Sender<Write>>> = std::sync::OnceLock::new();
+    W.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::channel::<Write>();
+        std::thread::Builder::new()
+            .name("zclients-writer".into())
+            .spawn(move || {
+                for w in rx {
+                    match w {
+                        Write::File { path, data, mode } => {
+                            if let Err(e) = write_atomic(&path, &data, mode) {
+                                log(format!("could not write {}: {e}", path.display()));
+                            }
+                        }
+                        Write::Remove(path) => {
+                            let _ = std::fs::remove_file(path);
+                        }
+                        Write::Flush(done) => {
+                            let _ = done.send(());
+                        }
+                    }
+                }
+            })
+            .expect("writer thread");
+        std::sync::Mutex::new(tx)
+    })
+}
+
+pub fn write_soon(path: PathBuf, data: Vec<u8>, mode: u32) {
+    let _ = writer().lock().unwrap_or_else(|e| e.into_inner()).send(Write::File { path, data, mode });
+}
+
+pub fn remove_soon(path: PathBuf) {
+    let _ = writer().lock().unwrap_or_else(|e| e.into_inner()).send(Write::Remove(path));
+}
+
+/// Wait (bounded) until every queued write is on disk. Used on quit.
+pub fn flush_writes() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    if writer().lock().unwrap_or_else(|e| e.into_inner()).send(Write::Flush(tx)).is_ok() {
+        let _ = rx.recv_timeout(std::time::Duration::from_secs(5));
+    }
 }
 
 /// Write via a temporary file and rename, so a crash mid-write can never
@@ -132,6 +200,17 @@ pub fn write_atomic(path: &std::path::Path, data: &[u8], mode: u32) -> std::io::
     }
     std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode))?;
     std::fs::rename(&tmp, path)
+}
+
+static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
+/// Called first thing in `main`, so timings count from process start.
+pub fn mark_start() {
+    START.get_or_init(std::time::Instant::now);
+}
+
+pub fn ms_since_start() -> f64 {
+    START.get_or_init(std::time::Instant::now).elapsed().as_secs_f64() * 1000.0
 }
 
 pub fn log(msg: impl AsRef<str>) {

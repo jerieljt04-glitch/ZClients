@@ -69,6 +69,7 @@ define_class!(
 );
 
 fn main() {
+    util::mark_start();
     // `ZClients --diagnose`: print what macOS currently allows this app.
     if std::env::args().any(|a| a == "--diagnose") {
         let b = objc2_app_kit::NSPasteboard::generalPasteboard().accessBehavior();

@@ -6,11 +6,21 @@
 //! still matches the tab's remembered URL, so a stale snapshot can never send a
 //! tab somewhere other than where the user last was.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use uuid::Uuid;
 
 use crate::{policy, util};
+
+thread_local! {
+    /// The latest snapshot of every tab saved this run, exactly as written.
+    /// Reads come from here first, so a tab woken while its file is still
+    /// being written gets the new snapshot, and an unchanged snapshot is not
+    /// written again.
+    static LATEST: RefCell<HashMap<Uuid, Vec<u8>>> = RefCell::new(HashMap::new());
+}
 
 fn dir() -> PathBuf {
     util::private_dir("TabState")
@@ -29,14 +39,16 @@ pub fn save(tab: Uuid, url: &str, data: &[u8]) {
     out.extend_from_slice(&(url.len() as u32).to_le_bytes());
     out.extend_from_slice(url.as_bytes());
     out.extend_from_slice(data);
-    if let Err(e) = util::write_atomic(&file(tab), &out, 0o600) {
-        util::log(format!("could not save tab state: {e}"));
+    if LATEST.with_borrow(|m| m.get(&tab) == Some(&out)) {
+        return;
     }
+    util::write_soon(file(tab), out.clone(), 0o600);
+    LATEST.with_borrow_mut(|m| m.insert(tab, out));
 }
 
 /// The snapshot for `tab`, if it was taken on `expected_url`.
 pub fn load(tab: Uuid, expected_url: &str) -> Option<Vec<u8>> {
-    let raw = std::fs::read(file(tab)).ok()?;
+    let raw = LATEST.with_borrow(|m| m.get(&tab).cloned()).or_else(|| std::fs::read(file(tab)).ok())?;
     let len = u32::from_le_bytes(raw.get(..4)?.try_into().ok()?) as usize;
     let url = std::str::from_utf8(raw.get(4..4 + len)?).ok()?;
     let same = match (policy::parse(url), policy::parse(expected_url)) {
@@ -47,7 +59,8 @@ pub fn load(tab: Uuid, expected_url: &str) -> Option<Vec<u8>> {
 }
 
 pub fn delete(tab: Uuid) {
-    let _ = std::fs::remove_file(file(tab));
+    LATEST.with_borrow_mut(|m| m.remove(&tab));
+    util::remove_soon(file(tab));
 }
 
 /// Remove snapshots for tabs that no longer exist.

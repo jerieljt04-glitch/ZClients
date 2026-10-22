@@ -1,9 +1,11 @@
 //! The WebKit layer: one `WKWebView` per awake tab, one persistent data store
 //! per profile, and the delegates that decide what every page may do.
 //!
-//! Lightness comes from here: only a few tabs are kept awake (4 on Macs with
-//! 10 GB of memory or less, otherwise 6). A tab that goes to sleep saves its
-//! exact place first and wakes up there, still signed in.
+//! Lightness comes from here: only a few tabs are kept awake (6 on Macs with
+//! 10 GB of memory or less, 8 up to 20 GB, otherwise 10), and fewer whenever
+//! macOS reports memory pressure. Going back to an awake tab is instant; a
+//! tab that goes to sleep saves its exact place first and wakes up there,
+//! still signed in.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -944,7 +946,7 @@ thread_local! {
         opened_by_page: HashSet::new(),
         sign_in_attempts: HashMap::new(),
         bridge: None,
-        max_live: if NSProcessInfo::processInfo().physicalMemory() <= 10 * 1024 * 1024 * 1024 { 4 } else { 6 },
+        max_live: base_live_cap(),
     });
 }
 
@@ -1035,7 +1037,9 @@ pub fn view_for(client_id: Uuid, tab: &Tab) -> Retained<ZWebView> {
     app::changed(app::TABS);
 
     // Hold the first load until the profile's cookies are back, otherwise the
-    // request races the restore and lands on a sign-in page.
+    // request races the restore and lands on a sign-in page. Do not push the
+    // load to a later run-loop turn to make switches feel quicker: WebKit then
+    // never adds its PDF viewer controls (download, zoom) to the view.
     let tab = tab.clone();
     let v = view.clone();
     session::hydrate(&store, store_id, move || {
@@ -1075,6 +1079,106 @@ fn touch(p: &mut Pool, id: Uuid) {
     p.lru.push(id);
 }
 
+fn base_live_cap() -> usize {
+    const GB: u64 = 1024 * 1024 * 1024;
+    match NSProcessInfo::processInfo().physicalMemory() {
+        m if m <= 10 * GB => 6,
+        m if m <= 20 * GB => 8,
+        _ => 10,
+    }
+}
+
+// libdispatch's memory-pressure source (part of libSystem).
+#[repr(C)]
+struct DispatchSourceType {
+    _private: [u8; 0],
+}
+unsafe extern "C" {
+    static _dispatch_source_type_memorypressure: DispatchSourceType;
+    static _dispatch_main_q: c_void;
+    fn dispatch_source_create(kind: *const DispatchSourceType, handle: usize, mask: usize, queue: *const c_void) -> *mut c_void;
+    fn dispatch_set_context(object: *mut c_void, context: *mut c_void);
+    fn dispatch_source_set_event_handler_f(source: *mut c_void, handler: extern "C" fn(*mut c_void));
+    fn dispatch_source_get_data(source: *mut c_void) -> usize;
+    fn dispatch_resume(object: *mut c_void);
+    fn sysctlbyname(name: *const std::ffi::c_char, old: *mut c_void, old_len: *mut usize, new: *mut c_void, new_len: usize) -> i32;
+}
+const PRESSURE_NORMAL: usize = 1;
+const PRESSURE_WARN: usize = 2;
+const PRESSURE_CRITICAL: usize = 4;
+
+/// How many tabs stay awake at a macOS memory-pressure level. A warning
+/// can last for hours on an 8 GB Mac with a browser open, so it keeps the
+/// old 4 rather than punishing every switch; critical keeps only 2.
+fn cap_for_pressure(level: usize) -> usize {
+    if level & PRESSURE_CRITICAL != 0 {
+        2
+    } else if level & PRESSURE_WARN != 0 {
+        base_live_cap().min(4)
+    } else {
+        base_live_cap()
+    }
+}
+
+fn set_pressure(level: usize) {
+    let cap = cap_for_pressure(level);
+    let changed = POOL.with_borrow_mut(|p| std::mem::replace(&mut p.max_live, cap) != cap);
+    if changed {
+        util::log(format!("memory pressure {level}: keeping {cap} tabs awake"));
+    }
+    enforce_cap();
+}
+
+extern "C" fn memory_pressure(source: *mut c_void) {
+    set_pressure(unsafe { dispatch_source_get_data(source) });
+}
+
+/// The level right now (the dispatch source only reports changes).
+fn current_pressure() -> usize {
+    let mut level: i32 = 0;
+    let mut len = std::mem::size_of::<i32>();
+    let name = c"kern.memorystatus_vm_pressure_level";
+    let ok = unsafe { sysctlbyname(name.as_ptr(), (&mut level as *mut i32).cast(), &mut len, std::ptr::null_mut(), 0) } == 0;
+    if ok { level.max(0) as usize } else { PRESSURE_NORMAL }
+}
+
+/// When macOS runs short of memory, put background tabs to sleep straight
+/// away (and allow more again once it recovers), so keeping extra tabs awake
+/// never pushes the Mac into swapping.
+pub fn watch_memory_pressure() {
+    set_pressure(current_pressure());
+    unsafe {
+        let source = dispatch_source_create(
+            &_dispatch_source_type_memorypressure,
+            0,
+            PRESSURE_NORMAL | PRESSURE_WARN | PRESSURE_CRITICAL,
+            &_dispatch_main_q,
+        );
+        if source.is_null() {
+            return;
+        }
+        dispatch_set_context(source, source);
+        dispatch_source_set_event_handler_f(source, memory_pressure);
+        dispatch_resume(source);
+        // Lives as long as the app.
+    }
+}
+
+#[cfg(test)]
+mod pressure_tests {
+    use super::*;
+
+    #[test]
+    fn pressure_lowers_the_awake_tab_count_but_a_warning_keeps_four() {
+        let base = base_live_cap();
+        assert!(base >= 6);
+        assert_eq!(cap_for_pressure(PRESSURE_NORMAL), base);
+        assert_eq!(cap_for_pressure(PRESSURE_WARN), 4);
+        assert_eq!(cap_for_pressure(PRESSURE_CRITICAL), 2);
+        assert_eq!(cap_for_pressure(PRESSURE_WARN | PRESSURE_CRITICAL), 2);
+    }
+}
+
 fn enforce_cap() {
     loop {
         let victim = POOL.with_borrow(|p| {
@@ -1094,6 +1198,7 @@ fn enforce_cap() {
 pub fn sleep_tab(id: Uuid) {
     save_state(id);
     release(id);
+
 }
 
 /// Release a tab's web view without saving anything (it is closing, or about

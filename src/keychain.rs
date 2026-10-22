@@ -107,13 +107,7 @@ fn path(kind: &str, id: Uuid) -> PathBuf {
 }
 
 fn seal(kind: &str, id: Uuid, plain: &[u8]) -> bool {
-    let sealed = with_cipher(|c| {
-        let nonce_bytes = random::<12>();
-        let nonce = Nonce::try_from(&nonce_bytes[..]).expect("12-byte nonce");
-        c.encrypt(&nonce, plain).ok().map(|ct| [nonce_bytes.as_slice(), &ct].concat())
-    })
-    .flatten();
-    match sealed {
+    match sealed(plain) {
         Some(data) => match util::write_atomic(&path(kind, id), &data, 0o600) {
             Ok(()) => true,
             Err(e) => {
@@ -123,6 +117,15 @@ fn seal(kind: &str, id: Uuid, plain: &[u8]) -> bool {
         },
         None => false,
     }
+}
+
+fn sealed(plain: &[u8]) -> Option<Vec<u8>> {
+    with_cipher(|c| {
+        let nonce_bytes = random::<12>();
+        let nonce = Nonce::try_from(&nonce_bytes[..]).expect("12-byte nonce");
+        c.encrypt(&nonce, plain).ok().map(|ct| [nonce_bytes.as_slice(), &ct].concat())
+    })
+    .flatten()
 }
 
 fn open(kind: &str, id: Uuid) -> Option<Vec<u8>> {
@@ -149,8 +152,22 @@ pub fn write_session(id: Uuid, data: &[u8]) -> bool {
     seal("session", id, data)
 }
 
+/// Seal now, write on the background writer (routine backups while the app
+/// is in use). False only if sealing failed.
+pub fn write_session_soon(id: Uuid, data: &[u8]) -> bool {
+    match sealed(data) {
+        Some(s) => {
+            util::write_soon(path("session", id), s, 0o600);
+            true
+        }
+        None => false,
+    }
+}
+
+/// Queued behind any pending backup write, so a deleted profile's backup
+/// can never be written back after it was removed.
 pub fn delete_session(id: Uuid) {
-    remove("session", id);
+    util::remove_soon(path("session", id));
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Default, Debug)]
