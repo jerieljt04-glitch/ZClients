@@ -321,22 +321,38 @@ pub fn save_copy(src: &Path, suggested: &str) {
 /// hand so they are not quietly more trusted than a normal download.
 /// `client` is the page's profile: a PDF saved for it opens as its tab.
 pub fn save_bytes(data: Vec<u8>, suggested: &str, client: Option<Uuid>) {
+    if let Some(key) = save(data, suggested, client, None) {
+        if client.is_some() {
+            util::later(move || {
+                show_pdf_where(|i| i.key == key);
+            });
+        }
+    }
+}
+
+/// The page in `tab` is saving its own document (the PDF viewer's download
+/// button). It is already on screen, so it is not opened again, and picking
+/// it from the list goes back to that tab.
+pub fn save_from_tab(data: Vec<u8>, suggested: &str, client: Uuid, tab: Option<Uuid>) {
+    save(data, suggested, Some(client), tab);
+}
+
+fn save(data: Vec<u8>, suggested: &str, client: Option<Uuid>, tab: Option<Uuid>) -> Option<usize> {
     let path = unique_path(&util::downloads_dir(), &safe_filename(suggested));
     let name = path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
     let key = own_key();
     match std::fs::write(&path, &data) {
         Ok(()) => {
             quarantine(&path);
-            push(Item::new(key, name, Some(path), State::Done, client));
-            if client.is_some() {
-                util::later(move || {
-                    show_pdf_where(|i| i.key == key);
-                });
-            }
+            let mut item = Item::new(key, name, Some(path), State::Done, client);
+            item.tab = tab;
+            push(item);
+            Some(key)
         }
         Err(e) => {
             util::log(format!("could not save {name}: {e}"));
             push(Item::new(key, name, None, State::Failed, None));
+            None
         }
     }
 }

@@ -1228,6 +1228,18 @@ fn refresh_toolbar() {
 // Small commands.
 // ---------------------------------------------------------------------------
 
+/// Drop the downloads list open under its toolbar button.
+pub fn show_downloads() {
+    // A menu tracks modally; an unattended self-test run would stall on it.
+    if util::is_test_build() && std::env::var_os("ZCLIENTS_SELFTEST").is_some() {
+        return;
+    }
+    let a = actions();
+    unsafe {
+        let _: () = msg_send![&*a, showDownloads: None::<&AnyObject>];
+    }
+}
+
 pub fn sidebar_visible() -> bool {
     with_ui(|u| u.sidebar_visible.get()).unwrap_or(false)
 }

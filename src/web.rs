@@ -34,7 +34,7 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::model::{Tab, Workspace};
-use crate::{app, downloads, keychain, policy, scripts, session, tabstate, util};
+use crate::{app, downloads, keychain, policy, scripts, session, tabstate, ui, util};
 
 const KVO_KEYS: &[&str] = &["title", "URL", "canGoBack", "canGoForward", "loading"];
 
@@ -482,6 +482,27 @@ define_class!(
         fn action_became_download(&self, _web: &WKWebView, _a: &WKNavigationAction, download: &WKDownload) {
             downloads::adopt(download);
             self.close_if_blank();
+        }
+    }
+
+    impl Coordinator {
+        /// The download button in WebKit's PDF viewer. WebKit hands the
+        /// document to this (private, Safari-implemented) delegate method and
+        /// does nothing at all when it is missing, which is why the button
+        /// used to be dead.
+        #[unsafe(method(_webView:saveDataToFile:suggestedFilename:mimeType:originatingURL:))]
+        fn save_data_to_file(&self, _web: &WKWebView, data: &NSData, suggested: &NSString, mime: Option<&NSString>, _url: Option<&NSURL>) {
+            let iv = self.ivars();
+            // A PDF tab's file is named by an id; the tab title is its real name.
+            let tab_title = iv.tab_id.and_then(|id| app::store(|s| s.find_tab(id).filter(|t| t.pdf_path.is_some()).map(|t| t.title.clone())));
+            let is_pdf = mime.is_some_and(|m| m.to_string().eq_ignore_ascii_case("application/pdf"));
+            let name = match tab_title {
+                Some(title) => downloads::pdf_name(&title),
+                None if is_pdf => downloads::pdf_name(&suggested.to_string()),
+                None => downloads::safe_filename(&suggested.to_string()),
+            };
+            downloads::save_from_tab(data.to_vec(), &name, iv.client_id, iv.tab_id);
+            util::later(ui::show_downloads);
         }
     }
 

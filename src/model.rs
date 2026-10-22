@@ -473,6 +473,10 @@ impl Store {
         Some((c, c.active_tab()?))
     }
 
+    pub fn find_tab(&self, tab_id: Uuid) -> Option<&Tab> {
+        self.clients.iter().flat_map(|c| c.tabs.iter()).find(|t| t.id == tab_id)
+    }
+
     fn find_tab_mut(&mut self, tab_id: Uuid) -> Option<&mut Tab> {
         self.clients.iter_mut().find_map(|c| c.tabs.iter_mut().find(|t| t.id == tab_id))
     }
