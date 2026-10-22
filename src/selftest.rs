@@ -404,6 +404,39 @@ fn input_test() {
     });
 }
 
+/// `ZCLIENTS_SELFTEST=find`: logs the find bar and window state twice a
+/// second; the keys (⌘F, typing, Return, Esc) come from System Events.
+/// `ZCLIENTS_FULLSCREEN=1` puts the window in full screen first.
+fn find_test() {
+    log_keys();
+    util::after(3.0, || {
+        app::add_client("Find Test", "#664488", None, None);
+        util::after(0.5, || app::address_entered("https://www.zoho.com/"));
+    });
+    if std::env::var_os("ZCLIENTS_FULLSCREEN").is_some() {
+        util::after(6.0, || {
+            let app = NSApplication::sharedApplication(MainThreadMarker::new().unwrap());
+            if let Some(w) = app.mainWindow().or_else(|| app.windows().firstObject()) {
+                w.toggleFullScreen(None);
+            }
+        });
+    }
+    std::mem::forget(util::every(0.5, || {
+        let app = NSApplication::sharedApplication(MainThreadMarker::new().unwrap());
+        let w = app.windows().iter().find(|w| w.isVisible() || w.isMiniaturized());
+        let state = w.map(|w| {
+            let full = w.styleMask().contains(objc2_app_kit::NSWindowStyleMask::FullScreen);
+            let fr = w.firstResponder().map(|r| r.class().name().to_string_lossy().into_owned()).unwrap_or_default();
+            format!("minimized={} fullscreen={full} visible={} firstResponder={fr}", w.isMiniaturized(), w.isVisible())
+        });
+        util::log(format!("SELFTEST state t={:.1}s find bar={} {state:?} app hidden={}", util::ms_since_start() / 1000.0, ui::find_visible(), app.isHidden()));
+    }));
+    util::after(30.0, || {
+        util::log("SELFTEST done");
+        NSApplication::sharedApplication(MainThreadMarker::new().unwrap()).terminate(None);
+    });
+}
+
 pub fn start() {
     if !util::is_test_build() {
         return;
@@ -413,6 +446,7 @@ pub fn start() {
         Ok("prep") => return prep(),
         Ok("downloads") => return downloads_test(),
         Ok("input") => return input_test(),
+        Ok("find") => return find_test(),
         Ok(_) => {}
         Err(_) => return,
     }

@@ -15,7 +15,7 @@ use objc2_app_kit::{
     NSResponder, NSScrollView, NSSearchField, NSSecureTextField, NSTableColumn, NSTableView, NSTableViewDataSource,
     NSTableViewDelegate, NSTableViewDropOperation, NSTableViewStyle, NSTextField, NSView, NSVisualEffectBlendingMode,
     NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView, NSWindow, NSWindowDelegate, NSWindowStyleMask,
-    NSWindowTitleVisibility, NSWorkspace,
+    NSWindowTitleVisibility, NSWorkspace, NSControl, NSTextView, NSTextFieldDelegate, NSSearchFieldDelegate,
 };
 use objc2_foundation::{
     NSArray, NSIndexSet, NSInteger, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSURL,
@@ -447,7 +447,24 @@ define_class!(
         }
     }
 
-    unsafe impl NSControlTextEditingDelegate for Actions {}
+    unsafe impl NSControlTextEditingDelegate for Actions {
+        /// Esc in the find bar closes it and puts the cursor back in the
+        /// page. Without this, Esc first cleared the text and then fell
+        /// through to the window, which in full screen meant leaving full
+        /// screen (the app seemed to shrink away) and never closed the bar.
+        #[unsafe(method(control:textView:doCommandBySelector:))]
+        fn command(&self, control: &NSControl, _tv: &NSTextView, cmd: Sel) -> Bool {
+            let is_find = with_ui(|u| std::ptr::eq(control as *const NSControl, Retained::as_ptr(&u.find_field).cast())).unwrap_or(false);
+            if is_find && cmd == sel!(cancelOperation:) {
+                show_find(false);
+                return Bool::YES;
+            }
+            Bool::NO
+        }
+    }
+
+    unsafe impl NSTextFieldDelegate for Actions {}
+    unsafe impl NSSearchFieldDelegate for Actions {}
 
     unsafe impl NSTableViewDelegate for Actions {
         #[unsafe(method_id(tableView:viewForTableColumn:row:))]
@@ -819,6 +836,7 @@ pub fn build() {
     unsafe {
         find_field.setTarget(Some(&target()));
         find_field.setAction(Some(sel!(findEntered:)));
+        find_field.setDelegate(Some(ProtocolObject::from_ref(&*actions())));
     }
     let find_status = label("", 11.0, false);
     find_status.setTextColor(Some(&NSColor::secondaryLabelColor()));
@@ -1262,6 +1280,10 @@ pub fn show_downloads() {
     unsafe {
         let _: () = msg_send![&*a, showDownloads: None::<&AnyObject>];
     }
+}
+
+pub fn find_visible() -> bool {
+    with_ui(|u| u.find_visible.get()).unwrap_or(false)
 }
 
 pub fn sidebar_visible() -> bool {
