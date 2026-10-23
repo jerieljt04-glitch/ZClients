@@ -51,12 +51,23 @@ fn backup_path() -> std::path::PathBuf {
 /// replaced: the app stays read-only until the user picks Restore, Start
 /// Empty (the file is kept aside) or Quit.
 pub fn load() {
+    let started = std::time::Instant::now();
+    load_store();
+    if util::is_test_build() {
+        util::log(format!("PERF profiles loaded in {:.1} ms", started.elapsed().as_secs_f64() * 1000.0));
+    }
+}
+
+fn load_store() {
     let path = save_path();
     let store = match crate::model::classify_read(std::fs::read(&path)) {
         Ok(Some(s)) => {
-            // The last file that loaded cleanly, for Restore.
-            if let Ok(data) = std::fs::read(&path) {
-                let _ = util::write_atomic(&backup_path(), &data, 0o600);
+            // The last file that loaded cleanly, for Restore: written in the
+            // background, and only when it differs from the current copy.
+            if let Ok(data) = std::fs::read(&path)
+                && std::fs::read(backup_path()).ok().as_deref() != Some(data.as_slice())
+            {
+                util::write_soon(backup_path(), data, 0o600);
             }
             s
         }

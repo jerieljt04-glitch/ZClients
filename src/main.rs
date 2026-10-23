@@ -43,6 +43,7 @@ define_class!(
             let app = NSApplication::sharedApplication(self.mtm());
             app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
             app::load();
+            web::prewarm_active_profile();
             ui::build();
             app::start_background_work();
             selftest::start();

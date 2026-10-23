@@ -332,7 +332,9 @@ fn schedule_capture(id: Uuid) {
     if !KEEPER.with_borrow_mut(|k| k.hydrated.contains(&id) && k.capture_scheduled.insert(id)) {
         return;
     }
-    util::after(3.0, move || {
+    // Coalesced: a busy page changes cookies constantly; one capture per
+    // 8 s is enough to notice a sign-out long before anyone quits.
+    util::after(8.0, move || {
         let entry = KEEPER.with_borrow_mut(|k| {
             k.capture_scheduled.remove(&id);
             k.stores.get(&id).map(|e| (e.store.clone(), e.retention))
@@ -461,9 +463,15 @@ pub fn hydrate(store: &WKWebsiteDataStore, id: Uuid, retention: Retention, done:
     if !first {
         return;
     }
+    let started = std::time::Instant::now();
 
     let backup = if retention.keep { load_backup(id) } else { Jar::default() };
     KEEPER.with_borrow_mut(|k| k.promoted.insert(id, backup.promoted.clone()));
+    // Nothing to put back: the first page need not wait for the cookie
+    // store at all (the store counts as loaded once a page finishes).
+    if backup.cookies.is_empty() {
+        return finish(id);
+    }
     let cookie_store = unsafe { store.httpCookieStore() };
     let cs = cookie_store.clone();
     let block = RcBlock::new(move |existing: NonNull<NSArray<NSHTTPCookie>>| {
@@ -477,6 +485,7 @@ pub fn hydrate(store: &WKWebsiteDataStore, id: Uuid, retention: Retention, done:
         let cookies: Vec<Retained<NSHTTPCookie>> = plan.iter().filter_map(to_ns).collect();
         if util::is_test_build() {
             util::log(format!("hydrate: backup {} cookies, store had {}, restored {}", backup.cookies.len(), present.len(), cookies.len()));
+            util::log(format!("PERF first load held {:.1} ms for the session restore", started.elapsed().as_secs_f64() * 1000.0));
         }
         if cookies.is_empty() {
             return finish(id);
@@ -506,7 +515,9 @@ pub fn capture(store: &WKWebsiteDataStore, id: Uuid, retention: Retention, done:
     let done = RefCell::new(done);
     let block = RcBlock::new(move |all: NonNull<NSArray<NSHTTPCookie>>| {
         let all = unsafe { all.as_ref() };
-        let mut live: Vec<StoredCookie> = all.iter().filter_map(|c| from_ns(&c)).filter(|c| policy::is_persistable_cookie_domain(&c.domain)).collect();
+        // Check the domain before converting: most cookies in a store are
+        // analytics and widget cookies the keeper never keeps.
+        let mut live: Vec<StoredCookie> = all.iter().filter(|c| policy::is_persistable_cookie_domain(&c.domain().to_string())).filter_map(|c| from_ns(&c)).collect();
         let now = now_unix();
         let (state, old_ledger) = KEEPER.with_borrow_mut(|k| {
             if !live.is_empty() && k.hydrated.contains(&id) {

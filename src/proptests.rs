@@ -43,8 +43,8 @@ proptest! {
         let Some(u) = policy::parse(&url) else { return Ok(()) };
         let origin = Origin::of(&u);
         let r = Request { origin: origin.clone(), top: origin.clone(), main_frame: main, user_gesture: gesture, workspace: Workspace::Zoho };
-        let exact_call = origin.as_ref().is_some_and(|o| o.is_exact_https(&policy::call_hosts()));
-        let exact_sign_in = origin.as_ref().is_some_and(|o| o.is_exact_https(&policy::sign_in_hosts()));
+        let exact_call = origin.as_ref().is_some_and(|o| o.is_exact_https(policy::call_hosts()));
+        let exact_sign_in = origin.as_ref().is_some_and(|o| o.is_exact_https(policy::sign_in_hosts()));
         if policy::decide(Capability::Camera, &r) == Decision::Allow {
             prop_assert!(exact_call && main, "{url}");
         }

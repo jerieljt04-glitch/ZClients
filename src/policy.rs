@@ -148,22 +148,26 @@ impl Origin {
     }
 }
 
-/// `accounts.<data centre>` for every Zoho data centre.
-pub fn sign_in_hosts() -> Vec<String> {
-    ZOHO_DATA_CENTRES.iter().map(|d| format!("accounts.{d}")).collect()
+/// `accounts.<data centre>` for every Zoho data centre (built once).
+pub fn sign_in_hosts() -> &'static [String] {
+    static HOSTS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    HOSTS.get_or_init(|| ZOHO_DATA_CENTRES.iter().map(|d| format!("accounts.{d}")).collect())
 }
 
 /// The exact origins that may use the camera and microphone (and get the
 /// screen picker) without an extra prompt: Google Meet, and Zoho Meeting
 /// and Cliq in every data centre.
-pub fn call_hosts() -> Vec<String> {
-    let mut v = vec!["meet.google.com".to_string()];
-    for p in ZOHO_CALL_PRODUCTS {
-        for d in ZOHO_DATA_CENTRES {
-            v.push(format!("{p}.{d}"));
+pub fn call_hosts() -> &'static [String] {
+    static HOSTS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    HOSTS.get_or_init(|| {
+        let mut v = vec!["meet.google.com".to_string()];
+        for p in ZOHO_CALL_PRODUCTS {
+            for d in ZOHO_DATA_CENTRES {
+                v.push(format!("{p}.{d}"));
+            }
         }
-    }
-    v
+        v
+    })
 }
 
 /// What a page is asking to do. Being allowed to *display* a page grants
@@ -235,7 +239,7 @@ pub fn decide(cap: Capability, r: &Request) -> Decision {
             }
         }
         Capability::Camera | Capability::Microphone => {
-            if r.is_top_level() && origin.is_exact_https(&call_hosts()) {
+            if r.is_top_level() && origin.is_exact_https(call_hosts()) {
                 Decision::Allow
             } else if secure {
                 // WebKit's own prompt names the origin asking.
@@ -247,7 +251,7 @@ pub fn decide(cap: Capability, r: &Request) -> Decision {
         Capability::ScreenCapture => {
             if !secure || !r.main_frame || !r.is_top_level() {
                 Decision::Deny
-            } else if origin.is_exact_https(&call_hosts()) {
+            } else if origin.is_exact_https(call_hosts()) {
                 // The system picker is itself the user's choice.
                 Decision::Allow
             } else if r.displayable() {
@@ -257,7 +261,7 @@ pub fn decide(cap: Capability, r: &Request) -> Decision {
             }
         }
         Capability::Autofill => {
-            if r.is_top_level() && origin.is_exact_https(&sign_in_hosts()) && r.workspace == Workspace::Zoho {
+            if r.is_top_level() && origin.is_exact_https(sign_in_hosts()) && r.workspace == Workspace::Zoho {
                 Decision::Allow
             } else {
                 Decision::Deny
@@ -412,7 +416,7 @@ pub fn sign_in_destination(url: &Url) -> Option<Url> {
 /// exactly `https://accounts.<data centre>` on the default port. Never a
 /// prefix match: `accounts.` + anything is not an authentication boundary.
 pub fn is_zoho_sign_in(url: &Url) -> bool {
-    Origin::of(url).is_some_and(|o| o.is_exact_https(&sign_in_hosts()))
+    Origin::of(url).is_some_and(|o| o.is_exact_https(sign_in_hosts()))
 }
 
 /// Whether a cookie for `domain` may be mirrored to the session backup. The

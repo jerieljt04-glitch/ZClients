@@ -1481,6 +1481,18 @@ fn data_store(p: &mut Pool, client: Uuid, ws: Workspace) -> (Uuid, Retained<WKWe
     (id, store, new)
 }
 
+/// Start restoring the active profile's session while the window is being
+/// built, so its first page does not wait for the cookie store.
+pub fn prewarm_active_profile() {
+    let Some((client, ws)) = app::store(|s| s.active_tab().map(|(c, t)| (c.id, t.effective_workspace()))) else { return };
+    let (store_id, store, new_store) = POOL.with_borrow_mut(|p| data_store(p, client, ws));
+    let retention = retention_of(client);
+    if new_store {
+        session::register(store_id, &store, retention);
+    }
+    session::hydrate(&store, store_id, retention, || {});
+}
+
 /// A profile's "Keep me signed in" choice.
 pub fn retention_of(client: Uuid) -> session::Retention {
     app::store(|s| s.client(client).map(|c| c.retention())).unwrap_or_default()
@@ -1593,7 +1605,11 @@ pub fn view_for(client_id: Uuid, tab: &Tab) -> Retained<ZWebView> {
     // zoom) more often in testing.
     let tab = tab.clone();
     let v = view.clone();
+    let asked = Instant::now();
     session::hydrate(&store, store_id, retention, move || {
+        if util::is_test_build() {
+            util::log(format!("PERF tab waited {:.1} ms for its session", asked.elapsed().as_secs_f64() * 1000.0));
+        }
         let still_live = POOL.with_borrow(|p| p.live.get(&tab.id).is_some_and(|l| Retained::as_ptr(&l.view) == Retained::as_ptr(&v)));
         if still_live {
             load_tab(&v, &tab);
