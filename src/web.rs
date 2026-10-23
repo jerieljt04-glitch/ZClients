@@ -128,6 +128,8 @@ pub struct ZWebIvars {
     /// click handler that calls window.open() (most links in Zoho) does
     /// not pass them on to WebKit's navigation action.
     last_click: Cell<Option<(objc2_app_kit::NSEventModifierFlags, Instant)>>,
+    /// The keyboard is in a code editor (see `scripts::EDITOR_HOOK`).
+    code_editor: Cell<bool>,
 }
 
 define_class!(
@@ -160,6 +162,25 @@ define_class!(
             // Control+A selects all too, the way it does in browsers on
             // Windows (on a Mac it would only move to the start of a line).
             // A setting turns this back into the Mac behaviour.
+            // In a code editor, Select All / Undo / Redo are the editor's own:
+            // it gets the keystroke, as in Safari.
+            if self.ivars().code_editor.get() {
+                use objc2_app_kit::NSEventModifierFlags as M;
+                if is_key(event, "a", M::Command) || is_key(event, "z", M::Command) || is_key(event, "z", M::Command | M::Shift) {
+                    unsafe {
+                        let _: () = msg_send![self, keyDown: event];
+                    }
+                    return true.into();
+                }
+                if is_key(event, "a", M::Control) && settings::get(|s| s.control_a_selects_all) {
+                    if let Some(cmd_a) = as_command_key(event, "a") {
+                        unsafe {
+                            let _: () = msg_send![self, keyDown: &*cmd_a];
+                        }
+                    }
+                    return true.into();
+                }
+            }
             if is_key(event, "a", objc2_app_kit::NSEventModifierFlags::Control) && settings::get(|s| s.control_a_selects_all) {
                 unsafe {
                     let _: () = msg_send![self, selectAll: None::<&AnyObject>];
@@ -246,6 +267,23 @@ fn menu_first(event: &NSEvent, on_meet: bool) -> bool {
     NSApplication::sharedApplication(mtm).mainMenu().is_some_and(|m| m.performKeyEquivalent(event))
 }
 
+/// The same key press with ⌘ instead of its modifiers (Control-A as ⌘A for
+/// the Windows select-all habit, in code editors).
+fn as_command_key(event: &NSEvent, chars: &str) -> Option<Retained<NSEvent>> {
+    NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
+        event.r#type(),
+        event.locationInWindow(),
+        objc2_app_kit::NSEventModifierFlags::Command,
+        event.timestamp(),
+        event.windowNumber(),
+        None,
+        &util::ns(chars),
+        &util::ns(chars),
+        false,
+        event.keyCode(),
+    )
+}
+
 /// `event` is exactly `mods` + `key` (no other modifier held).
 fn is_key(event: &NSEvent, key: &str, mods: objc2_app_kit::NSEventModifierFlags) -> bool {
     use objc2_app_kit::NSEventModifierFlags as M;
@@ -322,6 +360,7 @@ fn new_zweb(mtm: MainThreadMarker, frame: NSRect, cfg: &WKWebViewConfiguration, 
         context: RefCell::new(None),
         menu_targets: RefCell::new(vec![]),
         last_click: Cell::new(None),
+        code_editor: Cell::new(false),
     });
     let web: Retained<ZWebView> = unsafe { msg_send![super(this), initWithFrame: frame, configuration: cfg] };
     unsafe {
@@ -463,6 +502,12 @@ define_class!(
             };
             let frame = unsafe { message.frameInfo() };
             let request = request_for(web, Some(&frame), web.ivars().workspace);
+            if name == scripts::EDITOR_HANDLER {
+                if policy::decide(Capability::Bridge, &request) == Decision::Allow {
+                    web.ivars().code_editor.set(get("editor").as_deref() == Some("yes"));
+                }
+                return;
+            }
             if name == scripts::CONTEXT_HANDLER {
                 if policy::decide(Capability::Bridge, &request) != Decision::Allow {
                     return;
@@ -1478,7 +1523,7 @@ fn configuration(mtm: MainThreadMarker, store: &WKWebsiteDataStore, bridge: &Bri
         let ucc = cfg.userContentController();
         let world = WKContentWorld::defaultClientWorld(mtm);
         let login_helper = scripts::login_helper();
-        for (src, main_only) in [(scripts::CONTEXT_HOOK, false), (login_helper.as_str(), true)] {
+        for (src, main_only) in [(scripts::CONTEXT_HOOK, false), (scripts::EDITOR_HOOK, false), (login_helper.as_str(), true)] {
             let script = WKUserScript::initWithSource_injectionTime_forMainFrameOnly_inContentWorld(
                 WKUserScript::alloc(mtm),
                 &util::ns(src),
@@ -1490,6 +1535,7 @@ fn configuration(mtm: MainThreadMarker, store: &WKWebsiteDataStore, bridge: &Bri
         }
         let handler = ProtocolObject::from_ref(bridge);
         ucc.addScriptMessageHandler_contentWorld_name(handler, &world, &util::ns(scripts::CONTEXT_HANDLER));
+        ucc.addScriptMessageHandler_contentWorld_name(handler, &world, &util::ns(scripts::EDITOR_HANDLER));
         ucc.addScriptMessageHandler_contentWorld_name(handler, &world, &util::ns(scripts::LOGIN_HANDLER));
         cfg
     }

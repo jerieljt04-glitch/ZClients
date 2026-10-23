@@ -28,6 +28,7 @@ question with its first / last button and logs it.
 | `security` | Inspector off; WebKit UA + installed Safari version; sign-in helper absent off accounts.zoho.*; popup / download / mailto without a click all ask (declined → nothing happens); camera on www.zoho.com is *asked*, on meet.google.com *allowed* with two live tracks; Stop ends capture and the keep-awake assertion; an HTML file named .pdf is not shown; a real PDF opens from a 0700/0600 private folder |
 | `a11y` | Every toolbar/tab/sidebar control has a VoiceOver name; tabs are AXRadioButton/AXTabButton in an AXTabGroup with one selected; ←/→, Return, ⌥⇧→ work on the tab strip and focus stays there |
 | `address2` | Typed address text is dropped on tab switch and never navigates on page click; Esc restores; a Return for a tab no longer in front is dropped; Return on the same tab navigates |
+| `editor` | ⌘A, ⌘Z, ⇧⌘Z and Control-A reach a code editor's own key handler (CodeMirror/Ace/Monaco/hidden-textarea editors such as Zoho's Deluge editor); ⌘A in a plain text box still selects all |
 | `downloads` | PDF popups become tabs with viewer controls; hidden-frame and popup zips download; PDF attachments open as tabs; the PDF viewer's download button saves; every file is quarantined |
 | `meet`, `input`, `find`, `memory`, `perf`, `address`, `prep` | Unchanged from 1.4.0 (see README); `address`, `input`, `find` need System Events keystrokes |
 

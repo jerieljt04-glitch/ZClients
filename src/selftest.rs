@@ -681,6 +681,63 @@ fn address_test() {
     });
 }
 
+/// `ZCLIENTS_SELFTEST=editor`: ⌘A / ⌘Z / Control-A reach a code editor's
+/// own key handler (as in Safari); ⌘A in a plain text box still selects all.
+fn editor_test() {
+    util::after(2.0, || {
+        app::add_client("Editor Test", "#226644", None, app::LoginChange::Keep, Default::default());
+        app::address_entered("https://www.zoho.com/");
+    });
+    util::after(11.0, || {
+        web::eval_active(
+            r#"(() => { try {
+            const ed = document.body.appendChild(document.createElement('div'));
+            ed.className = 'CodeMirror';
+            ed.style.cssText = 'position:fixed;top:10px;left:10px;width:400px;height:80px;background:#222;z-index:2147483647';
+            const ta = ed.appendChild(document.createElement('textarea'));
+            ta.style.cssText = 'position:absolute;width:1px;height:1px;opacity:0';
+            window.__zcKeys = [];
+            ta.addEventListener('keydown', e => { if (e.metaKey) { window.__zcKeys.push((e.shiftKey ? 'shift+' : '') + 'cmd+' + e.key.toLowerCase()); e.preventDefault(); } });
+            const plain = document.body.appendChild(document.createElement('textarea'));
+            plain.id = 'zc-plain';
+            plain.value = 'line one\nline two\nline three';
+            plain.style.cssText = 'position:fixed;top:100px;left:10px;width:400px;height:80px;z-index:2147483647';
+            ta.focus();
+            return 'editor focused: ' + (document.activeElement === ta);
+        } catch (e) { return 'setup error: ' + e; } })()"#,
+            |r| util::log(format!("SELFTEST EDITOR {r}")),
+        );
+        if let Some(v) = web::active_view() {
+            ui::focus_view(&v);
+        }
+    });
+    util::after(13.0, || {
+        press("a", 0, NSEventModifierFlags::Command);
+        press("z", 6, NSEventModifierFlags::Command);
+        press("z", 6, NSEventModifierFlags::Command | NSEventModifierFlags::Shift);
+        press("a", 0, NSEventModifierFlags::Control);
+        util::after(1.0, || web::eval_active("JSON.stringify(window.__zcKeys)", |r| util::log(format!("SELFTEST EDITOR code editor received: {r}"))));
+    });
+    util::after(15.5, || {
+        web::eval_active("(() => { const p = document.getElementById('zc-plain'); p.focus(); p.setSelectionRange(0, 0); return 'plain box focused'; })()", |r| {
+            util::log(format!("SELFTEST EDITOR {r}"))
+        });
+        util::after(1.0, || {
+            press("a", 0, NSEventModifierFlags::Command);
+            util::after(0.8, || {
+                web::eval_active(
+                    "(() => { const p = document.getElementById('zc-plain'); return 'selected ' + (p.selectionEnd - p.selectionStart) + ' of ' + p.value.length; })()",
+                    |r| util::log(format!("SELFTEST EDITOR plain text box after ⌘A: {r}")),
+                )
+            });
+        });
+    });
+    util::after(20.0, || {
+        util::log("SELFTEST done");
+        NSApplication::sharedApplication(MainThreadMarker::new().unwrap()).terminate(None);
+    });
+}
+
 /// `ZCLIENTS_SELFTEST=address2`: text typed into the address bar never
 /// navigates when focus moves — to another tab, into the page — only Return
 /// for the same tab does; Esc restores the tab's address.
@@ -972,6 +1029,7 @@ pub fn start() {
         Ok("address") => return address_test(),
         Ok("security") => return security_test(),
         Ok("address2") => return address_rules_test(),
+        Ok("editor") => return editor_test(),
         Ok("a11y") => return a11y_test(),
         Ok(_) => {}
         Err(_) => return,

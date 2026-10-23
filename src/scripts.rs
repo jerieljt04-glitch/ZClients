@@ -3,6 +3,41 @@
 //! page can neither see these functions nor post fake messages to the app.
 
 pub const CONTEXT_HANDLER: &str = "zcContext";
+pub const EDITOR_HANDLER: &str = "zcEditor";
+
+/// Tells the app whether the keyboard is in a code editor (CodeMirror, Ace,
+/// Monaco, or any editor that types into a hidden text field and draws the
+/// text itself — Zoho's Deluge editor among them). Those editors implement
+/// Select All and Undo in their own key handlers, so the app sends them
+/// ⌘A / ⌘Z / ⇧⌘Z as keystrokes instead of running the menu command, which
+/// would only act on the hidden field. Reports a yes/no only; never text.
+pub const EDITOR_HOOK: &str = r#"
+(function () {
+  if (window.__zcEditorHook) { return; }
+  window.__zcEditorHook = true;
+  function isCodeEditor(el) {
+    if (!el || !el.closest) { return false; }
+    if (el.closest('.CodeMirror, .cm-editor, .ace_editor, .monaco-editor')) { return true; }
+    if (el.tagName === 'TEXTAREA') {
+      var r = el.getBoundingClientRect(), s = getComputedStyle(el);
+      return r.width < 4 || r.height < 4 || s.opacity === '0' || s.color === 'transparent';
+    }
+    return false;
+  }
+  var last = null;
+  function report(editor) {
+    if (editor === last) { return; }
+    last = editor;
+    try { window.webkit.messageHandlers.zcEditor.postMessage({ editor: editor ? 'yes' : 'no' }); } catch (x) {}
+  }
+  document.addEventListener('focusin', function (e) {
+    // Focus moving into a frame is reported by the frame itself.
+    if (e.target && (e.target.tagName === 'IFRAME' || e.target.tagName === 'FRAME')) { return; }
+    report(isCodeEditor(e.target));
+  }, true);
+  document.addEventListener('focusout', function (e) { if (!e.relatedTarget) { report(false); } }, true);
+})();
+"#;
 pub const LOGIN_HANDLER: &str = "zcLogin";
 
 /// Reports what the user right-clicked, so the context menu can offer a
