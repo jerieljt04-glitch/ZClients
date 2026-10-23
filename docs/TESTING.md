@@ -76,7 +76,7 @@ Run on the test app first; on the real app only after installing 1.5.0.
 - [ ] Full Keyboard Access on: Tab reaches tab chips, profile tile, swatches; focus ring visible.
 - [ ] ⌃⌘T focuses the tab strip; ←/→ moves; Return selects; ⌥⇧←/→ reorders; Delete closes; ⇧⌘A lists all tabs.
 - [ ] ⌘L selects the address; type, then click a tab / the page → nothing navigates; Esc restores and returns to the page.
-- [ ] In Zoho Writer ⌘S saves the document (not the sidebar); ⌃⌘S toggles the sidebar. In Sheet ⌘D fills down. In Meet ⌘D mutes.
+- [ ] In Zoho Writer ⌘S saves the document (not the sidebar); ⌃S toggles the sidebar. In Sheet ⌘D fills down. In Meet ⌘D mutes.
 - [ ] ⌘C/⌘X/⌘V/⇧⌘V/⌘Z/⇧⌘Z/⌘A in Mail compose, CRM notes, Desk reply, Writer, Sheet cells, Cliq.
 - [ ] Context menu on a link: Open Link in New Tab / Background Tab; Copy Link; Download Linked File.
 

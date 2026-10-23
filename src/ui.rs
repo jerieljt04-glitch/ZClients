@@ -2452,10 +2452,12 @@ fn build_menu() {
 
     let view = submenu(&bar, "View");
     // Not `toggleSidebar:` — AppKit reserves that name and re-routes it.
-    // ⌃⌘S is the standard Mac shortcut and always works; ⌘S still does when
-    // no page has the keyboard (pages keep ⌘S for their own Save).
-    key(&view, "Toggle Sidebar", sel!(zcToggleSidebar:), "s", cmd | ctrl);
-    alt_key(&view, "Toggle Sidebar ", sel!(zcToggleSidebar:), "s", cmd);
+    // Control-S, as the user asked; it always works, even with a page
+    // focused (Control shortcuts reach the menus first). ⌃⌘S (the standard
+    // Mac one) and ⌘S (outside pages) keep working too.
+    key(&view, "Toggle Sidebar", sel!(zcToggleSidebar:), "s", ctrl);
+    alt_key(&view, "Toggle Sidebar ", sel!(zcToggleSidebar:), "s", cmd | ctrl);
+    alt_key(&view, "Toggle Sidebar  ", sel!(zcToggleSidebar:), "s", cmd);
     view.addItem(&NSMenuItem::separatorItem(mtm));
     key(&view, "Zoom In", sel!(zoomIn:), "=", cmd);
     alt_key(&view, "Zoom In ", sel!(zoomIn:), "+", cmd);

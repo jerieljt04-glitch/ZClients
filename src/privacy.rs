@@ -370,7 +370,7 @@ fn rebuild() {
     b.heading("Keyboard");
     b.checkbox("Control-A selects all (as on Windows); off: start of line", settings::get(|s| s.control_a_selects_all), sel!(toggleSetting:), 1);
     b.checkbox("Web pages keep ⌘D, ⌘S, ⌘K and ⇧⌘S while they have the keyboard", settings::get(|s| s.page_owns_editor_shortcuts), sel!(toggleSetting:), 2);
-    b.text("The app's own versions stay available: Toggle Sidebar ⌃⌘S, Google Search ⌥⌘K, Download Current Page ⌥⌘S, Duplicate Tab from the File menu.", true);
+    b.text("The app's own versions stay available: Toggle Sidebar ⌃S, Google Search ⌥⌘K, Download Current Page ⌥⌘S, Duplicate Tab from the File menu.", true);
 
     // ---- developer (test builds only) ---------------------------------------
     if util::is_test_build() {

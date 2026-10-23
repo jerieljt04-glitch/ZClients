@@ -241,7 +241,7 @@ define_class!(
 /// App shortcuts that are also common editor shortcuts in web apps (Zoho
 /// Sheet fill-down ⌘D, Writer save ⌘S, insert link ⌘K, save as ⇧⌘S). While
 /// a page has the keyboard they go to the page; the app's own commands keep
-/// their always-available alternatives (⌃⌘S, ⌥⌘K, ⌥⌘S, menus).
+/// their always-available alternatives (⌃S, ⌥⌘K, ⌥⌘S, menus).
 pub fn page_owned_shortcut(chars: &str, mods: objc2_app_kit::NSEventModifierFlags, on_meet: bool, page_owns_editor_keys: bool) -> bool {
     use objc2_app_kit::NSEventModifierFlags as M;
     let held = mods & (M::Command | M::Shift | M::Option | M::Control);

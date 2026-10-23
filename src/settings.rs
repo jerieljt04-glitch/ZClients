@@ -32,7 +32,7 @@ pub struct Settings {
     pub control_a_selects_all: bool,
     /// While a web page has the keyboard, ⌘D, ⌘S, ⌘K and ⇧⌘S belong to the
     /// page (Zoho Sheet fill-down, Writer save, link insertion...). The
-    /// app's own versions stay on ⌃⌘S, ⌥⌘K, ⌥⌘S and the menus.
+    /// app's own versions stay on ⌃S, ⌥⌘K, ⌥⌘S and the menus.
     pub page_owns_editor_shortcuts: bool,
     /// Origin ("https://crm.zoho.com") → what to do when it starts a
     /// download without a recent click.
