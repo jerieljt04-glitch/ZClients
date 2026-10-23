@@ -20,49 +20,77 @@ use std::time::{Duration, Instant};
 use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Bool, ProtocolObject};
-use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadMarker, MainThreadOnly};
+use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSAlert, NSAlertStyle, NSApplication, NSBackingStoreType, NSEvent, NSMenu, NSMenuItem, NSOpenPanel, NSResponder,
-    NSTextField, NSUserInterfaceItemIdentification, NSView, NSWindow, NSWindowDelegate, NSWindowStyleMask, NSWorkspace,
+    NSAlert, NSAlertStyle, NSApplication, NSBackingStoreType, NSEvent, NSMenu, NSMenuItem, NSOpenPanel, NSResponder, NSTextField, NSUserInterfaceItemIdentification, NSView,
+    NSWindow, NSWindowDelegate, NSWindowStyleMask, NSWorkspace,
 };
 use objc2_foundation::{
-    NSArray, NSData, NSDictionary, NSError, NSHTTPURLResponse, NSKeyValueObservingOptions, NSNotification, NSNumber,
-    NSObject, NSObjectNSKeyValueObserverRegistration, NSObjectProtocol, NSPoint, NSProcessInfo, NSRect, NSSize, NSString, NSURLRequest, NSURL,
+    NSArray, NSData, NSDictionary, NSError, NSHTTPURLResponse, NSKeyValueObservingOptions, NSNotification, NSNumber, NSObject, NSObjectNSKeyValueObserverRegistration,
+    NSObjectProtocol, NSPoint, NSProcessInfo, NSRect, NSSize, NSString, NSURL, NSURLRequest,
 };
 use objc2_web_kit::{
-    WKContentWorld, WKDownload, WKFindConfiguration, WKFindResult, WKFrameInfo, WKMediaCaptureType, WKNavigation,
-    WKNavigationAction, WKNavigationActionPolicy, WKNavigationDelegate, WKNavigationResponse,
-    WKNavigationResponsePolicy, WKNavigationType, WKOpenPanelParameters, WKPermissionDecision, WKScriptMessage,
-    WKScriptMessageHandler, WKSecurityOrigin, WKUIDelegate, WKUserContentController, WKUserScript,
-    WKUserScriptInjectionTime, WKWebView, WKWebViewConfiguration, WKWebsiteDataStore, WKWindowFeatures,
+    WKContentWorld, WKDownload, WKFindConfiguration, WKFindResult, WKFrameInfo, WKMediaCaptureType, WKNavigation, WKNavigationAction, WKNavigationActionPolicy,
+    WKNavigationDelegate, WKNavigationResponse, WKNavigationResponsePolicy, WKNavigationType, WKOpenPanelParameters, WKPermissionDecision, WKScriptMessage, WKScriptMessageHandler,
+    WKSecurityOrigin, WKUIDelegate, WKUserContentController, WKUserScript, WKUserScriptInjectionTime, WKWebView, WKWebViewConfiguration, WKWebsiteDataStore, WKWindowFeatures,
 };
 use url::Url;
 use uuid::Uuid;
 
 use crate::model::{Tab, Workspace};
-use crate::{app, downloads, keychain, policy, scripts, session, tabstate, ui, util};
+use crate::policy::{Capability, Decision, Origin};
+use crate::{app, downloads, keychain, policy, scripts, session, settings, tabstate, ui, util};
+
+/// How recently a real key press or click must have happened for a page to
+/// open a window, start a download or open another app without asking.
+/// Only native AppKit events count: page JavaScript cannot fake them.
+const GESTURE_WINDOW: Duration = Duration::from_secs(5);
+const DOWNLOAD_GESTURE_WINDOW: Duration = Duration::from_secs(10);
+/// A popup may open one more popup (OAuth inside a widget), no deeper.
+const MAX_POPUP_DEPTH: u8 = 2;
+
+thread_local! {
+    static LAST_INPUT: Cell<Option<Instant>> = const { Cell::new(None) };
+}
+
+fn note_input() {
+    LAST_INPUT.set(Some(Instant::now()));
+}
+
+/// A real keyboard or mouse event reached a page within `within`.
+pub fn recent_gesture(within: Duration) -> bool {
+    LAST_INPUT.get().is_some_and(|t| t.elapsed() < within)
+}
 
 const KVO_KEYS: &[&str] = &["title", "URL", "canGoBack", "canGoForward", "loading", "cameraCaptureState", "microphoneCaptureState"];
 
-fn safari_user_agent() -> &'static str {
-    static UA: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    UA.get_or_init(build_user_agent)
+/// What WebKit appends to its own standard user agent: exactly what Safari
+/// on this Mac appends ("Version/<installed Safari> Safari/605.1.15"), so
+/// Zoho and Google serve the same desktop experience as to Safari. Nothing
+/// is spoofed beyond that, and no Safari version is hard-coded: if Safari's
+/// version cannot be read, only "Safari/605.1.15" is added.
+fn application_name_for_user_agent() -> &'static str {
+    static NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    NAME.get_or_init(|| {
+        let version = std::fs::read_to_string("/Applications/Safari.app/Contents/Info.plist").ok().and_then(|plist| safari_version(&plist));
+        user_agent_suffix(version.as_deref())
+    })
 }
 
-fn build_user_agent() -> String {
-    // Zoho and Google serve their full desktop experience to Safari. The
-    // version tracks the Safari installed on this Mac.
-    let version = std::fs::read_to_string("/Applications/Safari.app/Contents/Info.plist")
-        .ok()
-        .and_then(|plist| {
-            let i = plist.find("<key>CFBundleShortVersionString</key>")?;
-            let rest = &plist[i..];
-            let a = rest.find("<string>")? + 8;
-            let b = rest[a..].find("</string>")?;
-            Some(rest[a..a + b].to_string())
-        })
-        .unwrap_or_else(|| "18.6".into());
-    format!("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/{version} Safari/605.1.15")
+fn safari_version(plist: &str) -> Option<String> {
+    let i = plist.find("<key>CFBundleShortVersionString</key>")?;
+    let rest = &plist[i..];
+    let a = rest.find("<string>")? + 8;
+    let b = rest[a..].find("</string>")?;
+    let v = rest[a..a + b].trim();
+    (!v.is_empty() && v.len() < 16 && v.chars().all(|c| c.is_ascii_digit() || c == '.')).then(|| v.to_string())
+}
+
+fn user_agent_suffix(version: Option<&str>) -> String {
+    match version {
+        Some(v) => format!("Version/{v} Safari/605.1.15"),
+        None => "Safari/605.1.15".into(),
+    }
 }
 
 /// The Search workspace keeps its own cookie store, derived from the client
@@ -128,9 +156,11 @@ define_class!(
         // define — ⌘Enter in a Zoho editor, say — still reaches the page.
         #[unsafe(method(performKeyEquivalent:))]
         fn perform_key_equivalent(&self, event: &NSEvent) -> bool {
+            note_input();
             // Control+A selects all too, the way it does in browsers on
             // Windows (on a Mac it would only move to the start of a line).
-            if is_key(event, "a", objc2_app_kit::NSEventModifierFlags::Control) {
+            // A setting turns this back into the Mac behaviour.
+            if is_key(event, "a", objc2_app_kit::NSEventModifierFlags::Control) && settings::get(|s| s.control_a_selects_all) {
                 unsafe {
                     let _: () = msg_send![self, selectAll: None::<&AnyObject>];
                 }
@@ -140,12 +170,40 @@ define_class!(
             menu_first(event, on_meet) || unsafe { msg_send![super(self), performKeyEquivalent: event] }
         }
 
+        #[unsafe(method(keyDown:))]
+        fn key_down(&self, event: &NSEvent) {
+            note_input();
+            unsafe {
+                let _: () = msg_send![super(self), keyDown: event];
+            }
+        }
+
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, event: &NSEvent) {
+            note_input();
             self.ivars().last_click.set(Some((event.modifierFlags(), Instant::now())));
             unsafe {
                 let _: () = msg_send![super(self), mouseDown: event];
             }
+        }
+
+        #[unsafe(method(rightMouseDown:))]
+        fn right_mouse_down(&self, event: &NSEvent) {
+            note_input();
+            unsafe {
+                let _: () = msg_send![super(self), rightMouseDown: event];
+            }
+        }
+
+        #[unsafe(method(zcOpenLinkInTab:))]
+        fn open_link_in_tab(&self, sender: &NSMenuItem) {
+            let target = self.ivars().menu_targets.borrow().get(sender.tag() as usize).cloned();
+            let Some((url, _)) = target else { return };
+            let Some(u) = policy::parse(&url).filter(|u| policy::is_allowed_web(u, self.ivars().workspace)) else { return };
+            let background = sender.representedObject().is_some();
+            let (client, ws) = (self.ivars().client_id, self.ivars().workspace);
+            let opener = POOL.with_borrow(|p| p.live.iter().find(|(_, l)| std::ptr::eq(&*l.view, self)).map(|(id, _)| *id));
+            util::later(move || app::open_new_tab_from_page(client, ws, u, opener, background));
         }
 
         #[unsafe(method(zcDownloadContext:))]
@@ -159,14 +217,29 @@ define_class!(
     }
 );
 
+/// App shortcuts that are also common editor shortcuts in web apps (Zoho
+/// Sheet fill-down ⌘D, Writer save ⌘S, insert link ⌘K, save as ⇧⌘S). While
+/// a page has the keyboard they go to the page; the app's own commands keep
+/// their always-available alternatives (⌃⌘S, ⌥⌘K, ⌥⌘S, menus).
+pub fn page_owned_shortcut(chars: &str, mods: objc2_app_kit::NSEventModifierFlags, on_meet: bool, page_owns_editor_keys: bool) -> bool {
+    use objc2_app_kit::NSEventModifierFlags as M;
+    let held = mods & (M::Command | M::Shift | M::Option | M::Control);
+    let key = chars.to_ascii_lowercase();
+    // In Google Meet ⌘D mutes the microphone; the menu's Duplicate Tab must
+    // not take it (it opened a second copy of the call). Always.
+    if on_meet && held == M::Command && key == "d" {
+        return true;
+    }
+    page_owns_editor_keys && ((held == M::Command && matches!(key.as_str(), "d" | "s" | "k")) || (held == M::Command | M::Shift && key == "s"))
+}
+
 fn menu_first(event: &NSEvent, on_meet: bool) -> bool {
     let flags = event.modifierFlags();
     if !flags.intersects(objc2_app_kit::NSEventModifierFlags::Command | objc2_app_kit::NSEventModifierFlags::Control) {
         return false;
     }
-    // In Google Meet ⌘D mutes the microphone; the menu's Duplicate Tab must
-    // not take it (it opened a second copy of the call).
-    if is_key(event, "d", objc2_app_kit::NSEventModifierFlags::Command) && on_meet {
+    let chars = event.charactersIgnoringModifiers().map(|c| c.to_string()).unwrap_or_default();
+    if page_owned_shortcut(&chars, flags, on_meet, settings::get(|s| s.page_owns_editor_shortcuts)) {
         return false;
     }
     let Some(mtm) = MainThreadMarker::new() else { return false };
@@ -188,6 +261,7 @@ impl ZWebView {
         let ws = self.ivars().workspace;
         let ok = |u: &Option<String>| u.as_deref().and_then(policy::parse).is_some_and(|u| policy::is_safe_download(&u, ws));
         let mut items: Vec<(&str, String)> = vec![];
+        let showable = t.link.as_deref().and_then(policy::parse).is_some_and(|u| policy::is_allowed_web(&u, ws));
         if ok(&t.link) {
             items.push(("Download Linked File", t.link.clone().unwrap()));
         }
@@ -197,7 +271,7 @@ impl ZWebView {
         if ok(&t.media) {
             items.push(("Save Video to Downloads", t.media.clone().unwrap()));
         }
-        if items.is_empty() {
+        if items.is_empty() && !showable {
             return;
         }
         let replaced = ["WKMenuItemIdentifierDownloadImage", "WKMenuItemIdentifierDownloadLinkedFile", "WKMenuItemIdentifierDownloadMedia"];
@@ -210,15 +284,30 @@ impl ZWebView {
         let mut targets = self.ivars().menu_targets.borrow_mut();
         targets.clear();
         for (i, (title, url)) in items.iter().enumerate() {
-            let item = unsafe {
-                NSMenuItem::initWithTitle_action_keyEquivalent(NSMenuItem::alloc(mtm), &util::ns(title), Some(sel!(zcDownloadContext:)), &util::ns(""))
-            };
+            let item = unsafe { NSMenuItem::initWithTitle_action_keyEquivalent(NSMenuItem::alloc(mtm), &util::ns(title), Some(sel!(zcDownloadContext:)), &util::ns("")) };
             unsafe { item.setTarget(Some(self)) };
             item.setTag(i as isize);
             menu.insertItem_atIndex(&item, i as isize);
             targets.push((url.clone(), t.name.clone()));
         }
-        menu.insertItem_atIndex(&NSMenuItem::separatorItem(mtm), items.len() as isize);
+        let mut at = items.len() as isize;
+        if showable {
+            // WebKit's own "Open Link in New Window" stays; these add the
+            // browser-style tab variants.
+            let link = t.link.clone().unwrap_or_default();
+            for (title, background) in [("Open Link in New Tab", false), ("Open Link in Background Tab", true)] {
+                let item = unsafe { NSMenuItem::initWithTitle_action_keyEquivalent(NSMenuItem::alloc(mtm), &util::ns(title), Some(sel!(zcOpenLinkInTab:)), &util::ns("")) };
+                unsafe { item.setTarget(Some(self)) };
+                item.setTag(targets.len() as isize);
+                if background {
+                    unsafe { item.setRepresentedObject(Some(&util::ns("background"))) };
+                }
+                targets.push((link.clone(), None));
+                menu.insertItem_atIndex(&item, at);
+                at += 1;
+            }
+        }
+        menu.insertItem_atIndex(&NSMenuItem::separatorItem(mtm), at);
     }
 
     fn client_world(&self) -> Retained<WKContentWorld> {
@@ -236,12 +325,11 @@ fn new_zweb(mtm: MainThreadMarker, frame: NSRect, cfg: &WKWebViewConfiguration, 
     });
     let web: Retained<ZWebView> = unsafe { msg_send![super(this), initWithFrame: frame, configuration: cfg] };
     unsafe {
-        web.setCustomUserAgent(Some(&util::ns(safari_user_agent())));
         web.setAllowsBackForwardNavigationGestures(true);
         web.setAllowsMagnification(true);
-        // Lets Safari's Web Inspector attach (Develop menu) — the quickest way
-        // to see why a CRM widget misbehaves.
-        web.setInspectable(true);
+        // Safari's Web Inspector can attach only in debug builds, or in the
+        // test app with Developer Mode on. Never in the released app.
+        web.setInspectable(settings::web_inspector_allowed());
     }
     web
 }
@@ -264,7 +352,7 @@ fn start_context_download(web: &ZWebView, url: &str, name: Option<String>) {
     let fallback = inline_filename(&parsed, name.as_deref(), None);
     let args = NSDictionary::<NSString, AnyObject>::from_retained_objects(
         &[&*util::ns("u"), &*util::ns("limit")],
-        &[util::any(util::ns(url)), util::any(NSNumber::new_i64(64 * 1024 * 1024))],
+        &[util::any(util::ns(url)), util::any(NSNumber::new_i64(MAX_INLINE_BYTES as i64))],
     );
     let parsed2 = parsed.clone();
     let client = web.ivars().client_id;
@@ -275,7 +363,8 @@ fn start_context_download(web: &ZWebView, url: &str, name: Option<String>) {
             let v = d.objectForKey(&util::ns(k))?;
             v.downcast_ref::<NSString>().map(|s| s.to_string())
         };
-        match get("data").and_then(|b64| decode_base64(&b64)) {
+        // The page reports the size, but the decoded length is what counts.
+        match get("data").filter(|b64| b64.len() / 4 * 3 <= MAX_INLINE_BYTES + 3).and_then(|b64| decode_base64(&b64)).filter(|b| b.len() <= MAX_INLINE_BYTES) {
             Some(bytes) => {
                 let name = inline_filename(&parsed2, name.as_deref(), get("type").as_deref());
                 downloads::save_bytes(bytes, &name, Some(client));
@@ -284,15 +373,12 @@ fn start_context_download(web: &ZWebView, url: &str, name: Option<String>) {
         }
     });
     unsafe {
-        web.callAsyncJavaScript_arguments_inFrame_inContentWorld_completionHandler(
-            &util::ns(scripts::READ_INLINE_BODY),
-            Some(&args),
-            None,
-            &web.client_world(),
-            Some(&block),
-        )
+        web.callAsyncJavaScript_arguments_inFrame_inContentWorld_completionHandler(&util::ns(scripts::READ_INLINE_BODY), Some(&args), None, &web.client_world(), Some(&block))
     };
 }
+
+/// blob:/data: downloads are read through the page, so they are capped.
+pub const MAX_INLINE_BYTES: usize = 32 * 1024 * 1024;
 
 fn inline_filename(url: &Url, suggested: Option<&str>, mime: Option<&str>) -> String {
     let mut base = suggested.unwrap_or("").trim().to_string();
@@ -375,16 +461,18 @@ define_class!(
                 let s = v.downcast_ref::<NSString>()?.to_string();
                 (!s.is_empty() && s.len() < 4096).then_some(s)
             };
+            let frame = unsafe { message.frameInfo() };
+            let request = request_for(web, Some(&frame), web.ivars().workspace);
             if name == scripts::CONTEXT_HANDLER {
+                if policy::decide(Capability::Bridge, &request) != Decision::Allow {
+                    return;
+                }
                 let t = ContextTarget { link: get("link"), image: get("image"), media: get("media"), name: get("name"), at: Some(Instant::now()) };
                 *web.ivars().context.borrow_mut() = Some(t);
             } else if name == scripts::LOGIN_HANDLER {
-                // Only Zoho's own sign-in page may hand us a password.
-                let frame = unsafe { message.frameInfo() };
-                let origin = unsafe { frame.securityOrigin() };
-                let host = unsafe { origin.host() }.to_string();
-                let url = policy::parse(&format!("{}://{host}/", unsafe { origin.protocol() }));
-                if !unsafe { frame.isMainFrame() } || !url.is_some_and(|u| policy::is_zoho_sign_in(&u)) {
+                // Only Zoho's own sign-in page, as the tab's main frame, may
+                // hand us a password.
+                if policy::decide(Capability::Autofill, &request) != Decision::Allow {
                     return;
                 }
                 if let (Some(email), Some(password)) = (get("email"), get("password")) {
@@ -448,6 +536,8 @@ pub struct CoordIvars {
     /// The popup's main-frame response is a PDF being fetched to open as a
     /// tab; holds the address it came from (when that is worth keeping).
     pending_pdf: RefCell<Option<Option<String>>>,
+    /// 0 for a tab, 1 for a popup a tab opened, 2 for a popup of a popup.
+    depth: u8,
 }
 
 define_class!(
@@ -465,13 +555,16 @@ define_class!(
         }
 
         #[unsafe(method(webView:decidePolicyForNavigationResponse:decisionHandler:))]
-        fn decide_response(&self, _web: &WKWebView, response: &WKNavigationResponse, handler: &block2::DynBlock<dyn Fn(WKNavigationResponsePolicy)>) {
-            handler.call((self.response_policy(response),));
+        fn decide_response(&self, web: &WKWebView, response: &WKNavigationResponse, handler: &block2::DynBlock<dyn Fn(WKNavigationResponsePolicy)>) {
+            handler.call((self.response_policy(web, response),));
         }
 
         #[unsafe(method(webView:didCommitNavigation:))]
         fn did_commit(&self, web: &WKWebView, _nav: Option<&WKNavigation>) {
             self.ivars().external_probe.set(false);
+            if let Some(tab) = self.ivars().tab_id {
+                ui::clear_load_error(tab);
+            }
             if ns_str_url(unsafe { web.URL() }).is_some_and(|u| u != "about:blank") {
                 self.ivars().fresh.set(false);
             }
@@ -481,18 +574,26 @@ define_class!(
         #[unsafe(method(webView:didFinishNavigation:))]
         fn did_finish(&self, web: &WKWebView, _nav: Option<&WKNavigation>) {
             self.state_changed(web);
-            if let Some(win) = self.ivars().popup_window.borrow().as_ref() {
-                if let Some(t) = unsafe { web.title() } {
+            if let Some(win) = self.ivars().popup_window.borrow().as_ref()
+                && let Some(t) = unsafe { web.title() } {
                     win.setTitle(&t);
                 }
+            let iv = self.ivars();
+            if let Some(url) = ns_str_url(unsafe { web.URL() }).and_then(|s| policy::parse(&s)).filter(|u| policy::is_allowed_web(u, iv.workspace)) {
+                session::note_page_loaded(store_identifier(iv.client_id, iv.workspace));
+                apply_saved_zoom(web, iv.client_id, &url);
             }
             self.maybe_sign_in(web);
         }
 
         #[unsafe(method(webView:didFailProvisionalNavigation:withError:))]
-        fn did_fail_provisional(&self, web: &WKWebView, _nav: Option<&WKNavigation>, _e: &NSError) {
+        fn did_fail_provisional(&self, web: &WKWebView, _nav: Option<&WKNavigation>, e: &NSError) {
             self.ivars().external_probe.set(false);
             self.state_changed(web);
+            if let (Some(tab), Some(kind)) = (self.ivars().tab_id, load_error_kind(&e.domain().to_string(), e.code())) {
+                let failing = e.userInfo().objectForKey(&util::ns("NSErrorFailingURLStringKey")).and_then(|v| v.downcast::<NSString>().ok()).map(|s| s.to_string());
+                ui::show_load_error(tab, kind, failing);
+            }
         }
 
         #[unsafe(method(webView:didFailNavigation:withError:))]
@@ -507,12 +608,11 @@ define_class!(
             // them on the spot looked like pages refreshing by themselves and
             // spent the memory again; a background tab goes to sleep instead
             // and comes back (at its saved place) when it is next shown.
-            if let Some(tab) = self.ivars().tab_id {
-                if POOL.with_borrow(|p| p.active) != Some(tab) {
+            if let Some(tab) = self.ivars().tab_id
+                && POOL.with_borrow(|p| p.active) != Some(tab) {
                     util::later(move || release(tab));
                     return;
                 }
-            }
             let ok = unsafe { web.URL() }.and_then(|u| util::url_string(&u)).and_then(|s| policy::parse(&s))
                 .is_some_and(|u| policy::is_allowed_web(&u, self.ivars().workspace));
             if ok {
@@ -551,10 +651,16 @@ define_class!(
         fn display_capture_permission(&self, _web: &WKWebView, origin: &WKSecurityOrigin, _frame: &WKFrameInfo, _audio: Bool, decide: &block2::DynBlock<dyn Fn(isize)>) {
             const DENY: isize = 0;
             const SCREEN_PROMPT: isize = 1;
-            let ok = origin_url(origin).is_some_and(|u| policy::auto_grants_media(&u));
-            if util::is_test_build() {
-                util::log(format!("screen sharing requested by {:?}: {}", origin_url(origin).map(|u| u.to_string()), if ok { "picker" } else { "denied" }));
-            }
+            let request = request_for(_web, Some(_frame), self.ivars().workspace);
+            let (ok, how) = match policy::decide(Capability::ScreenCapture, &request) {
+                Decision::Allow => (true, "allowed"),
+                Decision::Prompt => {
+                    let who = request.origin.as_ref().map(Origin::display).unwrap_or_default();
+                    (confirm(&format!("Allow {who} to share your screen?"), "macOS will then ask which screen or window to share.", "Choose What to Share"), "asked")
+                }
+                Decision::Deny => (false, "denied"),
+            };
+            record_media_use(request.origin.as_ref(), "screen", if ok { how } else { "denied" });
             decide.call((if ok { SCREEN_PROMPT } else { DENY },));
         }
 
@@ -624,20 +730,32 @@ define_class!(
         }
 
         #[unsafe(method(webView:requestMediaCapturePermissionForOrigin:initiatedByFrame:type:decisionHandler:))]
-        fn media_permission(&self, _web: &WKWebView, origin: &WKSecurityOrigin, _frame: &WKFrameInfo, _kind: WKMediaCaptureType, decide: &block2::DynBlock<dyn Fn(WKPermissionDecision)>) {
-            let decision = if origin_url(origin).is_some_and(|u| policy::auto_grants_media(&u)) {
-                WKPermissionDecision::Grant
-            } else if origin_allowed(origin, self.ivars().workspace) {
-                WKPermissionDecision::Prompt
-            } else {
-                WKPermissionDecision::Deny
+        fn media_permission(&self, web: &WKWebView, origin: &WKSecurityOrigin, frame: &WKFrameInfo, kind: WKMediaCaptureType, decide: &block2::DynBlock<dyn Fn(WKPermissionDecision)>) {
+            let mut request = request_for(web, Some(frame), self.ivars().workspace);
+            // WebKit names the origin asking; it must agree with the frame.
+            let asked = Origin::from_parts(&unsafe { origin.protocol() }.to_string(), &unsafe { origin.host() }.to_string(), unsafe { origin.port() } as i64);
+            if asked != request.origin {
+                request.origin = None;
+            }
+            let cap = if kind == WKMediaCaptureType::Microphone { Capability::Microphone } else { Capability::Camera };
+            let decision = match policy::decide(cap, &request) {
+                Decision::Allow => WKPermissionDecision::Grant,
+                Decision::Prompt => WKPermissionDecision::Prompt,
+                Decision::Deny => WKPermissionDecision::Deny,
             };
+            let what = match kind {
+                WKMediaCaptureType::Camera => "camera",
+                WKMediaCaptureType::Microphone => "microphone",
+                _ => "camera and microphone",
+            };
+            let how = if decision == WKPermissionDecision::Grant { "allowed" } else if decision == WKPermissionDecision::Prompt { "asked" } else { "denied" };
+            record_media_use(request.origin.as_ref(), what, how);
             decide.call((decision,));
         }
 
         #[unsafe(method(webView:runOpenPanelWithParameters:initiatedByFrame:completionHandler:))]
         fn open_panel(&self, web: &WKWebView, params: &WKOpenPanelParameters, frame: &WKFrameInfo, done: &block2::DynBlock<dyn Fn(*mut NSArray<NSURL>)>) {
-            if !self.trusted(frame) {
+            if policy::decide(Capability::FileChooser, &request_for(web, Some(frame), self.ivars().workspace)) != Decision::Allow {
                 return done.call((std::ptr::null_mut(),));
             }
             let panel = NSOpenPanel::openPanel(self.mtm());
@@ -692,16 +810,137 @@ fn wants_front(web: &WKWebView, action: &WKNavigationAction) -> bool {
     click_modifiers(web, action).contains(M::Command | M::Shift)
 }
 
-fn origin_url(origin: &WKSecurityOrigin) -> Option<Url> {
-    let (scheme, host, port) = unsafe { (origin.protocol().to_string(), origin.host().to_string(), origin.port()) };
-    if scheme.is_empty() || host.is_empty() {
-        return None;
-    }
-    policy::parse(&if port > 0 { format!("{scheme}://{host}:{port}/") } else { format!("{scheme}://{host}/") })
+fn frame_origin(frame: &WKFrameInfo) -> Option<Origin> {
+    let o = unsafe { frame.securityOrigin() };
+    Origin::from_parts(&unsafe { o.protocol() }.to_string(), &unsafe { o.host() }.to_string(), unsafe { o.port() } as i64)
 }
 
-fn origin_allowed(origin: &WKSecurityOrigin, ws: Workspace) -> bool {
-    unsafe { policy::is_allowed_origin(&origin.protocol().to_string(), &origin.host().to_string(), origin.port() as i64, ws) }
+/// Everything `policy::decide` needs about a request from `frame` (None:
+/// the tab's main frame) of `web`, read live from WebKit.
+fn request_for(web: &WKWebView, frame: Option<&WKFrameInfo>, workspace: Workspace) -> policy::Request {
+    let top = ns_str_url(unsafe { web.URL() }).and_then(|u| policy::parse(&u)).and_then(|u| Origin::of(&u));
+    let (origin, main_frame) = match frame {
+        Some(f) => (frame_origin(f), unsafe { f.isMainFrame() }),
+        None => (top.clone(), true),
+    };
+    policy::Request { origin, top, main_frame, user_gesture: recent_gesture(GESTURE_WINDOW), workspace }
+}
+
+/// A two-button confirmation. True for the first button.
+pub fn confirm(title: &str, message: &str, ok: &str) -> bool {
+    run_alert(title, message, &[ok, "Cancel"], None).0 == 0
+}
+
+/// One camera/microphone/screen request, kept in memory for the Privacy
+/// window (never written to disk).
+#[derive(Clone)]
+pub struct MediaUse {
+    pub origin: String,
+    pub what: &'static str,
+    /// "allowed" (no prompt), "asked" (the user was prompted) or "denied".
+    pub decision: &'static str,
+    pub at: std::time::SystemTime,
+}
+
+thread_local! {
+    static MEDIA_LOG: RefCell<Vec<MediaUse>> = const { RefCell::new(Vec::new()) };
+}
+
+fn record_media_use(origin: Option<&Origin>, what: &'static str, decision: &'static str) {
+    let origin = origin.map(Origin::display).unwrap_or_else(|| "an unidentified frame".into());
+    MEDIA_LOG.with_borrow_mut(|l| {
+        l.insert(0, MediaUse { origin, what, decision, at: std::time::SystemTime::now() });
+        l.truncate(30);
+    });
+}
+
+pub fn recent_media_uses() -> Vec<MediaUse> {
+    MEDIA_LOG.with_borrow(|l| l.clone())
+}
+
+/// Why a page failed to load, for the error screen. None for failures that
+/// are not errors to show (a navigation cancelled or turned into a download).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LoadError {
+    Offline,
+    Certificate,
+    Authentication,
+    Unsupported,
+    Other,
+}
+
+pub fn load_error_kind(domain: &str, code: isize) -> Option<LoadError> {
+    match (domain, code) {
+        // Cancelled (a new navigation started) / frame load interrupted by a
+        // policy change or a download: not an error the user needs to see.
+        ("NSURLErrorDomain", -999) | ("WebKitErrorDomain", 102) | ("WebKitErrorDomain", 204) => None,
+        ("NSURLErrorDomain", -1009 | -1005 | -1001 | -1003 | -1004 | -1020 | -1018) => Some(LoadError::Offline),
+        ("NSURLErrorDomain", -1206..=-1200) => Some(LoadError::Certificate),
+        ("NSURLErrorDomain", -1013 | -1012) => Some(LoadError::Authentication),
+        ("NSURLErrorDomain", -1002) | ("WebKitErrorDomain", 100 | 101) => Some(LoadError::Unsupported),
+        _ => Some(LoadError::Other),
+    }
+}
+
+fn apply_saved_zoom(web: &WKWebView, client: Uuid, url: &Url) {
+    let Some(host) = url.host_str() else { return };
+    let zoom = settings::zoom_for(client, host).unwrap_or(1.0).clamp(0.5, 3.0);
+    unsafe {
+        if (web.pageZoom() - zoom).abs() > 0.001 {
+            web.setPageZoom(zoom);
+        }
+    }
+}
+
+/// A page wants to download a file without (or outside) a recent click,
+/// or from a page the app does not show. Asks, honouring the per-site
+/// choice. `decision` comes from `policy::decide(Capability::Download, ..)`.
+fn download_consent(decision: Decision, origin: Option<&Origin>) -> bool {
+    let key = origin.map(Origin::display).unwrap_or_default();
+    match decision {
+        Decision::Allow => true,
+        Decision::Deny => {
+            util::log("download refused: no click and not from a page this app shows");
+            false
+        }
+        Decision::Prompt => match settings::download_permission(&key) {
+            settings::SitePermission::Allow => true,
+            settings::SitePermission::Block => false,
+            settings::SitePermission::Ask => {
+                let who = if key.is_empty() { "A page".to_string() } else { key.clone() };
+                let (button, _) = run_alert(
+                    &format!("{who} wants to download a file"),
+                    "It started without a recent click in the page. Downloads are saved to your Downloads folder.",
+                    &["Download", "Always Allow for This Site", "Cancel"],
+                    None,
+                );
+                if button == 1 && !key.is_empty() {
+                    settings::set_download_permission(&key, settings::SitePermission::Allow);
+                }
+                button <= 1
+            }
+        },
+    }
+}
+
+/// Is this web view the tab in front, or a popup window that has the
+/// keyboard? Background tabs may not open windows.
+fn is_foreground(web: &WKWebView, tab: Option<Uuid>) -> bool {
+    match tab {
+        Some(t) => POOL.with_borrow(|p| p.active == Some(t)),
+        None => web.window().is_some_and(|w| w.isKeyWindow()),
+    }
+}
+
+fn scheme_app_name(scheme: &str) -> &'static str {
+    match scheme {
+        "mailto" => "your email app",
+        "tel" | "facetime" => "FaceTime",
+        "sms" => "Messages",
+        "zoommtg" => "Zoom",
+        "msteams" => "Microsoft Teams",
+        _ => "another app",
+    }
 }
 
 /// Dialogs are titled with the origin really asking, so a frame cannot
@@ -714,6 +953,15 @@ fn origin_title(frame: &WKFrameInfo) -> String {
 /// Modal alert. Returns the index of the button pressed and, for prompts, the
 /// text entered.
 pub fn run_alert(title: &str, message: &str, buttons: &[&str], input: Option<String>) -> (usize, Option<String>) {
+    // Unattended self-tests (test builds only): ZCLIENTS_ALERTS=accept picks
+    // the first button, =decline the last, and the question is logged.
+    if util::is_test_build()
+        && let Ok(answer) = std::env::var("ZCLIENTS_ALERTS")
+    {
+        let i = if answer == "accept" { 0 } else { buttons.len().saturating_sub(1) };
+        util::log(format!("SELFTEST alert {title:?} -> {:?}", buttons.get(i)));
+        return (i, input);
+    }
     let mtm = MainThreadMarker::new().expect("main thread");
     let alert = NSAlert::new(mtm);
     alert.setMessageText(&util::ns(title));
@@ -738,7 +986,7 @@ fn ns_str_url(url: Option<Retained<NSURL>>) -> Option<String> {
 }
 
 impl Coordinator {
-    fn new(mtm: MainThreadMarker, client: Uuid, tab: Option<Uuid>, ws: Workspace, popup_trusted: bool, fresh: bool) -> Retained<Self> {
+    fn new(mtm: MainThreadMarker, client: Uuid, tab: Option<Uuid>, ws: Workspace, popup_trusted: bool, fresh: bool, depth: u8) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(CoordIvars {
             client_id: client,
             tab_id: tab,
@@ -749,6 +997,7 @@ impl Coordinator {
             popup_trusted,
             fresh: Cell::new(fresh),
             pending_pdf: RefCell::new(None),
+            depth,
         });
         unsafe { msg_send![super(this), init] }
     }
@@ -757,7 +1006,9 @@ impl Coordinator {
     /// URL that created it: a subframe that started on Zoho and was moved
     /// elsewhere still reports the Zoho request URL.
     fn trusted(&self, frame: &WKFrameInfo) -> bool {
-        origin_allowed(&*unsafe { frame.securityOrigin() }, self.ivars().workspace)
+        let request =
+            policy::Request { origin: frame_origin(frame), top: None, main_frame: unsafe { frame.isMainFrame() }, user_gesture: false, workspace: self.ivars().workspace };
+        policy::decide(Capability::Display, &request) == Decision::Allow
     }
 
     fn trusted_opt(&self, frame: Option<Retained<WKFrameInfo>>) -> bool {
@@ -822,20 +1073,46 @@ impl Coordinator {
             }
         }
 
-        if unsafe { action.shouldPerformDownload() } && source_trusted && policy::is_safe_download(&url, iv.workspace) {
-            return WKNavigationActionPolicy::Download;
+        let source = unsafe { action.sourceFrame() };
+        let source_request = || {
+            let mut r = request_for(web, source.as_deref(), iv.workspace);
+            r.user_gesture = recent_gesture(DOWNLOAD_GESTURE_WINDOW);
+            r
+        };
+
+        if unsafe { action.shouldPerformDownload() } && policy::is_safe_download(&url, iv.workspace) {
+            let r = source_request();
+            return if download_consent(policy::decide(Capability::Download, &r), r.origin.as_ref()) {
+                WKNavigationActionPolicy::Download
+            } else {
+                WKNavigationActionPolicy::Cancel
+            };
         }
 
-        // mailto:, tel: and similar from a Zoho page go to the Mac's own app.
-        if matches!(url.scheme(), "mailto" | "tel" | "facetime" | "sms" | "zoommtg" | "msteams") && source_trusted {
-            open_externally(&url);
+        // mailto:, tel: and similar go to the Mac's own app: straight away
+        // after a click in a page this app shows, otherwise only if the user
+        // confirms. Never silently.
+        if matches!(url.scheme(), "mailto" | "tel" | "facetime" | "sms" | "zoommtg" | "msteams") {
+            let r = request_for(web, source.as_deref(), iv.workspace);
+            let open = match policy::decide(Capability::ExternalLink, &r) {
+                Decision::Allow => true,
+                Decision::Prompt => {
+                    let who = r.origin.as_ref().map(Origin::display).unwrap_or_else(|| "A page".into());
+                    confirm(&format!("Open {}?", scheme_app_name(url.scheme())), &format!("{who} wants to open a {}: link.", url.scheme()), "Open")
+                }
+                Decision::Deny => false,
+            };
+            if open {
+                open_externally(&url);
+            }
             return WKNavigationActionPolicy::Cancel;
         }
 
         // PDF tabs (including old previews kept by the Swift build).
         if url.scheme() == "file" {
-            let dir = util::pdf_previews_dir();
-            let ok = url.to_file_path().is_ok_and(|p| p.starts_with(&dir));
+            // Only this tab's own PDF, nothing else on disk.
+            let own = iv.tab_id.and_then(|t| app::store(|s| s.find_tab(t).and_then(|t| t.pdf_path.clone())));
+            let ok = url.to_file_path().is_ok_and(|p| own.is_some_and(|o| std::path::Path::new(&o) == p));
             return if ok { WKNavigationActionPolicy::Allow } else { WKNavigationActionPolicy::Cancel };
         }
 
@@ -860,7 +1137,7 @@ impl Coordinator {
         WKNavigationActionPolicy::Cancel
     }
 
-    fn response_policy(&self, nav: &WKNavigationResponse) -> WKNavigationResponsePolicy {
+    fn response_policy(&self, web: &WKWebView, nav: &WKNavigationResponse) -> WKNavigationResponsePolicy {
         let iv = self.ivars();
         let response = unsafe { nav.response() };
         let main = unsafe { nav.isForMainFrame() };
@@ -884,19 +1161,31 @@ impl Coordinator {
             if !is_file {
                 return WKNavigationResponsePolicy::Allow;
             }
-            let from_zoho = ns_str_url(response.URL()).and_then(|s| policy::parse(&s)).is_some_and(|u| policy::is_frame_download_allowed(&u, iv.workspace));
-            return if from_zoho { WKNavigationResponsePolicy::Download } else { WKNavigationResponsePolicy::Cancel };
+            let file_url = ns_str_url(response.URL()).and_then(|s| policy::parse(&s));
+            let from_zoho = file_url.as_ref().is_some_and(|u| policy::is_frame_download_allowed(u, iv.workspace));
+            if !from_zoho {
+                return WKNavigationResponsePolicy::Cancel;
+            }
+            let r = self.download_request(web, file_url.as_ref());
+            return if download_consent(policy::decide(Capability::Download, &r), r.origin.as_ref()) {
+                WKNavigationResponsePolicy::Download
+            } else {
+                WKNavigationResponsePolicy::Cancel
+            };
         }
 
         let url = ns_str_url(response.URL()).and_then(|s| policy::parse(&s));
-        let allowed_page = url.as_ref().is_some_and(|u| {
-            policy::is_allowed_web(u, iv.workspace) || u.scheme() == "file" || u.scheme() == "blob" || u.as_str() == "about:blank"
-        });
+        let allowed_page = url.as_ref().is_some_and(|u| policy::is_allowed_web(u, iv.workspace) || u.scheme() == "file" || u.scheme() == "blob" || u.as_str() == "about:blank");
         let probe_was_user = iv.external_user.replace(false);
         iv.external_probe.set(false);
 
         if is_file {
-            return WKNavigationResponsePolicy::Download;
+            let r = self.download_request(web, url.as_ref());
+            return if download_consent(policy::decide(Capability::Download, &r), r.origin.as_ref()) {
+                WKNavigationResponsePolicy::Download
+            } else {
+                WKNavigationResponsePolicy::Cancel
+            };
         }
         // A PDF a page opened in a popup window (print previews, invoices,
         // blob: documents) opens as a tab instead, like any browser. It is
@@ -915,14 +1204,17 @@ impl Coordinator {
             return WKNavigationResponsePolicy::Allow;
         }
         if mime.starts_with("image/") || mime.starts_with("video/") || mime.starts_with("audio/") {
-            return WKNavigationResponsePolicy::Download;
+            let r = self.download_request(web, url.as_ref());
+            return if download_consent(policy::decide(Capability::Download, &r), r.origin.as_ref()) {
+                WKNavigationResponsePolicy::Download
+            } else {
+                WKNavigationResponsePolicy::Cancel
+            };
         }
         // An ordinary outside website the user clicked through to (a lead's
         // homepage, a help article): open it in the default browser.
-        if probe_was_user {
-            if let Some(u) = url {
-                open_externally(&u);
-            }
+        if probe_was_user && let Some(u) = url {
+            open_externally(&u);
         }
         WKNavigationResponsePolicy::Cancel
     }
@@ -941,8 +1233,30 @@ impl Coordinator {
         // that receives the post itself; a new tab would reload it as GET.
         let is_get = request.HTTPMethod().is_none_or(|m| m.to_string().eq_ignore_ascii_case("GET"));
 
+        let source = unsafe { action.sourceFrame() };
+        let source_request = request_for(web, source.as_deref(), iv.workspace);
+        // Background tabs and pages without a recent click do not get new
+        // windows on their own; a page the app shows may ask.
+        let popup_ok = |what: &str| -> bool {
+            if !is_foreground(web, iv.tab_id) {
+                util::log("window.open from a background page refused");
+                return false;
+            }
+            match policy::decide(Capability::Popup, &source_request) {
+                Decision::Allow => true,
+                Decision::Prompt if source_trusted => {
+                    let who = source_request.origin.as_ref().map(Origin::display).unwrap_or_default();
+                    confirm(&format!("{who} wants to open {what}"), "It was not opened by a click in the page.", "Allow")
+                }
+                _ => false,
+            }
+        };
+
         if let Some(u) = &url {
             if unsafe { action.shouldPerformDownload() } && source_trusted && policy::is_safe_download(u, iv.workspace) {
+                if !download_consent(policy::decide(Capability::Download, &source_request), source_request.origin.as_ref()) {
+                    return None;
+                }
                 // The page's own request, so a POSTed download keeps its body.
                 let block = RcBlock::new(|d: NonNull<WKDownload>| downloads::adopt(unsafe { d.as_ref() }));
                 unsafe { web.startDownloadUsingRequest_completionHandler(&request, &block) };
@@ -951,6 +1265,9 @@ impl Coordinator {
             // ⌘-click, target=_blank and plain window.open(url) to a page
             // this app shows: a new tab, like any browser.
             if policy::is_allowed_web(u, iv.workspace) && !sized && is_get && iv.tab_id.is_some() {
+                if !popup_ok("a new tab") {
+                    return None;
+                }
                 // Zoho opens most links from its own click handlers with
                 // window.open; ⌘ held for that click means a background tab.
                 let background = new_tab_click(web, action) && !wants_front(web, action);
@@ -959,7 +1276,7 @@ impl Coordinator {
                 return None;
             }
             // A link to an outside website: the default browser.
-            if policy::is_https(u) && user_link && !policy::is_allowed_web(u, iv.workspace) {
+            if policy::is_https(u) && user_link && !policy::is_allowed_web(u, iv.workspace) && recent_gesture(GESTURE_WINDOW) {
                 open_externally(u);
                 return None;
             }
@@ -970,7 +1287,11 @@ impl Coordinator {
         // Sign and payment pages. Returning no web view here (as the old
         // build did) breaks those, because the page can never talk to its
         // popup.
-        if !source_trusted && !iv.popup_trusted {
+        // Only a frame the app shows (judged by its live origin, never by
+        // having been opened by one) may open a popup, and chains stop at
+        // MAX_POPUP_DEPTH. A popup that wandered off to another site keeps
+        // no power to open more windows.
+        if !source_trusted || iv.depth >= MAX_POPUP_DEPTH || !popup_ok("a pop-up window") {
             return None;
         }
         let w = unsafe { features.width() }.map(|n| n.doubleValue()).unwrap_or(980.0).clamp(320.0, 1600.0);
@@ -987,7 +1308,7 @@ impl Coordinator {
         };
         unsafe { window.setReleasedWhenClosed(false) };
         window.setTitle(&util::ns("Loading…"));
-        let coord = Coordinator::new(mtm, iv.client_id, None, iv.workspace, true, true);
+        let coord = Coordinator::new(mtm, iv.client_id, None, iv.workspace, true, true, iv.depth + 1);
         let popup = new_zweb(mtm, rect, cfg, iv.client_id, iv.workspace);
         unsafe {
             popup.setNavigationDelegate(Some(ProtocolObject::from_ref(&*coord)));
@@ -1002,16 +1323,31 @@ impl Coordinator {
         Some(Retained::into_super(popup))
     }
 
-    /// On Zoho's sign-in page, sign the profile back in with its saved login.
+    /// The request behind a response that is a file: the file's own origin
+    /// (a data: file belongs to the page showing it), and whether there was
+    /// a recent click.
+    fn download_request(&self, web: &WKWebView, file_url: Option<&Url>) -> policy::Request {
+        let page = || ns_str_url(unsafe { web.URL() }).and_then(|u| policy::parse(&u)).and_then(|u| Origin::of(&u));
+        let origin = match file_url {
+            Some(u) if u.scheme() == "data" => page(),
+            Some(u) => Origin::of(u),
+            None => None,
+        };
+        policy::Request { origin: origin.clone(), top: origin, main_frame: true, user_gesture: recent_gesture(DOWNLOAD_GESTURE_WINDOW), workspace: self.ivars().workspace }
+    }
+
+    /// On Zoho's sign-in page, fill in the profile's saved login. The email
+    /// step is advanced (no secret leaves the app for that), the password is
+    /// filled, and the user presses Sign In: the app never submits a
+    /// password by itself.
     fn maybe_sign_in(&self, web: &WKWebView) {
         let iv = self.ivars();
-        if iv.workspace != Workspace::Zoho {
+        // Exact sign-in origin, as the tab's live main frame, right now.
+        let request = request_for(web, None, iv.workspace);
+        if policy::decide(Capability::Autofill, &request) != Decision::Allow {
             return;
         }
-        let Some(url) = ns_str_url(unsafe { web.URL() }).and_then(|s| policy::parse(&s)) else { return };
-        if !policy::is_zoho_sign_in(&url) {
-            return;
-        }
+        let Some(expected) = request.origin.as_ref().map(Origin::display) else { return };
         let Some(login) = keychain::read_login(iv.client_id) else { return };
         // Bounded, so a changed password cannot turn into a sign-in loop.
         let key = iv.client_id;
@@ -1027,10 +1363,17 @@ impl Coordinator {
         if !allowed {
             return;
         }
-        let js = format!("window.__zcFill && window.__zcFill({}, {})", scripts::js_string(&login.email), scripts::js_string(&login.password));
+        // The secrets go in as call arguments, never into script source, to
+        // the main frame (inFrame: nil) of the app's isolated world. The
+        // helper re-checks the page's origin before every step.
+        let args = NSDictionary::<NSString, AnyObject>::from_retained_objects(
+            &[&*util::ns("email"), &*util::ns("password"), &*util::ns("origin")],
+            &[util::any(util::ns(&login.email)), util::any(util::ns(&login.password)), util::any(util::ns(&expected))],
+        );
+        drop(login);
         let world = unsafe { WKContentWorld::defaultClientWorld(self.mtm()) };
         let noop = RcBlock::new(|_r: *mut AnyObject, _e: *mut NSError| {});
-        unsafe { web.evaluateJavaScript_inFrame_inContentWorld_completionHandler(&util::ns(&js), None, &world, Some(&noop)) };
+        unsafe { web.callAsyncJavaScript_arguments_inFrame_inContentWorld_completionHandler(&util::ns(scripts::FILL_CALL), Some(&args), None, &world, Some(&noop)) };
     }
 }
 
@@ -1086,14 +1429,24 @@ thread_local! {
     });
 }
 
-fn data_store(p: &mut Pool, client: Uuid, ws: Workspace) -> (Uuid, Retained<WKWebsiteDataStore>) {
+fn data_store(p: &mut Pool, client: Uuid, ws: Workspace) -> (Uuid, Retained<WKWebsiteDataStore>, bool) {
     let id = store_identifier(client, ws);
-    let store = p
-        .stores
-        .entry(id)
-        .or_insert_with(|| unsafe { WKWebsiteDataStore::dataStoreForIdentifier(&util::ns_uuid(id), MainThreadMarker::new().unwrap()) })
-        .clone();
-    (id, store)
+    let new = !p.stores.contains_key(&id);
+    let store = p.stores.entry(id).or_insert_with(|| unsafe { WKWebsiteDataStore::dataStoreForIdentifier(&util::ns_uuid(id), MainThreadMarker::new().unwrap()) }).clone();
+    (id, store, new)
+}
+
+/// A profile's "Keep me signed in" choice.
+pub fn retention_of(client: Uuid) -> session::Retention {
+    app::store(|s| s.client(client).map(|c| c.retention())).unwrap_or_default()
+}
+
+/// The user changed a profile's retention: both of its stores follow.
+pub fn retention_changed(client: Uuid) {
+    let r = retention_of(client);
+    for ws in [Workspace::Zoho, Workspace::GoogleSearch] {
+        session::set_retention(store_identifier(client, ws), r);
+    }
 }
 
 fn bridge(p: &mut Pool, mtm: MainThreadMarker) -> Retained<Bridge> {
@@ -1109,6 +1462,7 @@ fn configuration(mtm: MainThreadMarker, store: &WKWebsiteDataStore, bridge: &Bri
     unsafe {
         let cfg = WKWebViewConfiguration::new(mtm);
         cfg.setWebsiteDataStore(store);
+        cfg.setApplicationNameForUserAgent(Some(&util::ns(application_name_for_user_agent())));
         let prefs = cfg.preferences();
         prefs.setJavaScriptCanOpenWindowsAutomatically(true);
         prefs.setElementFullscreenEnabled(true);
@@ -1123,7 +1477,8 @@ fn configuration(mtm: MainThreadMarker, store: &WKWebsiteDataStore, bridge: &Bri
         }
         let ucc = cfg.userContentController();
         let world = WKContentWorld::defaultClientWorld(mtm);
-        for (src, main_only) in [(scripts::CONTEXT_HOOK, false), (scripts::LOGIN_HELPER, true)] {
+        let login_helper = scripts::login_helper();
+        for (src, main_only) in [(scripts::CONTEXT_HOOK, false), (login_helper.as_str(), true)] {
             let script = WKUserScript::initWithSource_injectionTime_forMainFrameOnly_inContentWorld(
                 WKUserScript::alloc(mtm),
                 &util::ns(src),
@@ -1154,13 +1509,13 @@ pub fn view_for(client_id: Uuid, tab: &Tab) -> Retained<ZWebView> {
     }
     let mtm = MainThreadMarker::new().expect("main thread");
     let ws = tab.effective_workspace();
-    let (view, store, store_id) = POOL.with_borrow_mut(|p| {
-        let (store_id, store) = data_store(p, client_id, ws);
+    let (view, store, store_id, new_store) = POOL.with_borrow_mut(|p| {
+        let (store_id, store, new_store) = data_store(p, client_id, ws);
         let bridge = bridge(p, mtm);
         let cfg = configuration(mtm, &store, &bridge);
         let view = new_zweb(mtm, NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(800.0, 600.0)), &cfg, client_id, ws);
         let fresh = p.opened_by_page.remove(&tab.id);
-        let coord = Coordinator::new(mtm, client_id, Some(tab.id), ws, false, fresh);
+        let coord = Coordinator::new(mtm, client_id, Some(tab.id), ws, false, fresh, 0);
         unsafe {
             view.setNavigationDelegate(Some(ProtocolObject::from_ref(&*coord)));
             view.setUIDelegate(Some(ProtocolObject::from_ref(&*coord)));
@@ -1176,8 +1531,12 @@ pub fn view_for(client_id: Uuid, tab: &Tab) -> Retained<ZWebView> {
         }
         p.live.insert(tab.id, Live { view: view.clone(), _coord: coord, observer });
         touch(p, tab.id);
-        (view, store, store_id)
+        (view, store, store_id, new_store)
     });
+    let retention = retention_of(client_id);
+    if new_store {
+        session::register(store_id, &store, retention);
+    }
     enforce_cap();
     app::changed(app::TABS);
 
@@ -1188,7 +1547,7 @@ pub fn view_for(client_id: Uuid, tab: &Tab) -> Retained<ZWebView> {
     // zoom) more often in testing.
     let tab = tab.clone();
     let v = view.clone();
-    session::hydrate(&store, store_id, move || {
+    session::hydrate(&store, store_id, retention, move || {
         let still_live = POOL.with_borrow(|p| p.live.get(&tab.id).is_some_and(|l| Retained::as_ptr(&l.view) == Retained::as_ptr(&v)));
         if still_live {
             load_tab(&v, &tab);
@@ -1199,11 +1558,20 @@ pub fn view_for(client_id: Uuid, tab: &Tab) -> Retained<ZWebView> {
 
 fn load_tab(view: &ZWebView, tab: &Tab) {
     let ws = tab.effective_workspace();
-    if let Some(path) = tab.pdf_path.as_deref().filter(|p| std::path::Path::new(p).exists()) {
-        let file = NSURL::fileURLWithPath(&util::ns(path));
-        let dir = NSURL::fileURLWithPath(&util::ns(&util::pdf_previews_dir().to_string_lossy()));
-        unsafe { view.loadFileURL_allowingReadAccessToURL(&file, &dir) };
-        return;
+    if let Some(path) = tab.pdf_path.as_deref() {
+        // Only a valid PDF in its own private preview folder is shown, and
+        // WebKit may read that folder alone.
+        let file = std::path::Path::new(path);
+        let root = util::pdf_previews_dir();
+        match (crate::pdf::validate(file), crate::pdf::preview_dir_of(&root, file)) {
+            (Ok(()), Some(dir)) => {
+                let file = NSURL::fileURLWithPath(&util::ns(path));
+                let dir = NSURL::fileURLWithPath(&util::ns(&dir.to_string_lossy()));
+                unsafe { view.loadFileURL_allowingReadAccessToURL(&file, &dir) };
+                return;
+            }
+            (result, _) => util::log(format!("PDF tab not shown: {}", result.err().map(|e| e.to_string()).unwrap_or_else(|| "not in a preview folder".into()))),
+        }
     }
     let Some(url) = tab.url.as_deref() else { return };
     // Exact place: replay WebKit's own snapshot (history + scroll position)
@@ -1282,11 +1650,7 @@ fn idle_limit(pressure: usize) -> Duration {
 pub fn sleep_idle_tabs() {
     let victims: Vec<Uuid> = POOL.with_borrow(|p| {
         let limit = idle_limit(p.pressure);
-        p.live
-            .iter()
-            .filter(|(id, l)| Some(**id) != p.active && !in_call(&l.view) && p.shown.get(*id).is_some_and(|t| t.elapsed() > limit))
-            .map(|(id, _)| *id)
-            .collect()
+        p.live.iter().filter(|(id, l)| Some(**id) != p.active && !in_call(&l.view) && p.shown.get(*id).is_some_and(|t| t.elapsed() > limit)).map(|(id, _)| *id).collect()
     });
     for id in victims {
         sleep_tab(id);
@@ -1366,12 +1730,7 @@ fn current_pressure() -> usize {
 pub fn watch_memory_pressure() {
     set_pressure(current_pressure());
     unsafe {
-        let source = dispatch_source_create(
-            &_dispatch_source_type_memorypressure,
-            0,
-            PRESSURE_NORMAL | PRESSURE_WARN | PRESSURE_CRITICAL,
-            &_dispatch_main_q,
-        );
+        let source = dispatch_source_create(&_dispatch_source_type_memorypressure, 0, PRESSURE_NORMAL | PRESSURE_WARN | PRESSURE_CRITICAL, &_dispatch_main_q);
         if source.is_null() {
             return;
         }
@@ -1423,7 +1782,6 @@ fn enforce_cap() {
 pub fn sleep_tab(id: Uuid) {
     save_state(id);
     release(id);
-
 }
 
 /// Release a tab's web view without saving anything (it is closing, or about
@@ -1470,34 +1828,72 @@ pub fn save_all_states() {
     }
 }
 
-/// Forget a profile entirely: web views, both data stores, cookie backup.
-pub fn delete_client(client: Uuid, tabs: &[Uuid]) {
+/// A profile is being deleted: drop its web views, popups and open stores
+/// so WebKit can remove its data (see `cleanup.rs`). Returns its store ids.
+pub fn release_client(client: Uuid, tabs: &[Uuid]) -> Vec<Uuid> {
     for t in tabs {
         release(*t);
-        tabstate::delete(*t);
     }
-    let popups: Vec<Retained<Coordinator>> = POOL.with_borrow(|p| {
-        p.popups.iter().filter(|(c, _)| c.ivars().client_id == client).map(|(c, _)| c.clone()).collect()
-    });
+    let popups: Vec<Retained<Coordinator>> = POOL.with_borrow(|p| p.popups.iter().filter(|(c, _)| c.ivars().client_id == client).map(|(c, _)| c.clone()).collect());
     for c in popups {
         if let Some(w) = c.ivars().popup_window.borrow().clone() {
             w.close();
         }
     }
-    for ws in [Workspace::Zoho, Workspace::GoogleSearch] {
-        let id = store_identifier(client, ws);
-        POOL.with_borrow_mut(|p| p.stores.remove(&id));
-        session::forget(id);
-        // The store can only be removed once no web view uses it.
-        util::after(0.5, move || {
-            let block = RcBlock::new(move |err: *mut NSError| {
-                if let Some(e) = unsafe { err.as_ref() } {
-                    util::log(format!("could not remove data store {id}: {}", e.localizedDescription()));
-                }
-            });
-            unsafe { WKWebsiteDataStore::removeDataStoreForIdentifier_completionHandler(&util::ns_uuid(id), &block, MainThreadMarker::new().unwrap()) };
+    [Workspace::Zoho, Workspace::GoogleSearch]
+        .into_iter()
+        .map(|ws| {
+            let id = store_identifier(client, ws);
+            POOL.with_borrow_mut(|p| p.stores.remove(&id));
+            id
+        })
+        .collect()
+}
+
+pub fn user_agent_suffix_in_use() -> &'static str {
+    application_name_for_user_agent()
+}
+
+/// Clear a store's cookies, or all its website data, whether or not one of
+/// its tabs is open. `done(true)` once WebKit reports it finished.
+pub fn clear_website_data(store_id: Uuid, cookies_only: bool, done: impl Fn(bool) + 'static) {
+    let Some(mtm) = MainThreadMarker::new() else { return done(false) };
+    let store = POOL.with_borrow(|p| p.stores.get(&store_id).cloned()).unwrap_or_else(|| unsafe { WKWebsiteDataStore::dataStoreForIdentifier(&util::ns_uuid(store_id), mtm) });
+    let types = unsafe {
+        if cookies_only {
+            objc2_foundation::NSSet::from_retained_slice(&[objc2::Message::retain(objc2_web_kit::WKWebsiteDataTypeCookies)])
+        } else {
+            WKWebsiteDataStore::allWebsiteDataTypes(mtm)
+        }
+    };
+    let since = objc2_foundation::NSDate::distantPast();
+    let block = RcBlock::new(move || done(true));
+    unsafe { store.removeDataOfTypes_modifiedSince_completionHandler(&types, &since, &block) };
+}
+
+/// Remove a WebKit data store, then check WebKit no longer lists it.
+pub fn remove_data_store(id: Uuid, done: impl FnOnce(Result<(), String>) + 'static) {
+    let Some(mtm) = MainThreadMarker::new() else { return done(Err("not on the main thread".into())) };
+    let done = std::rc::Rc::new(RefCell::new(Some(done)));
+    let block = RcBlock::new(move |err: *mut NSError| {
+        if let Some(e) = unsafe { err.as_ref() } {
+            let msg = e.localizedDescription().to_string();
+            if let Some(d) = done.borrow_mut().take() {
+                d(Err(msg));
+            }
+            return;
+        }
+        let done = done.clone();
+        let verify = RcBlock::new(move |ids: NonNull<NSArray<objc2_foundation::NSUUID>>| {
+            let target = util::ns_uuid(id).UUIDString().to_string();
+            let still = unsafe { ids.as_ref() }.iter().any(|u| u.UUIDString().to_string().eq_ignore_ascii_case(&target));
+            if let Some(d) = done.borrow_mut().take() {
+                d(if still { Err("WebKit still lists the store".into()) } else { Ok(()) });
+            }
         });
-    }
+        unsafe { WKWebsiteDataStore::fetchAllDataStoreIdentifiers(&verify, MainThreadMarker::new().unwrap()) };
+    });
+    unsafe { WKWebsiteDataStore::removeDataStoreForIdentifier_completionHandler(&util::ns_uuid(id), &block, mtm) };
 }
 
 /// The tab was opened by a page, so if all it ever loads is a download it
@@ -1520,10 +1916,10 @@ pub fn set_active(id: Option<Uuid>) {
         }
         prev
     });
-    if previous != id {
-        if let Some(prev) = previous {
-            save_state(prev);
-        }
+    if previous != id
+        && let Some(prev) = previous
+    {
+        save_state(prev);
     }
 }
 
@@ -1539,12 +1935,8 @@ pub fn live_tabs() -> HashSet<Uuid> {
     POOL.with_borrow(|p| p.live.keys().copied().collect())
 }
 
-fn open_stores() -> Vec<(Uuid, Retained<WKWebsiteDataStore>)> {
-    POOL.with_borrow(|p| p.stores.iter().map(|(id, s)| (*id, s.clone())).collect())
-}
-
 pub fn capture_sessions(wait: bool) {
-    session::capture_all(open_stores(), wait);
+    session::capture_all(wait);
 }
 
 pub struct PageState {
@@ -1604,13 +1996,46 @@ pub fn stop() {
     }
 }
 
+/// Zoom the active page; the level is remembered for this profile and site.
 pub fn zoom(delta: f64) {
-    if let Some(v) = active_view() {
-        unsafe {
-            let z = if delta == 0.0 { 1.0 } else { (v.pageZoom() + delta).clamp(0.5, 3.0) };
-            v.setPageZoom(z);
-        }
+    let Some(v) = active_view() else { return };
+    let z = unsafe { if delta == 0.0 { 1.0 } else { (v.pageZoom() + delta).clamp(0.5, 3.0) } };
+    unsafe { v.setPageZoom(z) };
+    let client = v.ivars().client_id;
+    if let Some(host) = ns_str_url(unsafe { v.URL() }).and_then(|u| policy::parse(&u)).and_then(|u| u.host_str().map(str::to_string)) {
+        settings::set_zoom(client, &host, z);
     }
+}
+
+/// Every awake tab using the camera or microphone: (client, tab, camera, mic).
+pub fn tabs_in_calls() -> Vec<(Uuid, Uuid, bool, bool)> {
+    use objc2_web_kit::WKMediaCaptureState as S;
+    POOL.with_borrow(|p| {
+        p.live
+            .iter()
+            .filter_map(|(id, l)| {
+                let (cam, mic) = unsafe { (l.view.cameraCaptureState() != S::None, l.view.microphoneCaptureState() != S::None) };
+                (cam || mic).then(|| (l.view.ivars().client_id, *id, cam, mic))
+            })
+            .collect()
+    })
+}
+
+/// Turn a tab's camera and microphone off (public WebKit API; the page sees
+/// its tracks end, as when Safari's indicator is used).
+pub fn stop_media(tab: Uuid) {
+    let Some(v) = live_view(tab) else { return };
+    use objc2_web_kit::WKMediaCaptureState as S;
+    unsafe {
+        v.setCameraCaptureState_completionHandler(S::None, None);
+        v.setMicrophoneCaptureState_completionHandler(S::None, None);
+    }
+    util::later(refresh_call_state);
+}
+
+/// Is the app holding the display awake for a call right now?
+pub fn keeping_awake() -> bool {
+    CALL_ACTIVITY.with_borrow(|a| a.is_some())
 }
 
 pub fn find(text: &str, backwards: bool, done: impl Fn(bool) + 'static) {
@@ -1658,9 +2083,27 @@ pub fn eval_in_tab_async(tab: Uuid, js: &str, done: impl Fn(String) + 'static) {
     unsafe { v.callAsyncJavaScript_arguments_inFrame_inContentWorld_completionHandler(&util::ns(js), None, None, &world, Some(&block)) };
 }
 
+/// Self-tests: run an async function body in the app's own isolated world
+/// of the active page.
+pub fn eval_in_client_world(js: &str, done: impl Fn(String) + 'static) {
+    let Some(v) = active_view() else { return done("no web view".into()) };
+    let block = RcBlock::new(move |r: *mut AnyObject, e: *mut NSError| {
+        let text = unsafe { r.as_ref() }
+            .and_then(|r| r.downcast_ref::<NSString>().map(|s| s.to_string()))
+            .or_else(|| unsafe { e.as_ref() }.map(|e| format!("error: {}", e.localizedDescription())))
+            .unwrap_or_else(|| "(no result)".into());
+        done(text);
+    });
+    let world = unsafe { WKContentWorld::defaultClientWorld(MainThreadMarker::new().unwrap()) };
+    unsafe { v.callAsyncJavaScript_arguments_inFrame_inContentWorld_completionHandler(&util::ns(js), None, None, &world, Some(&block)) };
+}
+
 /// WebKit is holding off system sleep for this tab (private, diagnostics).
 pub fn has_sleep_disabler(tab: Uuid) -> bool {
-    live_view(tab).is_some_and(|v| unsafe { msg_send![&*v, _hasSleepDisabler] })
+    live_view(tab).is_some_and(|v| unsafe {
+        let responds: bool = msg_send![&*v, respondsToSelector: sel!(_hasSleepDisabler)];
+        responds && msg_send![&*v, _hasSleepDisabler]
+    })
 }
 
 /// Print the active page with the standard print panel.
@@ -1680,6 +2123,21 @@ pub fn print() {
             op.runOperation();
         }
     }
+}
+
+/// Retry a failed download in its own profile (a click in the app is the
+/// user's gesture). Only https addresses, through a live tab of that profile.
+pub fn download_url(client: Option<Uuid>, url: &str) {
+    let Some(u) = policy::parse(url).filter(policy::is_https) else { return };
+    let view = POOL.with_borrow(|p| {
+        let active = p.active.and_then(|id| p.live.get(&id)).map(|l| l.view.clone());
+        active
+            .filter(|v| client.is_none_or(|c| v.ivars().client_id == c))
+            .or_else(|| p.live.values().find(|l| client.is_none_or(|c| l.view.ivars().client_id == c)).map(|l| l.view.clone()))
+    });
+    let (Some(v), Some(nsurl)) = (view, util::ns_url(u.as_str())) else { return };
+    let block = RcBlock::new(|d: NonNull<WKDownload>| downloads::adopt(unsafe { d.as_ref() }));
+    unsafe { v.startDownloadUsingRequest_completionHandler(&NSURLRequest::requestWithURL(&nsurl), &block) };
 }
 
 /// Download whatever the active tab is showing (handy for PDFs).
@@ -1715,6 +2173,39 @@ mod tests {
         assert_eq!(b[0], 0xEF ^ 0x47);
         assert_eq!(b[7], 0x7E ^ 0x21);
         assert_eq!(b[8..], client.as_bytes()[8..]);
+    }
+
+    #[test]
+    fn pages_keep_their_editor_shortcuts_and_meet_keeps_cmd_d() {
+        use objc2_app_kit::NSEventModifierFlags as M;
+        assert!(page_owned_shortcut("d", M::Command, true, false), "Meet mute, whatever the setting");
+        assert!(page_owned_shortcut("s", M::Command, false, true), "Writer save");
+        assert!(page_owned_shortcut("K", M::Command, false, true), "insert link");
+        assert!(page_owned_shortcut("s", M::Command | M::Shift, false, true));
+        assert!(!page_owned_shortcut("s", M::Command, false, false), "setting off: the app's ⌘S");
+        for (k, m) in [("t", M::Command), ("w", M::Command), ("l", M::Command), ("r", M::Command), ("v", M::Command), ("1", M::Command), ("s", M::Command | M::Control)] {
+            assert!(!page_owned_shortcut(k, m, true, true), "browser shortcut {k} stays with the app");
+        }
+    }
+
+    #[test]
+    fn load_errors_worth_showing() {
+        assert_eq!(load_error_kind("NSURLErrorDomain", -999), None, "cancelled");
+        assert_eq!(load_error_kind("WebKitErrorDomain", 102), None, "became a download / policy");
+        assert_eq!(load_error_kind("NSURLErrorDomain", -1009), Some(LoadError::Offline));
+        assert_eq!(load_error_kind("NSURLErrorDomain", -1202), Some(LoadError::Certificate));
+        assert_eq!(load_error_kind("NSURLErrorDomain", -1012), Some(LoadError::Authentication));
+        assert_eq!(load_error_kind("NSURLErrorDomain", -1002), Some(LoadError::Unsupported));
+        assert_eq!(load_error_kind("Other", 5), Some(LoadError::Other));
+    }
+
+    #[test]
+    fn user_agent_suffix_follows_installed_safari_and_never_invents_a_version() {
+        let plist = "<key>CFBundleShortVersionString</key>\n\t<string>26.1</string>";
+        assert_eq!(safari_version(plist).as_deref(), Some("26.1"));
+        assert_eq!(user_agent_suffix(Some("26.1")), "Version/26.1 Safari/605.1.15");
+        assert_eq!(user_agent_suffix(None), "Safari/605.1.15");
+        assert_eq!(safari_version("<key>CFBundleShortVersionString</key><string>1.0; evil</string>"), None);
     }
 
     #[test]

@@ -18,9 +18,7 @@ use crate::policy;
 /// Seconds between 1970-01-01 and 2001-01-01, Foundation's reference date.
 const REFERENCE_DATE_OFFSET: f64 = 978_307_200.0;
 
-pub const GOOGLE_SEARCH_ID: Uuid = Uuid::from_bytes([
-    0x47, 0x53, 0x45, 0x41, 0x52, 0x43, 0x48, 0x21, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
-]);
+pub const GOOGLE_SEARCH_ID: Uuid = Uuid::from_bytes([0x47, 0x53, 0x45, 0x41, 0x52, 0x43, 0x48, 0x21, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01]);
 pub const GOOGLE_SEARCH_HOME: &str = "https://www.google.com/";
 const GOOGLE_BLUE: &str = "#4285f4";
 
@@ -87,11 +85,15 @@ pub struct Tab {
     pub pdf_source_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<Workspace>,
+    /// Search tabs: the profile the search was started from. Zoho and Meet
+    /// results open in that profile, never in the Search workspace.
+    #[serde(rename = "originClientId", with = "upper_uuid::option", default, skip_serializing_if = "Option::is_none")]
+    pub origin_client: Option<Uuid>,
 }
 
 impl Default for Tab {
     fn default() -> Self {
-        Tab { id: Uuid::new_v4(), url: None, title: default_title(), pdf_path: None, pdf_source_url: None, workspace: None }
+        Tab { id: Uuid::new_v4(), url: None, title: default_title(), pdf_path: None, pdf_source_url: None, workspace: None, origin_client: None }
     }
 }
 
@@ -120,7 +122,7 @@ impl Tab {
     }
 }
 
-pub use crate::apps::{ZohoApp, ZOHO_APPS};
+pub use crate::apps::{ZOHO_APPS, ZohoApp};
 
 pub fn matched_zoho_app(url: Option<&str>) -> Option<&'static ZohoApp> {
     let host = url.and_then(policy::parse)?.host_str()?.to_lowercase();
@@ -177,6 +179,12 @@ pub struct Client {
     pub created_at: Option<f64>,
     #[serde(rename = "symbolName", default, skip_serializing_if = "Option::is_none")]
     pub symbol_name: Option<String>,
+    /// "Keep me signed in" (absent = on, the behaviour before this setting).
+    #[serde(rename = "keepSignedIn", default, skip_serializing_if = "Option::is_none")]
+    pub keep_signed_in: Option<bool>,
+    /// How long a kept session lasts without use, in days.
+    #[serde(rename = "sessionRetentionDays", default, skip_serializing_if = "Option::is_none")]
+    pub session_days: Option<u32>,
 }
 
 fn default_color() -> String {
@@ -195,6 +203,15 @@ impl Client {
             kind: None,
             created_at: Some(now_reference()),
             symbol_name: None,
+            keep_signed_in: None,
+            session_days: None,
+        }
+    }
+
+    pub fn retention(&self) -> crate::session::Retention {
+        crate::session::Retention {
+            keep: self.keep_signed_in.unwrap_or(true),
+            days: self.session_days.filter(|d| (1..=400).contains(d)).unwrap_or(crate::session::DEFAULT_RETENTION_DAYS),
         }
     }
 
@@ -283,8 +300,7 @@ pub enum SortMode {
 }
 
 impl SortMode {
-    pub const ALL: [SortMode; 5] =
-        [SortMode::Manual, SortMode::NameAscending, SortMode::NameDescending, SortMode::NewestFirst, SortMode::OldestFirst];
+    pub const ALL: [SortMode; 5] = [SortMode::Manual, SortMode::NameAscending, SortMode::NameDescending, SortMode::NewestFirst, SortMode::OldestFirst];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -323,7 +339,10 @@ pub enum Effect {
     ResetTab(Uuid),
     /// Delete every trace of a profile: web views, data stores, cookie
     /// backup, saved login and page state.
-    DeleteClient { client_id: Uuid, tab_ids: Vec<Uuid> },
+    DeleteClient {
+        client_id: Uuid,
+        tab_ids: Vec<Uuid>,
+    },
     RemoveFile(String),
 }
 
@@ -333,6 +352,53 @@ pub struct Store {
     pub active_client_id: Option<Uuid>,
     pub sort_mode: SortMode,
     closed: Vec<ClosedTab>,
+}
+
+/// The `version` this build writes. A larger one is a newer ZClients's
+/// file: it is never rewritten by this build.
+pub const SCHEMA_VERSION: u32 = 4;
+
+/// Why the profile file could not be used. Each one leaves the file exactly
+/// as it is.
+#[derive(Debug, PartialEq)]
+pub enum LoadProblem {
+    /// It exists but could not be read (permissions, I/O error).
+    Unreadable(String),
+    /// It was read but is not a profile list.
+    Corrupt(String),
+    /// Written by a newer ZClients.
+    FutureVersion(u32),
+}
+
+impl std::fmt::Display for LoadProblem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LoadProblem::Unreadable(e) => write!(f, "it could not be read ({e})"),
+            LoadProblem::Corrupt(e) => write!(f, "it is damaged ({e})"),
+            LoadProblem::FutureVersion(v) => write!(f, "it was saved by a newer version of ZClients (format {v})"),
+        }
+    }
+}
+
+/// Turn the result of reading `clients.json` into a store. `Ok(None)`: there
+/// is no file (first launch). Anything else that fails is a problem the
+/// caller must surface; it never becomes an empty profile list on its own.
+pub fn classify_read(read: std::io::Result<Vec<u8>>) -> Result<Option<Store>, LoadProblem> {
+    match read {
+        Ok(data) => decode_store(&data).map(Some),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(LoadProblem::Unreadable(e.to_string())),
+    }
+}
+
+pub fn decode_store(data: &[u8]) -> Result<Store, LoadProblem> {
+    if let Ok(v) = serde_json::from_slice::<serde_json::Value>(data)
+        && let Some(version) = v.get("version").and_then(|x| x.as_u64())
+        && version > SCHEMA_VERSION as u64
+    {
+        return Err(LoadProblem::FutureVersion(version as u32));
+    }
+    Store::from_json(data).map_err(|e| LoadProblem::Corrupt(e.to_string()))
 }
 
 impl Store {
@@ -346,6 +412,9 @@ impl Store {
                 store.sort_mode = s.sort_mode.unwrap_or_default();
                 store.active_client_id = s.active_client_id;
             }
+            // A snapshot (an object) that fails to decode is reported as
+            // such, not as "not an array".
+            Err(e) if data.iter().find(|b| !b.is_ascii_whitespace()) == Some(&b'{') => return Err(e),
             Err(_) => {
                 store.clients = serde_json::from_slice::<Vec<Client>>(data)?;
             }
@@ -355,17 +424,13 @@ impl Store {
     }
 
     pub fn to_json(&self) -> Vec<u8> {
-        let snapshot = Snapshot {
-            version: 4,
-            active_client_id: self.active_client_id,
-            clients: self.clients.clone(),
-            sort_mode: Some(self.sort_mode),
-        };
+        let snapshot = Snapshot { version: SCHEMA_VERSION, active_client_id: self.active_client_id, clients: self.clients.clone(), sort_mode: Some(self.sort_mode) };
         serde_json::to_vec(&snapshot).unwrap_or_default()
     }
 
     /// Fix up anything a crash or an older build could have left behind.
     pub fn repair(&mut self) {
+        self.repair_duplicate_ids();
         // Clients saved before ordering existed get dates derived from their
         // position, so "oldest first" reproduces the order the user had.
         let mut offset = 0.0;
@@ -400,22 +465,62 @@ impl Store {
         }
     }
 
+    /// Two profiles with one id would share one WebKit data store (the id
+    /// *is* the store), and two tabs with one id share saved page state. The
+    /// first keeps its id; a later duplicate gets a fresh one, so nothing is
+    /// ever merged: the duplicate profile starts signed out in a new, empty
+    /// store and is marked "(recovered)". Returns how many ids changed.
+    pub fn repair_duplicate_ids(&mut self) -> usize {
+        let mut fixed = 0;
+        let mut clients = std::collections::HashSet::new();
+        let mut tabs = std::collections::HashSet::new();
+        for c in &mut self.clients {
+            if !clients.insert(c.id) && !c.is_search() {
+                c.id = Uuid::new_v4();
+                clients.insert(c.id);
+                c.name = format!("{} (recovered)", c.name);
+                fixed += 1;
+            }
+            for t in &mut c.tabs {
+                if !tabs.insert(t.id) {
+                    let was_active = c.active_tab_id == Some(t.id);
+                    t.id = Uuid::new_v4();
+                    tabs.insert(t.id);
+                    if was_active {
+                        c.active_tab_id = Some(t.id);
+                    }
+                    fixed += 1;
+                }
+            }
+        }
+        // Two Search clients: keep the first; ensure_search_client drops
+        // the rest's duplicate pages.
+        let mut seen_search = false;
+        self.clients.retain(|c| !(c.is_search() || c.id == GOOGLE_SEARCH_ID) || !std::mem::replace(&mut seen_search, true));
+        fixed
+    }
+
     /// The permanent Google Search workspace: always present, always first,
     /// always the system id, and never a duplicate of a Zoho page.
     pub fn ensure_search_client(&mut self) {
         let existing = self.clients.iter().position(|c| c.id == GOOGLE_SEARCH_ID || c.is_search());
         let Some(i) = existing else {
             let tab = search_tab(GOOGLE_SEARCH_HOME);
-            self.clients.insert(0, Client {
-                id: GOOGLE_SEARCH_ID,
-                name: "Google Search".into(),
-                color_hex: GOOGLE_BLUE.into(),
-                active_tab_id: Some(tab.id),
-                tabs: vec![tab],
-                kind: Some(ClientKind::GoogleSearch),
-                created_at: Some(-REFERENCE_DATE_OFFSET),
-                symbol_name: None,
-            });
+            self.clients.insert(
+                0,
+                Client {
+                    id: GOOGLE_SEARCH_ID,
+                    name: "Google Search".into(),
+                    color_hex: GOOGLE_BLUE.into(),
+                    active_tab_id: Some(tab.id),
+                    tabs: vec![tab],
+                    kind: Some(ClientKind::GoogleSearch),
+                    created_at: Some(-REFERENCE_DATE_OFFSET),
+                    symbol_name: None,
+                    keep_signed_in: None,
+                    session_days: None,
+                },
+            );
             if self.active_client_id.is_none() {
                 self.active_client_id = Some(GOOGLE_SEARCH_ID);
             }
@@ -580,6 +685,36 @@ impl Store {
         effects
     }
 
+    /// Set a profile's "Keep me signed in". True when it changed.
+    pub fn set_retention(&mut self, id: Uuid, r: crate::session::Retention) -> bool {
+        let Some(c) = self.client_mut(id) else { return false };
+        let before = c.retention();
+        c.keep_signed_in = Some(r.keep);
+        c.session_days = Some(r.days);
+        before != c.retention()
+    }
+
+    /// Every PDF preview a tab refers to, open or reopenable.
+    pub fn preview_paths(&self) -> Vec<String> {
+        let open = self.clients.iter().flat_map(|c| c.tabs.iter());
+        let closed = self.closed.iter().map(|e| &e.tab);
+        open.chain(closed).filter_map(|t| t.pdf_path.clone()).collect()
+    }
+
+    pub fn set_pdf_path(&mut self, tab: Uuid, path: Option<String>) -> bool {
+        let Some(t) = self.find_tab_mut(tab) else { return false };
+        if path.is_none() {
+            t.pdf_source_url.get_or_insert_with(|| t.url.clone().unwrap_or_default());
+        }
+        t.pdf_path = path;
+        true
+    }
+
+    /// Drop the reopen-closed-tab list (on quit, or when clearing previews).
+    pub fn forget_closed_tabs(&mut self) {
+        self.closed.clear();
+    }
+
     pub fn select_client(&mut self, id: Uuid) -> bool {
         if self.index(id).is_none() || self.active_client_id == Some(id) {
             return false;
@@ -682,8 +817,7 @@ impl Store {
     /// would download the file again.
     pub fn discard_tab(&mut self, client_id: Uuid, tab_id: Uuid) -> Vec<Effect> {
         let mut effects = self.close_tab(client_id, tab_id);
-        if self.closed.last().is_some_and(|e| e.tab.id == tab_id) {
-            let entry = self.closed.pop().expect("checked above");
+        if let Some(entry) = self.closed.pop_if(|e| e.tab.id == tab_id) {
             if let Some(p) = entry.tab.pdf_path {
                 effects.push(Effect::RemoveFile(p));
             }
@@ -766,47 +900,61 @@ impl Store {
     pub fn go_home(&mut self) -> Vec<Effect> {
         let Some((c, t)) = self.active_tab() else { return vec![] };
         let (search, tab_id) = (c.is_search(), t.id);
-        if search {
-            self.navigate_tab(tab_id, Some(GOOGLE_SEARCH_HOME.into()), Some(Workspace::GoogleSearch))
-        } else {
-            self.navigate_tab(tab_id, None, None)
-        }
+        if search { self.navigate_tab(tab_id, Some(GOOGLE_SEARCH_HOME.into()), Some(Workspace::GoogleSearch)) } else { self.navigate_tab(tab_id, None, None) }
     }
 
     /// Open a Zoho/Meet page that came from Search as a normal tab of the
     /// client, reusing a tab already showing it.
     pub fn open_in_client_workspace(&mut self, client_id: Uuid, url: &url::Url, title: Option<String>) {
         let key = policy::page_key(url);
-        if let Some(c) = self.client_mut(client_id) {
-            if let Some(existing) = c.tabs.iter().find(|t| {
-                t.effective_workspace() == Workspace::Zoho && t.parsed_url().is_some_and(|u| policy::page_key(&u) == key)
-            }) {
-                c.active_tab_id = Some(existing.id);
-                self.active_client_id = Some(client_id);
-                return;
-            }
+        if let Some(c) = self.client_mut(client_id)
+            && let Some(existing) = c.tabs.iter().find(|t| t.effective_workspace() == Workspace::Zoho && t.parsed_url().is_some_and(|u| policy::page_key(&u) == key))
+        {
+            c.active_tab_id = Some(existing.id);
+            self.active_client_id = Some(client_id);
+            return;
         }
         let title = title.unwrap_or_else(|| fallback_title(Some(url.as_str())));
         self.add_tab(client_id, Some(url.to_string()), Some(title), Some(Workspace::Zoho), true);
     }
 
     /// Meet in the active client's own store, reusing an open Meet tab.
-    pub fn open_google_meet(&mut self) {
-        let Some(id) = self.active_client_id else { return };
-        let Some(c) = self.client_mut(id) else { return };
-        if let Some(t) = c.tabs.iter().find(|t| t.pdf_path.is_none() && t.parsed_url().is_some_and(|u| policy::is_google_meet(&u))) {
-            c.active_tab_id = Some(t.id);
-            return;
-        }
-        self.add_tab(id, Some("https://meet.google.com/".into()), Some("Google Meet".into()), None, true);
+    /// False when the active client is the Search workspace: Meet needs a
+    /// real profile, and the caller asks which.
+    pub fn open_google_meet(&mut self) -> bool {
+        let Some(id) = self.active_client_id else { return false };
+        self.open_google_meet_in(id)
     }
 
-    pub fn open_google_search(&mut self, destination: &url::Url) -> Vec<Effect> {
+    pub fn open_google_meet_in(&mut self, id: Uuid) -> bool {
+        let Some(c) = self.client_mut(id) else { return false };
+        if c.is_search() {
+            return false;
+        }
+        self.active_client_id = Some(id);
+        let Some(c) = self.client_mut(id) else { return false };
+        if let Some(t) = c.tabs.iter().find(|t| t.pdf_path.is_none() && t.parsed_url().is_some_and(|u| policy::is_google_meet(&u))) {
+            c.active_tab_id = Some(t.id);
+            return true;
+        }
+        self.add_tab(id, Some("https://meet.google.com/".into()), Some("Google Meet".into()), None, true);
+        true
+    }
+
+    /// The profile a Search tab was started from, if it still exists.
+    pub fn search_origin(&self, tab_id: Uuid) -> Option<Uuid> {
+        let origin = self.find_tab(tab_id)?.origin_client?;
+        self.client(origin).filter(|c| !c.is_search()).map(|c| c.id)
+    }
+
+    /// Open Google Search. `origin` is the profile it was started from
+    /// (None when started from the Search workspace itself, which keeps the
+    /// tab's existing origin).
+    pub fn open_google_search(&mut self, destination: &url::Url, origin: Option<Uuid>) -> Vec<Effect> {
+        let origin = origin.filter(|o| *o != GOOGLE_SEARCH_ID);
         self.ensure_search_client();
         self.active_client_id = Some(GOOGLE_SEARCH_ID);
-        let target = self
-            .client(GOOGLE_SEARCH_ID)
-            .and_then(|c| c.tabs.iter().find(|t| t.pdf_path.is_none() && t.is_google_search_tab()).map(|t| t.id));
+        let target = self.client(GOOGLE_SEARCH_ID).and_then(|c| c.tabs.iter().find(|t| t.pdf_path.is_none() && t.is_google_search_tab()).map(|t| t.id));
         match target {
             Some(tab_id) => {
                 let effects = self.navigate_tab(tab_id, Some(destination.to_string()), Some(Workspace::GoogleSearch));
@@ -814,12 +962,18 @@ impl Store {
                     c.active_tab_id = Some(tab_id);
                     if let Some(t) = c.tabs.iter_mut().find(|t| t.id == tab_id) {
                         t.title = "Google Search".into();
+                        if origin.is_some() {
+                            t.origin_client = origin;
+                        }
                     }
                 }
                 effects
             }
             None => {
-                self.add_tab(GOOGLE_SEARCH_ID, Some(destination.to_string()), Some("Google Search".into()), Some(Workspace::GoogleSearch), true);
+                let id = self.add_tab(GOOGLE_SEARCH_ID, Some(destination.to_string()), Some("Google Search".into()), Some(Workspace::GoogleSearch), true);
+                if let Some(t) = id.and_then(|id| self.find_tab_mut(id)) {
+                    t.origin_client = origin;
+                }
                 vec![]
             }
         }
@@ -853,13 +1007,12 @@ impl Store {
                 changed = true;
             }
         }
-        if !on_auth_page {
-            if let Some(title) = normalized_page_title(title) {
-                if t.title != title {
-                    t.title = title;
-                    changed = true;
-                }
-            }
+        if !on_auth_page
+            && let Some(title) = normalized_page_title(title)
+            && t.title != title
+        {
+            t.title = title;
+            changed = true;
         }
         changed
     }
@@ -925,10 +1078,22 @@ pub fn hex_to_rgb(hex: &str) -> (f64, f64, f64) {
 }
 
 pub const PROFILE_COLORS: &[(&str, &str)] = &[
-    ("Red", "#e42527"), ("Orange", "#ea580c"), ("Amber", "#f2a516"), ("Green", "#22a447"),
-    ("Lime", "#65a30d"), ("Teal", "#0ea5a4"), ("Cyan", "#0891b2"), ("Blue", "#2b7de9"),
-    ("Indigo", "#4f46e5"), ("Violet", "#7a5cf0"), ("Purple", "#9333ea"), ("Pink", "#db2777"),
-    ("Rose", "#be123c"), ("Brown", "#8b5e34"), ("Slate", "#475569"), ("Graphite", "#1e293b"),
+    ("Red", "#e42527"),
+    ("Orange", "#ea580c"),
+    ("Amber", "#f2a516"),
+    ("Green", "#22a447"),
+    ("Lime", "#65a30d"),
+    ("Teal", "#0ea5a4"),
+    ("Cyan", "#0891b2"),
+    ("Blue", "#2b7de9"),
+    ("Indigo", "#4f46e5"),
+    ("Violet", "#7a5cf0"),
+    ("Purple", "#9333ea"),
+    ("Pink", "#db2777"),
+    ("Rose", "#be123c"),
+    ("Brown", "#8b5e34"),
+    ("Slate", "#475569"),
+    ("Graphite", "#1e293b"),
 ];
 
 #[cfg(test)]
@@ -1117,6 +1282,87 @@ mod tests {
         assert!(effects.contains(&Effect::DeleteClient { client_id: id, tab_ids: tabs }));
         assert!(store.client(id).is_none());
         assert!(store.delete_client(GOOGLE_SEARCH_ID).is_empty());
+    }
+
+    #[test]
+    fn duplicate_ids_are_split_never_merged() {
+        let json = r#"[{"id":"EF893E42-DD8A-4C7E-9A63-1F6C3B0E2F11","name":"A","tabs":[{"id":"11111111-2222-3333-4444-555555555555","url":"https://crm.zoho.com/a"}]},
+                       {"id":"EF893E42-DD8A-4C7E-9A63-1F6C3B0E2F11","name":"B","activeTabId":"11111111-2222-3333-4444-555555555555","tabs":[{"id":"11111111-2222-3333-4444-555555555555","url":"https://crm.zoho.com/b"}]}]"#;
+        let store = Store::from_json(json.as_bytes()).unwrap();
+        let ids: std::collections::HashSet<Uuid> = store.clients.iter().map(|c| c.id).collect();
+        assert_eq!(ids.len(), store.clients.len(), "every profile has its own id (its own data store)");
+        let b = store.clients.iter().find(|c| c.name.starts_with('B')).unwrap();
+        assert_eq!(b.name, "B (recovered)");
+        assert_ne!(b.id, Uuid::parse_str("EF893E42-DD8A-4C7E-9A63-1F6C3B0E2F11").unwrap(), "A keeps the original store");
+        let tab_ids: Vec<Uuid> = store.clients.iter().flat_map(|c| c.tabs.iter().map(|t| t.id)).collect();
+        let unique: std::collections::HashSet<_> = tab_ids.iter().collect();
+        assert_eq!(unique.len(), tab_ids.len());
+        assert_eq!(b.active_tab_id, Some(b.tabs[0].id), "the active tab follows its new id");
+        let two_search = format!(
+            r#"[{{"id":"{0}","name":"S","kind":"googleSearch","tabs":[]}},{{"id":"{0}","name":"S2","kind":"googleSearch","tabs":[]}}]"#,
+            GOOGLE_SEARCH_ID.hyphenated().to_string().to_uppercase()
+        );
+        let store = Store::from_json(two_search.as_bytes()).unwrap();
+        assert_eq!(store.clients.iter().filter(|c| c.is_search()).count(), 1);
+    }
+
+    #[test]
+    fn search_remembers_the_profile_it_came_from() {
+        let mut store = Store::default();
+        store.ensure_search_client();
+        let a = store.add_client("A", "#111", None);
+        let b = store.add_client("B", "#222", None);
+        store.active_client_id = Some(a);
+        store.open_google_search(&url::Url::parse("https://www.google.com/search?q=x").unwrap(), Some(a));
+        let tab = store.active_tab().unwrap().1.id;
+        assert_eq!(store.search_origin(tab), Some(a));
+        // A search started from inside the Search workspace keeps the origin.
+        store.open_google_search(&url::Url::parse("https://www.google.com/search?q=y").unwrap(), Some(GOOGLE_SEARCH_ID));
+        assert_eq!(store.search_origin(tab), Some(a));
+        store.active_client_id = Some(b);
+        store.open_google_search(&url::Url::parse("https://www.google.com/search?q=z").unwrap(), Some(b));
+        assert_eq!(store.search_origin(tab), Some(b), "the last profile to search owns the results");
+        let json = String::from_utf8(store.to_json()).unwrap();
+        let restored = Store::from_json(json.as_bytes()).unwrap();
+        assert_eq!(restored.search_origin(tab), Some(b), "survives a restart");
+        let mut store = restored;
+        store.delete_client(b);
+        assert_eq!(store.search_origin(tab), None, "a deleted profile is never used");
+        assert!(!store.open_google_meet_in(GOOGLE_SEARCH_ID), "Meet never runs in the Search pseudo-profile");
+        assert!(store.open_google_meet_in(a));
+    }
+
+    #[test]
+    fn unreadable_or_damaged_profiles_are_problems_not_empty_lists() {
+        use std::io::{Error, ErrorKind};
+        assert!(matches!(classify_read(Err(Error::from(ErrorKind::NotFound))), Ok(None)));
+        assert!(matches!(classify_read(Err(Error::from(ErrorKind::PermissionDenied))), Err(LoadProblem::Unreadable(_))));
+        assert!(matches!(classify_read(Err(Error::other("I/O error"))), Err(LoadProblem::Unreadable(_))));
+        assert!(matches!(classify_read(Ok(b"{\"version\":4,\"clients\":[".to_vec())), Err(LoadProblem::Corrupt(_))), "truncated / partial write");
+        assert!(matches!(classify_read(Ok(Vec::new())), Err(LoadProblem::Corrupt(_))), "empty file");
+        assert!(matches!(classify_read(Ok(b"{\"version\":4,\"clients\":7}".to_vec())), Err(LoadProblem::Corrupt(_))), "schema error");
+        assert_eq!(classify_read(Ok(b"{\"version\":9,\"clients\":[]}".to_vec())).err(), Some(LoadProblem::FutureVersion(9)));
+        assert!(matches!(classify_read(Ok(SWIFT_SAMPLE.as_bytes().to_vec())), Ok(Some(_))));
+    }
+
+    #[test]
+    fn new_profile_fields_are_optional_and_round_trip() {
+        let mut store = Store::from_json(SWIFT_SAMPLE.as_bytes()).unwrap();
+        let json = String::from_utf8(store.to_json()).unwrap();
+        assert!(!json.contains("keepSignedIn") && !json.contains("originClientId"), "absent unless set: the Swift app reads this file unchanged");
+        store.clients[1].keep_signed_in = Some(false);
+        store.clients[1].session_days = Some(30);
+        let again = Store::from_json(&store.to_json()).unwrap();
+        assert_eq!(again.clients[1].retention(), crate::session::Retention { keep: false, days: 30 });
+    }
+
+    #[test]
+    fn retention_defaults_and_bounds() {
+        let mut c = Client::new("x", "#000");
+        assert_eq!(c.retention(), crate::session::Retention { keep: true, days: crate::session::DEFAULT_RETENTION_DAYS });
+        c.keep_signed_in = Some(false);
+        c.session_days = Some(9999);
+        assert_eq!(c.retention(), crate::session::Retention { keep: false, days: crate::session::DEFAULT_RETENTION_DAYS });
     }
 
     #[test]

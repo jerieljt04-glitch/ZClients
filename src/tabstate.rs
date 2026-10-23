@@ -63,10 +63,13 @@ pub fn delete(tab: Uuid) {
     util::remove_soon(file(tab));
 }
 
+pub fn exists(tab: Uuid) -> bool {
+    LATEST.with_borrow(|m| m.contains_key(&tab)) || file(tab).exists()
+}
+
 /// Remove snapshots for tabs that no longer exist.
 pub fn prune(keep: &[Uuid]) {
-    let keep: std::collections::HashSet<String> =
-        keep.iter().map(|id| format!("{}.state", id.hyphenated().to_string().to_uppercase())).collect();
+    let keep: std::collections::HashSet<String> = keep.iter().map(|id| format!("{}.state", id.hyphenated().to_string().to_uppercase())).collect();
     if let Ok(entries) = std::fs::read_dir(dir()) {
         for e in entries.flatten() {
             let name = e.file_name().to_string_lossy().into_owned();

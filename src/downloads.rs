@@ -1,8 +1,8 @@
 //! Downloads go to ~/Downloads and are listed under the toolbar's download
-//! button. PDFs open as a ZClients tab, not in another app: a downloaded PDF
-//! is shown in a tab as soon as it finishes (and again when picked from the
-//! list), and one a page opens in a window is fetched straight into the
-//! previews folder and shown as a tab.
+//! button, with progress, Cancel and Retry. PDFs open as a ZClients tab, not
+//! in another app — but only files that really are PDFs (`pdf.rs` checks the
+//! bytes) and that carry the quarantine flag. Apps, installers, disk images,
+//! scripts, archives and macro documents ask before they are saved.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
-use objc2::{define_class, msg_send, DefinedClass, MainThreadMarker, MainThreadOnly};
-use objc2_foundation::{NSError, NSObject, NSObjectProtocol, NSString, NSURLResponse, NSURL};
+use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
+use objc2_foundation::{NSError, NSObject, NSObjectProtocol, NSProgressReporting, NSString, NSURL, NSURLResponse};
 use objc2_web_kit::{WKDownload, WKDownloadDelegate};
 use uuid::Uuid;
 
@@ -29,6 +29,10 @@ pub struct Item {
     pub name: String,
     pub path: Option<PathBuf>,
     pub state: State,
+    /// Why it failed, or why it was not opened (shown in the list).
+    pub note: Option<String>,
+    /// The server's MIME type, when known.
+    mime: Option<String>,
     /// The profile whose page started it; a PDF opens as a tab there.
     client: Option<Uuid>,
     source_url: Option<String>,
@@ -38,7 +42,7 @@ pub struct Item {
 
 impl Item {
     fn new(key: usize, name: String, path: Option<PathBuf>, state: State, client: Option<Uuid>) -> Self {
-        Item { key, name, path, state, client, source_url: None, tab: None }
+        Item { key, name, path, state, note: None, mime: None, client, source_url: None, tab: None }
     }
 }
 
@@ -54,6 +58,73 @@ fn own_key() -> usize {
 
 pub fn is_pdf(path: &Path) -> bool {
     path.extension().is_some_and(|e| e.eq_ignore_ascii_case("pdf"))
+}
+
+/// Kinds of file that can run code or hide other files, which always ask
+/// before they are saved.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Risk {
+    App,
+    Installer,
+    DiskImage,
+    Script,
+    Archive,
+    MacroDocument,
+}
+
+impl Risk {
+    pub fn describe(self) -> &'static str {
+        match self {
+            Risk::App => "an app or program",
+            Risk::Installer => "an installer",
+            Risk::DiskImage => "a disk image",
+            Risk::Script => "a script",
+            Risk::Archive => "an archive (it may contain other files)",
+            Risk::MacroDocument => "a document that can contain macros",
+        }
+    }
+}
+
+pub fn risk_of(name: &str) -> Option<Risk> {
+    let lower = name.to_ascii_lowercase();
+    let ext = lower.rsplit_once('.').map(|(_, e)| e)?;
+    Some(match ext {
+        "app" | "exe" | "msi" | "com" | "scr" | "bat" | "cmd" | "jar" | "apk" | "dll" | "so" | "dylib" | "bin" | "run" | "elf" | "msix" | "appx" => Risk::App,
+        "pkg" | "mpkg" | "deb" | "rpm" => Risk::Installer,
+        "dmg" | "iso" | "img" | "sparseimage" | "sparsebundle" | "vhd" | "vmdk" => Risk::DiskImage,
+        "sh" | "command" | "zsh" | "bash" | "csh" | "ps1" | "psm1" | "vbs" | "vbe" | "js" | "jse" | "wsf" | "hta" | "scpt" | "applescript" | "workflow" | "terminal" | "py"
+        | "rb" | "pl" | "php" | "lnk" | "url" | "webloc" | "inetloc" | "reg" => Risk::Script,
+        "zip" | "rar" | "7z" | "tar" | "gz" | "tgz" | "bz2" | "tbz" | "xz" | "txz" | "zst" | "cab" | "lha" | "lzh" | "sit" | "sitx" | "cpio" | "xip" => Risk::Archive,
+        "docm" | "dotm" | "xlsm" | "xltm" | "xlam" | "pptm" | "potm" | "ppam" | "ppsm" | "sldm" | "xla" | "xlm" => Risk::MacroDocument,
+        _ => return None,
+    })
+}
+
+thread_local! {
+    /// WebKit downloads by key, for progress and Cancel.
+    static LIVE: RefCell<HashMap<usize, Retained<WKDownload>>> = RefCell::new(HashMap::new());
+}
+
+/// Fraction done (0..1) of a download still running, when known.
+pub fn progress(index: usize) -> Option<f64> {
+    let key = ITEMS.with_borrow(|v| v.get(index).filter(|i| i.state == State::Downloading).map(|i| i.key))?;
+    LIVE.with_borrow(|m| m.get(&key).map(|d| d.progress().fractionCompleted()))
+}
+
+pub fn cancel(index: usize) {
+    let Some(key) = ITEMS.with_borrow(|v| v.get(index).map(|i| i.key)) else { return };
+    if let Some(d) = LIVE.with_borrow_mut(|m| m.remove(&key)) {
+        unsafe { d.cancel(None) };
+    }
+    update(key, |i| {
+        i.state = State::Failed;
+        i.note = Some("Cancelled".into());
+    });
+}
+
+/// The address to download again, for Retry.
+pub fn retry_url(index: usize) -> Option<(Option<Uuid>, String)> {
+    ITEMS.with_borrow(|v| v.get(index).filter(|i| i.state == State::Failed).and_then(|i| Some((i.client, i.source_url.clone()?))))
 }
 
 /// A download that becomes a PDF tab of `client` when it finishes.
@@ -135,8 +206,7 @@ fn is_direction_mark(c: char) -> bool {
 }
 
 pub fn unique_path(dir: &Path, name: &str) -> PathBuf {
-    let in_flight: Vec<PathBuf> =
-        ITEMS.with_borrow(|v| v.iter().filter(|i| i.state == State::Downloading).filter_map(|i| i.path.clone()).collect());
+    let in_flight: Vec<PathBuf> = ITEMS.with_borrow(|v| v.iter().filter(|i| i.state == State::Downloading).filter_map(|i| i.path.clone()).collect());
     let taken = |p: &Path| p.exists() || in_flight.iter().any(|f| f == p);
     let candidate = dir.join(name);
     if !taken(&candidate) {
@@ -167,73 +237,146 @@ define_class!(
 
     unsafe impl WKDownloadDelegate for DownloadDelegate {
         #[unsafe(method(download:decideDestinationUsingResponse:suggestedFilename:completionHandler:))]
-        fn decide_destination(
-            &self,
-            download: &WKDownload,
-            response: &NSURLResponse,
-            suggested: &NSString,
-            completion: &block2::DynBlock<dyn Fn(*mut NSURL)>,
-        ) {
+        fn decide_destination(&self, download: &WKDownload, response: &NSURLResponse, suggested: &NSString, completion: &block2::DynBlock<dyn Fn(*mut NSURL)>) {
             let key = download as *const WKDownload as usize;
-            let preview_path = PREVIEWS.with_borrow_mut(|m| {
+            LIVE.with_borrow_mut(|m| m.insert(key, objc2::Message::retain(download)));
+            let mime = response.MIMEType().map(|m| m.to_string());
+            // A PDF a page opened in a window: into its own private preview
+            // folder, checked when it finishes.
+            let preview = PREVIEWS.with_borrow_mut(|m| {
                 let p = m.get_mut(&key)?;
                 p.name = pdf_name(&suggested.to_string());
-                let path = util::pdf_previews_dir().join(format!("{}.pdf", Uuid::new_v4()));
+                let path = crate::pdf::new_preview_dir().ok()?.join(&p.name);
                 p.path = Some(path.clone());
                 Some(path)
             });
-            if let Some(path) = preview_path {
-                let url = NSURL::fileURLWithPath(&util::ns(&path.to_string_lossy()));
-                completion.call((Retained::as_ptr(&url) as *mut NSURL,));
+            if PREVIEWS.with_borrow(|m| m.contains_key(&key)) {
+                match preview {
+                    Some(path) => {
+                        let url = NSURL::fileURLWithPath(&util::ns(&path.to_string_lossy()));
+                        completion.call((Retained::as_ptr(&url) as *mut NSURL,));
+                    }
+                    None => completion.call((std::ptr::null_mut(),)),
+                }
                 return;
             }
-            let pdf_mime = response.MIMEType().is_some_and(|m| m.to_string().eq_ignore_ascii_case("application/pdf"));
+            let pdf_mime = mime.as_deref().is_some_and(|m| m.eq_ignore_ascii_case("application/pdf"));
             let name = if pdf_mime { pdf_name(&suggested.to_string()) } else { safe_filename(&suggested.to_string()) };
-            let path = unique_path(&util::downloads_dir(), &name);
-            let url = NSURL::fileURLWithPath(&util::ns(&path.to_string_lossy()));
             // The page's profile, so the PDF opens as a tab next to it.
             let client = unsafe { download.webView() }.and_then(|w| w.downcast_ref::<crate::web::ZWebView>().map(|z| z.ivars().client_id));
-            let source_url = unsafe { download.originalRequest() }
-                .and_then(|r| r.URL())
-                .and_then(|u| util::url_string(&u))
-                .filter(|u| u.starts_with("https:"));
-            let mut item = Item::new(key, path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(), Some(path), State::Downloading, client);
-            item.source_url = source_url;
-            push(item);
-            // WebKit gets its destination immediately; it also tags the file
-            // as downloaded from the web, so Gatekeeper checks it on open.
-            completion.call((Retained::as_ptr(&url) as *mut NSURL,));
+            let source_url = unsafe { download.originalRequest() }.and_then(|r| r.URL()).and_then(|u| util::url_string(&u)).filter(|u| u.starts_with("https:"));
+            let origin = source_url.as_deref().and_then(crate::policy::parse).and_then(|u| crate::policy::Origin::of(&u)).map(|o| o.display());
+            let finish = std::rc::Rc::new(completion.copy());
+            let cancel = finish.clone();
+            let place = move |name: String| {
+                let path = unique_path(&util::downloads_dir(), &name);
+                let url = NSURL::fileURLWithPath(&util::ns(&path.to_string_lossy()));
+                let mut item = Item::new(key, path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(), Some(path), State::Downloading, client);
+                item.source_url = source_url.clone();
+                item.mime = mime.clone();
+                push(item);
+                // WebKit tags the file as downloaded from the web, so
+                // Gatekeeper checks it on open; checked again on finish.
+                finish.call((Retained::as_ptr(&url) as *mut NSURL,));
+            };
+            match risk_of(&name) {
+                None => place(name),
+                Some(Risk::Archive) if origin.as_deref().is_some_and(|o| crate::settings::download_permission(o) == crate::settings::SitePermission::Allow) => place(name),
+                Some(risk) => {
+                    // Asked on the next turn: never inside WebKit's callback.
+                    util::later(move || {
+                        let from = origin.clone().unwrap_or_else(|| "a page".into());
+                        let mut buttons = vec!["Download"];
+                        // Archives (WorkDrive folders are zips) can be allowed
+                        // for a whole site; programs and scripts always ask.
+                        if risk == Risk::Archive && origin.is_some() {
+                            buttons.push("Always Allow Archives from This Site");
+                        }
+                        buttons.push("Cancel");
+                        let (choice, _) = crate::web::run_alert(
+                            &format!("Download “{name}”?"),
+                            &format!("This file is {} from {from}. Only open it if you trust where it came from.", risk.describe()),
+                            &buttons,
+                            None,
+                        );
+                        let ok = choice + 1 < buttons.len();
+                        if ok
+                            && buttons[choice].starts_with("Always")
+                            && let Some(o) = &origin
+                        {
+                            crate::settings::set_download_permission(o, crate::settings::SitePermission::Allow);
+                        }
+                        if ok {
+                            place(name);
+                        } else {
+                            LIVE.with_borrow_mut(|m| m.remove(&key));
+                            record_failure_note(&name, "Cancelled");
+                            // No destination: WebKit cancels the download.
+                            cancel.call((std::ptr::null_mut(),));
+                        }
+                    });
+                }
+            }
         }
 
         #[unsafe(method(downloadDidFinish:))]
         fn did_finish(&self, download: &WKDownload) {
             let key = download as *const WKDownload as usize;
+            LIVE.with_borrow_mut(|m| m.remove(&key));
             if let Some(p) = PREVIEWS.with_borrow_mut(|m| m.remove(&key)) {
-                if let Some(path) = p.path {
-                    util::later(move || {
+                let Some(path) = p.path else { return };
+                match crate::pdf::adopt_downloaded(&path) {
+                    Ok(()) => util::later(move || {
                         crate::app::open_pdf_tab(p.client, path, p.name, p.source_url);
-                    });
+                    }),
+                    Err(e) => {
+                        crate::pdf::remove_preview(&util::pdf_previews_dir(), &path);
+                        record_failure_note(&p.name, &format!("Not opened: {e}"));
+                    }
                 }
                 return;
             }
-            update(key, |i| i.state = State::Done);
-            util::later(move || {
-                show_pdf_where(|i| i.key == key);
+            let path = ITEMS.with_borrow(|v| v.iter().find(|i| i.key == key).and_then(|i| i.path.clone()));
+            let quarantined = path.as_deref().is_some_and(ensure_quarantined);
+            update(key, |i| {
+                i.state = State::Done;
+                if !quarantined {
+                    i.note = Some("Could not be marked as downloaded from the internet; not opened automatically".into());
+                }
             });
+            if quarantined {
+                util::later(move || {
+                    show_pdf_where(|i| i.key == key);
+                });
+            } else {
+                util::log("a finished download could not be quarantined");
+            }
         }
 
         #[unsafe(method(download:didFailWithError:resumeData:))]
         fn did_fail(&self, download: &WKDownload, error: &NSError, _resume: Option<&objc2_foundation::NSData>) {
             let key = download as *const WKDownload as usize;
-            util::log(format!("download failed: {}", error.localizedDescription()));
+            LIVE.with_borrow_mut(|m| m.remove(&key));
+            let reason = error.localizedDescription().to_string();
+            util::log(format!("download failed: {reason}"));
             if let Some(p) = PREVIEWS.with_borrow_mut(|m| m.remove(&key)) {
                 if let Some(path) = &p.path {
-                    let _ = std::fs::remove_file(path);
+                    crate::pdf::remove_preview(&util::pdf_previews_dir(), path);
                 }
-                record_failure(&p.name);
+                record_failure_note(&p.name, &reason);
                 return;
             }
-            update(key, |i| i.state = State::Failed);
+            // Never leave a partial file that looks complete.
+            let partial = ITEMS.with_borrow(|v| v.iter().find(|i| i.key == key && i.state == State::Downloading).and_then(|i| i.path.clone()));
+            if let Some(p) = partial {
+                let _ = std::fs::remove_file(p);
+            }
+            update(key, |i| {
+                if i.state == State::Downloading {
+                    i.state = State::Failed;
+                    i.note = Some(reason.clone());
+                }
+            });
         }
     }
 );
@@ -284,21 +427,27 @@ pub fn show_pdf(index: usize) -> bool {
 
 fn show_pdf_where(find: impl Fn(&Item) -> bool) -> bool {
     let found = ITEMS.with_borrow(|v| {
-        let i = v.iter().find(|i| find(i)).filter(|i| i.state == State::Done)?;
-        let path = i.path.clone().filter(|p| is_pdf(p))?;
+        let i = v.iter().find(|i| find(i)).filter(|i| i.state == State::Done && i.note.is_none())?;
+        // Named .pdf or served as a PDF, *and* the bytes are a PDF.
+        let path = i.path.clone().filter(|p| is_pdf(p) || i.mime.as_deref().is_some_and(|m| m.eq_ignore_ascii_case("application/pdf")))?;
+        crate::pdf::mime_allows_pdf(i.mime.as_deref()).then_some(())?;
         Some((i.key, path, i.name.clone(), i.client, i.source_url.clone(), i.tab))
     });
     let Some((key, path, name, client, source, tab)) = found else { return false };
-    if let (Some(c), Some(t)) = (client, tab) {
-        if crate::app::show_tab(c, t) {
-            return true;
+    if let Err(e) = crate::pdf::validate(&path) {
+        if e == crate::pdf::PdfError::NotPdf {
+            update(key, |i| i.note = Some("Named like a PDF but is not one; not opened".into()));
         }
+        return false;
+    }
+    if let (Some(c), Some(t)) = (client, tab)
+        && crate::app::show_tab(c, t)
+    {
+        return true;
     }
     // Its own profile, or the one in front if that profile is gone.
     let active = crate::app::store(|s| s.active_client_id);
-    let opened = client
-        .and_then(|c| crate::app::open_downloaded_pdf(c, &path, &name, source.clone()))
-        .or_else(|| crate::app::open_downloaded_pdf(active?, &path, &name, source));
+    let opened = client.and_then(|c| crate::app::open_downloaded_pdf(c, &path, &name, source.clone())).or_else(|| crate::app::open_downloaded_pdf(active?, &path, &name, source));
     match opened {
         Some(tab) => {
             ITEMS.with_borrow_mut(|v| {
@@ -328,12 +477,12 @@ pub fn save_copy(src: &Path, suggested: &str) {
 /// hand so they are not quietly more trusted than a normal download.
 /// `client` is the page's profile: a PDF saved for it opens as its tab.
 pub fn save_bytes(data: Vec<u8>, suggested: &str, client: Option<Uuid>) {
-    if let Some(key) = save(data, suggested, client, None) {
-        if client.is_some() {
-            util::later(move || {
-                show_pdf_where(|i| i.key == key);
-            });
-        }
+    if let Some(key) = save(data, suggested, client, None)
+        && client.is_some()
+    {
+        util::later(move || {
+            show_pdf_where(|i| i.key == key);
+        });
     }
 }
 
@@ -348,13 +497,20 @@ fn save(data: Vec<u8>, suggested: &str, client: Option<Uuid>, tab: Option<Uuid>)
     let path = unique_path(&util::downloads_dir(), &safe_filename(suggested));
     let name = path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
     let key = own_key();
-    match std::fs::write(&path, &data) {
-        Ok(()) => {
-            quarantine(&path);
+    match write_new_file(&path, &data) {
+        Ok(()) if quarantine(&path) => {
             let mut item = Item::new(key, name, Some(path), State::Done, client);
             item.tab = tab;
             push(item);
             Some(key)
+        }
+        Ok(()) => {
+            // A file the app wrote that macOS would not treat as
+            // downloaded is removed rather than left more trusted than it is.
+            let _ = std::fs::remove_file(&path);
+            util::log("could not quarantine a saved file; removed it");
+            record_failure_note(&name, "Could not be marked as downloaded from the internet");
+            None
         }
         Err(e) => {
             util::log(format!("could not save {name}: {e}"));
@@ -368,18 +524,49 @@ pub fn record_failure(name: &str) {
     push(Item::new(own_key(), name.into(), None, State::Failed, None));
 }
 
-fn quarantine(path: &Path) {
+fn record_failure_note(name: &str, note: &str) {
+    let mut item = Item::new(own_key(), name.into(), None, State::Failed, None);
+    item.note = Some(note.into());
+    push(item);
+}
+
+/// Create a new file (never through a link, never over an existing one).
+fn write_new_file(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o644).custom_flags(util::O_NOFOLLOW).open(path)?;
+    f.write_all(data)?;
+    f.sync_all()
+}
+
+const QUARANTINE: &std::ffi::CStr = c"com.apple.quarantine";
+
+/// Mark a file as downloaded from the internet, so Gatekeeper and
+/// Launch Services check it on open. False if that failed.
+fn quarantine(path: &Path) -> bool {
     use std::ffi::CString;
     let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let value = format!("0083;{:08x};ZClients;", stamp as u32);
-    let (Ok(p), Ok(n)) = (CString::new(path.to_string_lossy().as_bytes()), CString::new("com.apple.quarantine")) else { return };
-    unsafe {
-        setxattr(p.as_ptr(), n.as_ptr(), value.as_ptr().cast(), value.len(), 0, 0);
-    }
+    let Ok(p) = CString::new(path.to_string_lossy().as_bytes()) else { return false };
+    // XATTR_NOFOLLOW = 1
+    unsafe { setxattr(p.as_ptr(), QUARANTINE.as_ptr(), value.as_ptr().cast(), value.len(), 0, 1) == 0 }
+}
+
+fn has_quarantine(path: &Path) -> bool {
+    use std::ffi::CString;
+    let Ok(p) = CString::new(path.to_string_lossy().as_bytes()) else { return false };
+    unsafe { getxattr(p.as_ptr(), QUARANTINE.as_ptr(), std::ptr::null_mut(), 0, 0, 1) > 0 }
+}
+
+/// WebKit normally quarantines its downloads; make sure, and add the flag
+/// if it is missing. False only if the file cannot carry it.
+fn ensure_quarantined(path: &Path) -> bool {
+    has_quarantine(path) || quarantine(path)
 }
 
 unsafe extern "C" {
-    fn setxattr(path: *const i8, name: *const i8, value: *const std::ffi::c_void, size: usize, position: u32, options: i32) -> i32;
+    fn setxattr(path: *const std::ffi::c_char, name: *const std::ffi::c_char, value: *const std::ffi::c_void, size: usize, position: u32, options: i32) -> i32;
+    fn getxattr(path: *const std::ffi::c_char, name: *const std::ffi::c_char, value: *mut std::ffi::c_void, size: usize, position: u32, options: i32) -> isize;
 }
 
 #[cfg(test)]
@@ -416,6 +603,35 @@ mod tests {
         assert!(!is_pdf(Path::new("/x/Folder.zip")));
         assert!(!is_pdf(Path::new("/x/pdf")));
         assert_eq!(own_key() % 2, 1);
+    }
+
+    #[test]
+    fn risky_types_are_recognised_whatever_the_case() {
+        assert_eq!(risk_of("Setup.EXE"), Some(Risk::App));
+        assert_eq!(risk_of("Install.pkg"), Some(Risk::Installer));
+        assert_eq!(risk_of("disk.dmg"), Some(Risk::DiskImage));
+        assert_eq!(risk_of("run.command"), Some(Risk::Script));
+        assert_eq!(risk_of("Folder.zip"), Some(Risk::Archive));
+        assert_eq!(risk_of("Budget.xlsm"), Some(Risk::MacroDocument));
+        assert_eq!(risk_of("invoice.pdf"), None);
+        assert_eq!(risk_of("report.xlsx"), None);
+        assert_eq!(risk_of("noextension"), None);
+        assert_eq!(risk_of(&safe_filename("invoice\u{202E}fdp.exe")), Some(Risk::App), "a disguised name is still caught");
+    }
+
+    #[test]
+    fn saved_files_are_quarantined_or_removed() {
+        let dir = std::env::temp_dir().join(format!("zc-q-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("a.pdf");
+        write_new_file(&f, b"%PDF-1.4").unwrap();
+        assert!(write_new_file(&f, b"again").is_err(), "never overwrites");
+        assert!(!has_quarantine(&f));
+        assert!(quarantine(&f));
+        assert!(has_quarantine(&f));
+        assert!(ensure_quarantined(&f));
+        assert!(!quarantine(&dir.join("missing")), "a failure is reported, not ignored");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

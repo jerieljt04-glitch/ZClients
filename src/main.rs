@@ -4,14 +4,20 @@
 
 mod app;
 mod apps;
+mod cleanup;
 mod downloads;
 mod keychain;
 mod model;
+mod pdf;
 mod picker;
 mod policy;
+mod privacy;
+#[cfg(test)]
+mod proptests;
 mod scripts;
 mod selftest;
 mod session;
+mod settings;
 mod suggest;
 mod tabstate;
 mod ui;
@@ -20,7 +26,7 @@ mod web;
 
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
-use objc2::{define_class, msg_send, MainThreadMarker, MainThreadOnly};
+use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate};
 use objc2_foundation::{NSNotification, NSObject, NSObjectProtocol};
 
@@ -73,7 +79,13 @@ fn main() {
     // `ZClients --diagnose`: print what macOS currently allows this app.
     if std::env::args().any(|a| a == "--diagnose") {
         let b = objc2_app_kit::NSPasteboard::generalPasteboard().accessBehavior();
-        let name = match b.0 { 0 => "default (never asked)", 1 => "ask", 2 => "always allow", 3 => "always deny", _ => "unknown" };
+        let name = match b.0 {
+            0 => "default (never asked)",
+            1 => "ask",
+            2 => "always allow",
+            3 => "always deny",
+            _ => "unknown",
+        };
         println!("paste from other apps: {name} ({})", b.0);
         return;
     }

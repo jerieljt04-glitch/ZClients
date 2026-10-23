@@ -12,8 +12,8 @@ use std::sync::Mutex;
 use url::Url;
 use uuid::Uuid;
 
-use crate::model::{Effect, SortMode, Store, Workspace, GOOGLE_SEARCH_ID, ZOHO_APPS};
-use crate::{keychain, policy, suggest, tabstate, ui, util, web};
+use crate::model::{Effect, GOOGLE_SEARCH_ID, SortMode, Store, Workspace, ZOHO_APPS};
+use crate::{cleanup, keychain, pdf, policy, suggest, tabstate, ui, util, web};
 
 pub const SIDEBAR: u8 = 1;
 pub const TABS: u8 = 2;
@@ -28,6 +28,9 @@ thread_local! {
     static META_PENDING: RefCell<HashSet<Uuid>> = RefCell::new(HashSet::new());
     static META_SCHEDULED: Cell<bool> = const { Cell::new(false) };
     static DECLINED_LOGIN: RefCell<HashSet<Uuid>> = RefCell::new(HashSet::new());
+    /// The profile file could not be used and the user has not chosen what
+    /// to do: nothing is written over it.
+    static READ_ONLY: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Highest save generation written so far. Saves run on a background thread;
@@ -40,30 +43,85 @@ fn save_path() -> std::path::PathBuf {
     util::support_dir().join("clients.json")
 }
 
+fn backup_path() -> std::path::PathBuf {
+    util::support_dir().join("clients.json.bak")
+}
+
+/// Load the profiles. A file that exists but cannot be used is never
+/// replaced: the app stays read-only until the user picks Restore, Start
+/// Empty (the file is kept aside) or Quit.
 pub fn load() {
     let path = save_path();
-    let store = match std::fs::read(&path) {
-        Ok(data) => match Store::from_json(&data) {
-            Ok(s) => s,
-            Err(e) => {
-                // Never overwrite a file we could not read: keep it aside.
-                let aside = path.with_extension(format!("unreadable-{}.json", std::process::id()));
-                let _ = std::fs::copy(&path, &aside);
-                util::log(format!("could not read {}: {e}; kept a copy at {}", path.display(), aside.display()));
-                let mut s = Store::default();
-                s.repair();
-                s
+    let store = match crate::model::classify_read(std::fs::read(&path)) {
+        Ok(Some(s)) => {
+            // The last file that loaded cleanly, for Restore.
+            if let Ok(data) = std::fs::read(&path) {
+                let _ = util::write_atomic(&backup_path(), &data, 0o600);
             }
-        },
-        Err(_) => {
+            s
+        }
+        Ok(None) => {
             let mut s = Store::default();
             s.repair();
             s
         }
+        Err(problem) => recover(&problem),
     };
     let keep: Vec<Uuid> = store.clients.iter().flat_map(|c| c.tabs.iter().map(|t| t.id)).collect();
-    tabstate::prune(&keep);
+    if !READ_ONLY.get() {
+        tabstate::prune(&keep);
+    }
     STORE.with_borrow_mut(|s| *s = store);
+}
+
+fn recover(problem: &crate::model::LoadProblem) -> Store {
+    READ_ONLY.set(true);
+    util::log(format!("profiles file unusable: {problem}"));
+    let backup = std::fs::read(backup_path()).ok().and_then(|d| crate::model::decode_store(&d).ok());
+    let mut buttons = vec![];
+    if backup.is_some() {
+        buttons.push("Restore Last Good Copy");
+    }
+    buttons.extend(["Start with No Profiles", "Quit"]);
+    let (choice, _) = web::run_alert(
+        "ZClients could not open your profiles",
+        &format!(
+            "The profiles file {problem}. It has not been changed.\n\nRestore Last Good Copy uses the copy saved the last time it opened correctly. Start with No Profiles keeps the file aside (clients.json.damaged-…) so nothing is lost. Your profiles' sign-ins (website data) are kept either way."
+        ),
+        &buttons,
+        None,
+    );
+    let pick = buttons.get(choice).copied().unwrap_or("Quit");
+    let aside = |path: &std::path::Path| {
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let to = path.with_extension(format!("json.damaged-{stamp}"));
+        std::fs::rename(path, &to).or_else(|_| std::fs::copy(path, &to).map(|_| ()))
+    };
+    match (pick, backup) {
+        ("Restore Last Good Copy", Some(store)) => {
+            if save_path().exists() && aside(&save_path()).is_err() {
+                return store;
+            }
+            READ_ONLY.set(false);
+            store
+        }
+        ("Start with No Profiles", _) => {
+            if save_path().exists() && aside(&save_path()).is_err() {
+                util::log("could not keep the damaged file aside; staying read-only");
+            } else {
+                READ_ONLY.set(false);
+            }
+            let mut s = Store::default();
+            s.repair();
+            s
+        }
+        // Quit without writing anything.
+        _ => std::process::exit(0),
+    }
+}
+
+pub fn is_read_only() -> bool {
+    READ_ONLY.get()
 }
 
 pub fn store<R>(f: impl FnOnce(&Store) -> R) -> R {
@@ -100,6 +158,9 @@ fn schedule_save() {
 }
 
 pub fn save_now(sync: bool) {
+    if READ_ONLY.get() {
+        return;
+    }
     let data = store(|s| s.to_json());
     let generation = GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
     let write = move || {
@@ -128,18 +189,21 @@ pub fn apply(effects: Vec<Effect>) {
             }
             Effect::ResetTab(id) => web::sleep_tab(id),
             Effect::DeleteClient { client_id, tab_ids } => {
-                web::delete_client(client_id, &tab_ids);
-                keychain::delete_login(client_id);
+                let stores = web::release_client(client_id, &tab_ids);
+                let name = DELETING_NAME.with_borrow_mut(|n| n.take()).unwrap_or_else(|| "Profile".into());
+                let previews = PENDING_PREVIEWS.with_borrow_mut(std::mem::take);
+                cleanup::start(cleanup::Job::new(client_id, &name, &stores, &tab_ids, &previews));
             }
             Effect::RemoveFile(path) => {
-                let dir = util::pdf_previews_dir();
-                let p = std::path::PathBuf::from(&path);
-                if p.starts_with(&dir) {
-                    let _ = std::fs::remove_file(p);
-                }
+                pdf::remove_preview(&util::pdf_previews_dir(), std::path::Path::new(&path));
             }
         }
     }
+}
+
+thread_local! {
+    static DELETING_NAME: RefCell<Option<String>> = const { RefCell::new(None) };
+    static PENDING_PREVIEWS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
 }
 
 fn mutate_apply(what: u8, f: impl FnOnce(&mut Store) -> Vec<Effect>) {
@@ -188,20 +252,49 @@ pub fn select_client(id: Uuid) {
     mutate(ALL, |s| s.select_client(id));
 }
 
-pub fn add_client(name: &str, color: &str, symbol: Option<String>, login: Option<keychain::Login>) {
-    let id = mutate(ALL, |s| s.add_client(name, color, symbol));
-    if let Some(l) = login.filter(|l| !l.is_empty()) {
-        keychain::write_login(id, &l);
-    }
+/// What the profile sheet does with the saved login.
+pub enum LoginChange {
+    /// Leave whatever is saved as it is.
+    Keep,
+    /// Save these details instead (both email and password given).
+    Replace(keychain::Login),
+    /// Remove the saved login.
+    Remove,
 }
 
-pub fn update_client(id: Uuid, name: &str, color: &str, symbol: Option<String>, login: Option<keychain::Login>, forget_login: bool) {
-    mutate(ALL, |s| s.update_client(id, name, color, symbol));
-    if forget_login {
-        keychain::delete_login(id);
-    } else if let Some(l) = login.filter(|l| !l.is_empty()) {
-        if keychain::read_login(id).as_ref() != Some(&l) {
-            keychain::write_login(id, &l);
+pub fn add_client(name: &str, color: &str, symbol: Option<String>, login: LoginChange, retention: crate::session::Retention) {
+    let id = mutate(ALL, |s| {
+        let id = s.add_client(name, color, symbol);
+        s.set_retention(id, retention);
+        id
+    });
+    apply_login_change(id, login);
+}
+
+pub fn update_client(id: Uuid, name: &str, color: &str, symbol: Option<String>, login: LoginChange, retention: crate::session::Retention) {
+    let changed = mutate(ALL, |s| {
+        s.update_client(id, name, color, symbol);
+        s.set_retention(id, retention)
+    });
+    if changed {
+        web::retention_changed(id);
+    }
+    apply_login_change(id, login);
+}
+
+fn apply_login_change(id: Uuid, change: LoginChange) {
+    match change {
+        LoginChange::Keep => {}
+        LoginChange::Replace(l) if !l.is_empty() => {
+            if !keychain::write_login(id, &l) {
+                web::run_alert("The login could not be saved", "The vault key in your Keychain is not available. Nothing was changed.", &["OK"], None);
+            }
+        }
+        LoginChange::Replace(_) => {}
+        LoginChange::Remove => {
+            if !keychain::delete_login(id) {
+                web::run_alert("The saved login could not be removed", "ZClients will not use it, and will try to remove it again when the profile is deleted.", &["OK"], None);
+            }
         }
     }
 }
@@ -210,12 +303,36 @@ pub fn confirm_delete_client(id: Uuid) {
     let Some(name) = store(|s| s.client(id).filter(|c| !c.is_search()).map(|c| c.name.clone())) else { return };
     let (button, _) = web::run_alert(
         &format!("Delete “{name}”?"),
-        "This signs the profile out and permanently removes its tabs, saved session and saved login from this Mac.",
+        "This signs the profile out and removes its tabs, website data (cookies and storage), saved session, saved login and PDF previews from this Mac. Files in your Downloads folder are not touched.",
         &["Delete", "Cancel"],
         None,
     );
     if button == 0 {
+        let previews: Vec<String> = store(|s| s.client(id).map(|c| c.tabs.iter().filter_map(|t| t.pdf_path.clone()).collect())).unwrap_or_default();
+        DELETING_NAME.with_borrow_mut(|n| *n = Some(name));
+        PENDING_PREVIEWS.with_borrow_mut(|p| *p = previews);
         mutate_apply(ALL, |s| s.delete_client(id));
+    }
+}
+
+/// A deletion finished its pass: report what is still left, if anything,
+/// and offer to try again.
+pub fn cleanup_finished(job: cleanup::Job) {
+    changed(TOOLBAR);
+    if job.pending.is_empty() {
+        return;
+    }
+    if util::is_test_build() && std::env::var_os("ZCLIENTS_SELFTEST").is_some() {
+        return;
+    }
+    let (choice, _) = web::run_alert(
+        &format!("Some of “{}”'s data is not removed yet", job.name),
+        &format!("Still on this Mac: {}.\n\nZClients keeps trying each time it opens, and you can retry from Settings › Privacy.", job.remaining().join(", ")),
+        &["Retry Now", "Later"],
+        None,
+    );
+    if choice == 0 {
+        util::later(move || cleanup::run(job.client));
     }
 }
 
@@ -246,7 +363,7 @@ pub fn offer_to_save_login(client: Uuid, email: String, password: String) {
     let (choice, _) = web::run_alert(
         &title,
         &format!(
-            "{}\n\nIt is stored encrypted in your Mac's Keychain, only for this profile, and used to sign it back in automatically if Zoho ever asks again. Deleting the profile removes it.",
+            "{}\n\nIt is stored encrypted in ZClients's vault, for this profile only; the vault's key is kept in your Mac's Keychain. If Zoho asks you to sign in again, ZClients fills it in on Zoho's own sign-in page and you press Sign In. Deleting the profile removes it.",
             new.email
         ),
         &[button, "Not Now"],
@@ -321,8 +438,25 @@ pub fn open_app(index: usize) {
     mutate_apply(ALL, |s| s.open_app(tab, app));
 }
 
+/// Meet for the profile in front. From the Search workspace (no profile of
+/// its own) the user picks which profile joins.
 pub fn open_meet() {
-    mutate(ALL, |s| s.open_google_meet());
+    if mutate(ALL, |s| s.open_google_meet()) {
+        return;
+    }
+    if let Some(client) = choose_profile("Open Google Meet in which profile?") {
+        mutate(ALL, |s| s.open_google_meet_in(client));
+    }
+}
+
+/// Ask the user to pick one of the real profiles.
+pub fn choose_profile(question: &str) -> Option<Uuid> {
+    let profiles: Vec<(Uuid, String)> = store(|s| s.ordered().iter().filter(|c| !c.is_search()).map(|c| (c.id, c.name.clone())).collect());
+    match profiles.len() {
+        0 => None,
+        1 => Some(profiles[0].0),
+        _ => ui::pick_profile(question, &profiles),
+    }
 }
 
 pub fn open_search(query: &str) {
@@ -332,10 +466,23 @@ pub fn open_search(query: &str) {
 }
 
 pub fn open_search_url(url: &Url) {
-    mutate_apply(ALL, |s| s.open_google_search(url));
+    let origin = store(|s| s.active_client_id);
+    mutate_apply(ALL, |s| s.open_google_search(url, origin));
+}
+
+/// A Zoho or Meet page reached from Search opens in a real profile: the one
+/// the search was started from, or (if unknown or deleted) the one the user
+/// picks. Never in the Search workspace's own store.
+pub fn open_from_search(search_tab: Option<Uuid>, url: Url) {
+    let origin = search_tab.and_then(|t| store(|s| s.search_origin(t)));
+    let Some(client) = origin.or_else(|| choose_profile(&format!("Open {} in which profile?", url.host_str().unwrap_or("this page")))) else { return };
+    open_in_client_workspace(client, url);
 }
 
 pub fn open_in_client_workspace(client: Uuid, url: Url) {
+    if client == GOOGLE_SEARCH_ID {
+        return open_from_search(None, url);
+    }
     mutate(ALL, |s| s.open_in_client_workspace(client, &url, None));
 }
 
@@ -349,14 +496,18 @@ thread_local! {
 /// and the tab starts loading straight away, as in any browser; several
 /// background tabs from one page line up in the order they were clicked.
 pub fn open_new_tab_from_page(client: Uuid, ws: Workspace, url: Url, opener: Option<Uuid>, background: bool) {
-    let ws = if policy::is_google_search(&url) { Workspace::GoogleSearch } else if ws == Workspace::GoogleSearch && policy::should_open_in_client_workspace(&url) { Workspace::Zoho } else { ws };
+    let ws = if policy::is_google_search(&url) {
+        Workspace::GoogleSearch
+    } else if ws == Workspace::GoogleSearch && policy::should_open_in_client_workspace(&url) {
+        Workspace::Zoho
+    } else {
+        ws
+    };
     if ws == Workspace::Zoho && client == GOOGLE_SEARCH_ID {
-        return open_in_client_workspace(client, url);
+        return open_from_search(opener, url);
     }
-    let after = LAST_BACKGROUND
-        .get()
-        .filter(|(o, t)| background && Some(*o) == opener && store(|s| s.client(client).is_some_and(|c| c.tabs.iter().any(|x| x.id == *t))))
-        .map(|(_, t)| t);
+    let after =
+        LAST_BACKGROUND.get().filter(|(o, t)| background && Some(*o) == opener && store(|s| s.client(client).is_some_and(|c| c.tabs.iter().any(|x| x.id == *t)))).map(|(_, t)| t);
     let tab = mutate(ALL, |s| match after {
         Some(a) => s.add_tab_after(client, a, url.to_string(), "Loading…".into(), Some(ws)),
         None => s.add_tab(client, Some(url.to_string()), Some("Loading…".into()), Some(ws), !background),
@@ -393,11 +544,15 @@ pub fn open_pdf_tab(client: Uuid, path: std::path::PathBuf, title: String, sourc
 /// file and moving or renaming that file never breaks the tab.
 pub fn open_downloaded_pdf(client: Uuid, path: &std::path::Path, name: &str, source_url: Option<String>) -> Option<Uuid> {
     store(|s| s.client(client).map(|_| ()))?;
-    let copy = util::pdf_previews_dir().join(format!("{}.pdf", Uuid::new_v4()));
-    if let Err(e) = std::fs::copy(path, &copy) {
-        util::log(format!("could not open {} as a tab: {e}", path.display()));
-        return None;
-    }
+    // Copied through the descriptor that was checked to be a PDF, into its
+    // own private folder.
+    let copy = match pdf::copy_into_preview(path, name) {
+        Ok(c) => c,
+        Err(e) => {
+            util::log(format!("a downloaded file was not opened as a PDF tab: {e}"));
+            return None;
+        }
+    };
     open_pdf_tab(client, copy, name.to_string(), source_url)
 }
 
@@ -418,6 +573,22 @@ pub fn address_entered_in_new_tab(url: &str) {
     if let (Some(client), Some(u)) = (store(|s| s.active_client_id), policy::parse(url)) {
         mutate(ALL, |s| s.add_tab(client, Some(u.to_string()), None, None, true));
     }
+}
+
+/// Return in the address bar, typed while `tab` was in front. Dropped if a
+/// different tab is in front by the time it runs: one tab's text never
+/// navigates another.
+pub fn address_entered_for(tab: Option<Uuid>, text: &str) {
+    let active = store(|s| s.active_tab().map(|(_, t)| t.id));
+    if !address_target_ok(tab, active) {
+        util::log("address entry dropped: the tab changed while typing");
+        return;
+    }
+    address_entered(text);
+}
+
+pub fn address_target_ok(editing: Option<Uuid>, active: Option<Uuid>) -> bool {
+    editing.is_some() && editing == active
 }
 
 /// What Enter in the address bar does.
@@ -450,13 +621,11 @@ pub fn address_entered(text: &str) {
 }
 
 fn load_destination(url: Url) {
-    let Some((client, tab, ws, launcher)) =
-        store(|s| s.active_tab().map(|(c, t)| (c.id, t.id, t.effective_workspace(), t.url.is_none() || t.pdf_path.is_some())))
-    else {
+    let Some((_client, tab, ws, launcher)) = store(|s| s.active_tab().map(|(c, t)| (c.id, t.id, t.effective_workspace(), t.url.is_none() || t.pdf_path.is_some()))) else {
         return;
     };
     if ws == Workspace::GoogleSearch && policy::should_open_in_client_workspace(&url) {
-        return open_in_client_workspace(client, url);
+        return open_from_search(Some(tab), url);
     }
     if launcher || web::live_view(tab).is_none() {
         mutate_apply(ALL, |s| s.navigate_tab(tab, Some(url.to_string()), Some(ws).filter(|w| *w != Workspace::Zoho)));
@@ -476,6 +645,62 @@ pub fn start_background_work() {
     web::watch_memory_pressure();
     std::mem::forget(util::every(300.0, web::sleep_idle_tabs));
     util::after(3.0, crate::session::migrate_legacy);
+    util::after(2.0, || {
+        let n = keychain::migrate();
+        if n > 0 {
+            util::log(format!("vault: {n} record(s) re-sealed in format 2"));
+        }
+    });
+    util::after(1.0, cleanup::resume_all);
+    if !READ_ONLY.get() {
+        util::after(4.0, || {
+            migrate_flat_previews();
+            prune_previews();
+        });
+    }
+}
+
+/// Every preview file a tab (open, or closed but reopenable this run) still
+/// refers to.
+fn referenced_previews() -> HashSet<std::path::PathBuf> {
+    store(|s| s.preview_paths()).into_iter().map(std::path::PathBuf::from).collect()
+}
+
+/// Remove previews no tab refers to. Run at launch and on a clean quit:
+/// a preview lives as long as its tab (and, once closed, until quit).
+pub fn prune_previews() -> usize {
+    if READ_ONLY.get() {
+        return 0;
+    }
+    let n = pdf::prune(&util::pdf_previews_dir(), &referenced_previews());
+    if n > 0 {
+        util::log(format!("removed {n} unused PDF preview(s)"));
+    }
+    n
+}
+
+/// Previews kept by 1.4.0 and earlier sit side by side in one folder, so
+/// WebKit could read all of them from any PDF tab. Each moves into its own
+/// private folder; an invalid one is dropped from its tab.
+fn migrate_flat_previews() {
+    let root = util::pdf_previews_dir();
+    let tabs: Vec<(Uuid, String, String)> = store(|s| s.clients.iter().flat_map(|c| c.tabs.iter().filter_map(|t| Some((t.id, t.pdf_path.clone()?, t.title.clone())))).collect());
+    for (tab, path, title) in tabs {
+        let p = std::path::Path::new(&path);
+        if pdf::preview_dir_of(&root, p).is_some() {
+            continue;
+        }
+        let moved = pdf::migrate_flat(&root, p, &title).map(|m| m.to_string_lossy().into_owned());
+        mutate(TABS | CONTENT, |s| s.set_pdf_path(tab, moved));
+    }
+}
+
+/// Settings › Privacy: remove every PDF preview not on screen in a tab and
+/// clear the downloads list. Files in ~/Downloads are not touched.
+pub fn clear_previews_and_download_history() -> usize {
+    mutate(ALL, |s| s.forget_closed_tabs());
+    crate::downloads::clear_finished();
+    prune_previews()
 }
 
 pub fn app_resigned_active() {
@@ -487,6 +712,23 @@ pub fn app_resigned_active() {
 pub fn app_will_quit() {
     web::save_all_states();
     web::capture_sessions(true);
+    // Closed tabs are not reopenable after quitting: their previews go.
+    mutate(0, |s| s.forget_closed_tabs());
     save_now(true);
+    prune_previews();
     util::flush_writes();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn address_text_only_navigates_the_tab_it_was_typed_for() {
+        let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
+        assert!(address_target_ok(Some(a), Some(a)));
+        assert!(!address_target_ok(Some(a), Some(b)), "tab switched while typing");
+        assert!(!address_target_ok(None, Some(a)), "editing began before any tab was known");
+        assert!(!address_target_ok(Some(a), None), "the tab was closed");
+    }
 }

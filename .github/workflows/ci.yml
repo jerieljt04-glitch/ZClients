@@ -1,0 +1,20 @@
+name: ci
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+      - run: cargo install --locked cargo-audit cargo-deny
+      - run: scripts/check.sh
+      - name: Test app builds and is signed as the test identity
+        run: ./build.sh --test
+  # Releases run scripts/release.sh on a protected environment whose secrets
+  # (Developer ID certificate in a temporary keychain, notarytool API key)
+  # are only available to tagged builds; see docs/RELEASE.md.

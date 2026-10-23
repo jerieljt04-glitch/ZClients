@@ -144,8 +144,8 @@ fn edit_distance(a: &str, b: &str) -> usize {
     for (i, row) in d.iter_mut().enumerate() {
         row[0] = i;
     }
-    for j in 0..=b.len() {
-        d[0][j] = j;
+    for (j, cell) in d[0].iter_mut().enumerate() {
+        *cell = j;
     }
     for i in 1..=a.len() {
         for j in 1..=b.len() {
@@ -214,8 +214,24 @@ fn word_score(word: &str, app: &ZohoApp) -> Option<i32> {
 
 /// The apps most people mean when a query fits several equally well.
 const POPULAR: &[&str] = &[
-    "crm", "mail", "books", "desk", "projects", "workdrive", "cliq", "people", "analytics", "creator",
-    "sign", "invoice", "campaigns", "inventory", "recruit", "writer", "sheet", "one",
+    "crm",
+    "mail",
+    "books",
+    "desk",
+    "projects",
+    "workdrive",
+    "cliq",
+    "people",
+    "analytics",
+    "creator",
+    "sign",
+    "invoice",
+    "campaigns",
+    "inventory",
+    "recruit",
+    "writer",
+    "sheet",
+    "one",
 ];
 
 /// Indexes into [`ZOHO_APPS`] matching `query`, best first. Every word must

@@ -14,7 +14,16 @@ fn press(chars: &str, code: u16, mods: NSEventModifierFlags) {
     let window = app.keyWindow().or_else(|| app.mainWindow()).map(|w| w.windowNumber()).unwrap_or(0);
     for kind in [NSEventType::KeyDown, NSEventType::KeyUp] {
         let event = NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
-            kind, NSPoint::new(0.0, 0.0), mods, 0.0, window, None, &util::ns(chars), &util::ns(chars), false, code,
+            kind,
+            NSPoint::new(0.0, 0.0),
+            mods,
+            0.0,
+            window,
+            None,
+            &util::ns(chars),
+            &util::ns(chars),
+            false,
+            code,
         );
         if let Some(e) = event {
             app.sendEvent(&e);
@@ -42,7 +51,10 @@ fn log_keys() {
         let fr = app.keyWindow().and_then(|w| w.firstResponder()).map(|r| r.class().name().to_string_lossy().into_owned());
         util::log(format!(
             "SELFTEST key: {:?} mods={:?} active={} keyWindow={} firstResponder={fr:?}",
-            ev.charactersIgnoringModifiers().map(|c| c.to_string()), ev.modifierFlags(), app.isActive(), app.keyWindow().is_some()
+            ev.charactersIgnoringModifiers().map(|c| c.to_string()),
+            ev.modifierFlags(),
+            app.isActive(),
+            app.keyWindow().is_some()
         ));
         e.as_ptr()
     });
@@ -53,13 +65,18 @@ fn log_keys() {
 fn prep() {
     log_keys();
     util::after(5.0, || {
-        web::eval_active("(() => { const f = document.getElementById('zc-test') || Object.assign(document.body.appendChild(document.createElement('textarea')), {id: 'zc-test'}); f.style.cssText='position:fixed;top:10px;left:10px;width:400px;height:60px;z-index:99999'; f.value=''; f.focus(); return 'focused ' + (document.activeElement === f); })()", |r| util::log(format!("SELFTEST prep: {r}")));
+        web::eval_active(
+            "(() => { const f = document.getElementById('zc-test') || Object.assign(document.body.appendChild(document.createElement('textarea')), {id: 'zc-test'}); f.style.cssText='position:fixed;top:10px;left:10px;width:400px;height:60px;z-index:99999'; f.value=''; f.focus(); return 'focused ' + (document.activeElement === f); })()",
+            |r| util::log(format!("SELFTEST prep: {r}")),
+        );
         if let Some(v) = web::active_view() {
             ui::focus_view(&v);
         }
     });
     util::after(18.0, || {
-        web::eval_active("(() => { const f = document.getElementById('zc-test'); return f ? f.value : 'no field'; })()", |r| util::log(format!("SELFTEST web field after real keys = {r:?}")));
+        web::eval_active("(() => { const f = document.getElementById('zc-test'); return f ? f.value : 'no field'; })()", |r| {
+            util::log(format!("SELFTEST web field after real keys = {r:?}"))
+        });
         util::log(format!("SELFTEST sidebar visible = {}", ui::sidebar_visible()));
     });
     util::after(19.0, || NSApplication::sharedApplication(MainThreadMarker::new().unwrap()).terminate(None));
@@ -92,7 +109,9 @@ fn press_pdf_download(view: &objc2_app_kit::NSView) -> bool {
         fn names(v: &objc2_app_kit::NSView, depth: usize, out: &mut Vec<String>) {
             for s in v.subviews().iter() {
                 out.push(format!("{}{}", " ".repeat(depth), s.class().name().to_string_lossy()));
-                if depth < 3 { names(&s, depth + 1, out); }
+                if depth < 3 {
+                    names(&s, depth + 1, out);
+                }
             }
         }
         let mut out = vec![];
@@ -113,16 +132,19 @@ fn press_pdf_download(view: &objc2_app_kit::NSView) -> bool {
 /// popup (should download and close the popup).
 fn downloads_test() {
     util::after(3.0, || {
-        app::add_client("Download Test", "#3366cc", None, None);
+        app::add_client("Download Test", "#3366cc", None, app::LoginChange::Keep, Default::default());
         util::after(0.5, || app::address_entered("https://www.zoho.com/"));
     });
     util::after(14.0, || {
         report("loaded");
-        web::eval_active(r#"(() => {
+        web::eval_active(
+            r#"(() => {
             const pdf = '%PDF-1.1\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj 2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj 3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 300 144]>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF';
             window.open(URL.createObjectURL(new Blob([pdf], {type: 'application/pdf'})), '_blank', 'width=600,height=500');
             return 'opened pdf popup';
-        })()"#, |r| util::log(format!("SELFTEST pdf popup: {r}")));
+        })()"#,
+            |r| util::log(format!("SELFTEST pdf popup: {r}")),
+        );
     });
     util::after(20.0, || {
         report("after pdf popup");
@@ -141,26 +163,33 @@ fn downloads_test() {
         app::cycle_tab(-1);
     });
     util::after(25.0, || {
-        web::eval_active(r#"(() => {
+        web::eval_active(
+            r#"(() => {
             const f = document.createElement('iframe');
             f.style.display = 'none';
             f.src = URL.createObjectURL(new Blob(['PK\x05\x06' + '\0'.repeat(18)], {type: 'application/zip'}));
             document.body.appendChild(f);
             return 'hidden frame';
-        })()"#, |r| util::log(format!("SELFTEST zip frame: {r}")));
+        })()"#,
+            |r| util::log(format!("SELFTEST zip frame: {r}")),
+        );
     });
     util::after(29.0, || {
         report("after hidden frame zip");
-        web::eval_active(r#"(() => {
+        web::eval_active(
+            r#"(() => {
             window.open(URL.createObjectURL(new Blob(['PK\x05\x06' + '\0'.repeat(18)], {type: 'application/zip'})), '_blank', 'width=500,height=400');
             return 'zip popup';
-        })()"#, |r| util::log(format!("SELFTEST zip popup: {r}")));
+        })()"#,
+            |r| util::log(format!("SELFTEST zip popup: {r}")),
+        );
     });
     util::after(34.0, || {
         report("after zip popup");
         app::cycle_tab(-1);
         // Like a CRM attachment: the page downloads a PDF as a file.
-        web::eval_active(r#"(() => {
+        web::eval_active(
+            r#"(() => {
             const pdf = '%PDF-1.1\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj 2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj 3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 300 144]>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF';
             const a = document.createElement('a');
             a.href = URL.createObjectURL(new Blob([pdf], {type: 'application/pdf'}));
@@ -168,7 +197,9 @@ fn downloads_test() {
             document.body.appendChild(a);
             a.click();
             return 'attachment clicked';
-        })()"#, |r| util::log(format!("SELFTEST pdf attachment: {r}")));
+        })()"#,
+            |r| util::log(format!("SELFTEST pdf attachment: {r}")),
+        );
     });
     util::after(39.0, || {
         report("after pdf attachment");
@@ -212,9 +243,18 @@ fn when_loaded(started: std::time::Instant, done: impl Fn(f64) + 'static) {
 }
 
 const PERF_PAGES: &[&str] = &[
-    "https://www.zoho.com/", "https://www.zoho.com/crm/", "https://www.zoho.com/books/", "https://www.zoho.com/mail/",
-    "https://www.zoho.com/workdrive/", "https://www.zoho.com/desk/", "https://www.zoho.com/projects/", "https://www.zoho.com/people/",
-    "https://www.zoho.com/sign/", "https://www.zoho.com/analytics/", "https://www.zoho.com/creator/", "https://www.zoho.com/invoice/",
+    "https://www.zoho.com/",
+    "https://www.zoho.com/crm/",
+    "https://www.zoho.com/books/",
+    "https://www.zoho.com/mail/",
+    "https://www.zoho.com/workdrive/",
+    "https://www.zoho.com/desk/",
+    "https://www.zoho.com/projects/",
+    "https://www.zoho.com/people/",
+    "https://www.zoho.com/sign/",
+    "https://www.zoho.com/analytics/",
+    "https://www.zoho.com/creator/",
+    "https://www.zoho.com/invoice/",
 ];
 
 /// `ZCLIENTS_SELFTEST=perf`: launch time, then main-thread cost of the tab
@@ -222,7 +262,7 @@ const PERF_PAGES: &[&str] = &[
 fn perf_test() {
     util::log(format!("PERF window built at {:.0} ms", util::ms_since_start()));
     util::after(0.5, || {
-        app::add_client("Perf", "#884422", None, None);
+        app::add_client("Perf", "#884422", None, app::LoginChange::Keep, Default::default());
         let client = app::store(|s| s.active_client_id).unwrap();
         let t0 = std::time::Instant::now();
         app::address_entered(PERF_PAGES[0]);
@@ -263,7 +303,11 @@ fn switch_round(pass: usize, i: usize, mut block: Vec<f64>, ready: Vec<f64>) {
         r.sort_by(f64::total_cmp);
         util::log(format!(
             "PERF pass {pass}: switch blocks main thread median {:.2} ms (max {:.2}); page ready median {:.0} ms (max {:.0}); ready times {:?}",
-            block[n / 2], block[n - 1], r[n / 2], r[n - 1], ready.iter().map(|x| *x as i64).collect::<Vec<_>>()
+            block[n / 2],
+            block[n - 1],
+            r[n / 2],
+            r[n - 1],
+            ready.iter().map(|x| *x as i64).collect::<Vec<_>>()
         ));
         if pass == 0 {
             util::after(1.0, || switch_round(1, 0, vec![], vec![]));
@@ -303,9 +347,7 @@ fn click_page(x: f64, y: f64, mods: NSEventModifierFlags) {
     let app = NSApplication::sharedApplication(mtm);
     let window = view.window().map(|w| w.windowNumber()).unwrap_or(0);
     for kind in [NSEventType::LeftMouseDown, NSEventType::LeftMouseUp] {
-        let e = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
-            kind, at, mods, 0.0, window, None, 0, 1, 1.0,
-        );
+        let e = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(kind, at, mods, 0.0, window, None, 0, 1, 1.0);
         if let Some(e) = e {
             app.sendEvent(&e);
         }
@@ -326,11 +368,16 @@ fn tab_summary() -> String {
                     .iter()
                     .map(|t| {
                         let loaded = web::page_state(t.id).map(|p| p.url).filter(|u| !u.is_empty());
-                        format!("{}{} [{}]", if Some(t.id) == c.active_tab_id { "*" } else { "" }, t.url.clone().unwrap_or_default(), match (live.contains(&t.id), loaded) {
-                            (true, Some(_)) => "loaded",
-                            (true, None) => "awake, not loaded",
-                            _ => "asleep",
-                        })
+                        format!(
+                            "{}{} [{}]",
+                            if Some(t.id) == c.active_tab_id { "*" } else { "" },
+                            t.url.clone().unwrap_or_default(),
+                            match (live.contains(&t.id), loaded) {
+                                (true, Some(_)) => "loaded",
+                                (true, None) => "awake, not loaded",
+                                _ => "asleep",
+                            }
+                        )
                     })
                     .collect();
                 format!("{} tabs {:?}", c.tabs.len(), titles)
@@ -344,14 +391,16 @@ fn tab_summary() -> String {
 fn input_test() {
     let cmd = NSEventModifierFlags::Command;
     util::after(3.0, || {
-        app::add_client("Input Test", "#228844", None, None);
+        app::add_client("Input Test", "#228844", None, app::LoginChange::Keep, Default::default());
         util::after(0.5, || app::address_entered("https://www.zoho.com/"));
     });
     util::after(14.0, move || {
         if let Some(v) = web::active_view() {
             ui::focus_view(&v);
         }
-        eval_log("setup", r#"(() => {
+        eval_log(
+            "setup",
+            r#"(() => {
             const t = Object.assign(document.body.appendChild(document.createElement('textarea')), {id: 'zc-t', value: 'hello select all'});
             t.style.cssText = 'position:fixed;top:120px;left:20px;width:300px;height:40px;z-index:2147483647';
             const a = Object.assign(document.body.appendChild(document.createElement('a')), {id: 'zc-a', href: 'https://www.zoho.com/crm/', textContent: 'plain link'});
@@ -363,7 +412,8 @@ fn input_test() {
             addEventListener('keydown', e => { if (e.defaultPrevented) { window.__zcKeys += '(page prevented) '; } }, false);
             t.focus(); t.setSelectionRange(0, 0);
             return 'ready, focused=' + (document.activeElement === t);
-        })()"#);
+        })()"#,
+        );
     });
     // ZCLIENTS_REAL_KEYS=1: the ⌘A presses come from outside (System Events),
     // the only way to see what a physical key press does.
@@ -374,7 +424,12 @@ fn input_test() {
         if !real {
             press("a", 0, cmd);
         }
-        util::after(0.6, || eval_log("⌘A in text box", "(() => { const t = document.getElementById('zc-t'); return 'selected ' + (t.selectionEnd - t.selectionStart) + ' of ' + t.value.length + '; page saw keys: ' + (window.__zcKeys || 'none') + '; active=' + (document.activeElement && document.activeElement.id); })()"));
+        util::after(0.6, || {
+            eval_log(
+                "⌘A in text box",
+                "(() => { const t = document.getElementById('zc-t'); return 'selected ' + (t.selectionEnd - t.selectionStart) + ' of ' + t.value.length + '; page saw keys: ' + (window.__zcKeys || 'none') + '; active=' + (document.activeElement && document.activeElement.id); })()",
+            )
+        });
     });
     util::after(17.0, move || {
         eval_log("blur", "(() => { document.activeElement.blur(); getSelection().removeAllRanges(); return 'page focused'; })()");
@@ -410,7 +465,7 @@ fn input_test() {
 fn find_test() {
     log_keys();
     util::after(3.0, || {
-        app::add_client("Find Test", "#664488", None, None);
+        app::add_client("Find Test", "#664488", None, app::LoginChange::Keep, Default::default());
         util::after(0.5, || app::address_entered("https://www.zoho.com/"));
     });
     if std::env::var_os("ZCLIENTS_FULLSCREEN").is_some() {
@@ -442,7 +497,7 @@ fn find_test() {
 /// only the tab in front awake. The script outside measures page memory.
 fn memory_test() {
     util::after(1.0, || {
-        app::add_client("Memory Test", "#448866", None, None);
+        app::add_client("Memory Test", "#448866", None, app::LoginChange::Keep, Default::default());
         app::address_entered(PERF_PAGES[0]);
     });
     for (i, page) in PERF_PAGES[1..4].iter().enumerate() {
@@ -520,7 +575,7 @@ fn call_phase(tab: uuid::Uuid, label: &'static str, secs: f64) {
 /// tab and with the window minimized; then a screen-share request.
 fn meet_test() {
     util::after(1.0, || {
-        app::add_client("Call Test", "#aa3355", None, None);
+        app::add_client("Call Test", "#aa3355", None, app::LoginChange::Keep, Default::default());
         app::address_entered(PERF_PAGES[0]);
     });
     util::after(12.0, || {
@@ -550,7 +605,10 @@ fn meet_test() {
         util::after(30.0, move || {
             // (t = 42 s, after the window is back.) getDisplayMedia needs a
             // click (user activation) first.
-            web::eval_active("(() => { const b = Object.assign(document.body.appendChild(document.createElement('button')), {id: 'zc-share', textContent: 'share'}); b.style.cssText = 'position:fixed;top:20px;left:20px;width:200px;height:30px;z-index:2147483647'; b.onclick = () => { window.__zcShare = 'asked (no answer yet)'; return navigator.mediaDevices.getDisplayMedia({video: true}).then(s => { window.__zcShare = 'sharing ' + s.getTracks().map(t => t.label || t.kind).join(','); }, e => { window.__zcShare = 'refused: ' + e.name; }); }; return location.host; })()", |r| util::log(format!("SELFTEST CALL share button on {r}")));
+            web::eval_active(
+                "(() => { const b = Object.assign(document.body.appendChild(document.createElement('button')), {id: 'zc-share', textContent: 'share'}); b.style.cssText = 'position:fixed;top:20px;left:20px;width:200px;height:30px;z-index:2147483647'; b.onclick = () => { window.__zcShare = 'asked (no answer yet)'; return navigator.mediaDevices.getDisplayMedia({video: true}).then(s => { window.__zcShare = 'sharing ' + s.getTracks().map(t => t.label || t.kind).join(','); }, e => { window.__zcShare = 'refused: ' + e.name; }); }; return location.host; })()",
+                |r| util::log(format!("SELFTEST CALL share button on {r}")),
+            );
             util::after(0.5, || click_page(60.0, 35.0, NSEventModifierFlags::empty()));
             util::after(5.5, || web::eval_active("(() => String(window.__zcShare))()", |r| util::log(format!("SELFTEST CALL screen sharing: {r}"))));
         });
@@ -570,6 +628,335 @@ fn meet_test() {
     });
 }
 
+fn pasteboard_text() -> String {
+    NSPasteboard::generalPasteboard().stringForType(unsafe { NSPasteboardTypeString }).map(|s| s.to_string()).unwrap_or_default()
+}
+
+fn active_url() -> String {
+    app::store(|s| s.active_tab().map(|(_, t)| t.id)).and_then(web::page_state).map(|p| p.url).unwrap_or_default()
+}
+
+/// `ZCLIENTS_SELFTEST=address`: copy part of tab A's address, switch to tab
+/// B, click into its page; then paste into B's address bar and click into
+/// the page again. ⌘C / ⌘V come from System Events (~16 s and ~24.5 s).
+fn address_test() {
+    log_keys();
+    util::after(2.0, || {
+        app::add_client("Address Test", "#336699", None, app::LoginChange::Keep, Default::default());
+        app::address_entered("https://www.zoho.com/");
+    });
+    util::after(6.0, || {
+        app::address_entered_in_new_tab("https://www.zoho.com/crm/");
+        util::after(4.0, || app::select_tab_index(0));
+    });
+    util::after(14.0, || {
+        ui::click_address();
+        util::after(0.4, || util::log(format!("SELFTEST ADDR clicked address bar on tab A ({}): {}", active_url(), ui::address_state())));
+        util::after(0.8, || {
+            ui::select_in_address(8, 20);
+            util::log(format!("SELFTEST ADDR selected part: {}", ui::address_state()));
+        });
+    });
+    util::after(17.0, || {
+        util::log(format!("SELFTEST ADDR after ⌘C, clipboard = {:?}", pasteboard_text()));
+        ui::click_tab_chip(1);
+        util::after(0.6, || util::log(format!("SELFTEST ADDR switched to tab B ({}): {}", active_url(), ui::address_state())));
+    });
+    util::after(19.0, || {
+        click_page(400.0, 400.0, NSEventModifierFlags::empty());
+        util::after(3.0, || util::log(format!("SELFTEST ADDR clicked into tab B's page; tab B now at {} ({})", active_url(), tab_summary())));
+    });
+    util::after(23.5, || {
+        ui::click_address();
+        util::after(0.4, || util::log(format!("SELFTEST ADDR clicked tab B's address bar: {}", ui::address_state())));
+    });
+    util::after(25.5, || {
+        util::log(format!("SELFTEST ADDR after ⌘V: {}", ui::address_state()));
+        click_page(400.0, 400.0, NSEventModifierFlags::empty());
+        util::after(3.0, || util::log(format!("SELFTEST ADDR clicked into the page after pasting; tab B now at {} ({})", active_url(), tab_summary())));
+    });
+    util::after(31.0, || {
+        util::log("SELFTEST done");
+        NSApplication::sharedApplication(MainThreadMarker::new().unwrap()).terminate(None);
+    });
+}
+
+/// `ZCLIENTS_SELFTEST=address2`: text typed into the address bar never
+/// navigates when focus moves — to another tab, into the page — only Return
+/// for the same tab does; Esc restores the tab's address.
+fn address_rules_test() {
+    util::after(2.0, || {
+        app::add_client("Address Rules", "#336699", None, app::LoginChange::Keep, Default::default());
+        app::address_entered("https://www.zoho.com/");
+    });
+    util::after(5.0, || {
+        app::address_entered_in_new_tab("https://www.zoho.com/crm/");
+        util::after(4.0, || app::select_tab_index(0));
+    });
+    util::after(12.0, || {
+        ui::click_address();
+        util::after(0.3, || {
+            ui::type_in_address("books.zoho.com/half-typed");
+            util::log(format!("SELFTEST ADDR2 typed on tab A ({}): {}", active_url(), ui::address_state()));
+            ui::click_tab_chip(1);
+        });
+        util::after(1.5, || util::log(format!("SELFTEST ADDR2 switched to tab B: url={} {}", active_url(), ui::address_state())));
+    });
+    util::after(16.0, || {
+        ui::click_address();
+        util::after(0.3, || {
+            ui::type_in_address("people.zoho.com/partial");
+            click_page(400.0, 400.0, NSEventModifierFlags::empty());
+        });
+        util::after(3.0, || util::log(format!("SELFTEST ADDR2 clicked into page after typing: url={} {}", active_url(), ui::address_state())));
+    });
+    util::after(21.0, || {
+        ui::click_address();
+        util::after(0.3, || {
+            ui::type_in_address("desk.zoho.com/escape");
+            press("\u{1b}", 53, NSEventModifierFlags::empty());
+            util::after(0.5, || util::log(format!("SELFTEST ADDR2 after Esc: url={} {}", active_url(), ui::address_state())));
+        });
+    });
+    util::after(24.0, || {
+        // Return arriving for a tab that is no longer in front.
+        let stale = app::store(|s| s.active_client().and_then(|c| c.tabs.first().map(|t| t.id)));
+        app::address_entered_for(stale, "https://www.zoho.com/books/");
+        util::after(3.0, || util::log(format!("SELFTEST ADDR2 stale Return: url={}", active_url())));
+    });
+    util::after(28.0, || {
+        ui::click_address();
+        util::after(0.3, || {
+            ui::type_in_address("https://www.zoho.com/mail/");
+            press("\r", 36, NSEventModifierFlags::empty());
+        });
+        util::after(4.0, || util::log(format!("SELFTEST ADDR2 Return on the same tab: url={}", active_url())));
+    });
+    util::after(34.0, || {
+        util::log("SELFTEST done");
+        NSApplication::sharedApplication(MainThreadMarker::new().unwrap()).terminate(None);
+    });
+}
+
+/// `ZCLIENTS_SELFTEST=security` (with `ZCLIENTS_ALERTS=decline`,
+/// `ZCLIENTS_MOCK_MEDIA=1 ZCLIENTS_MOCK_PROMPT=1`): drives the hardened
+/// paths in the real app and logs what each did.
+fn security_test() {
+    util::after(2.0, || {
+        app::add_client("Security Test", "#aa3355", None, app::LoginChange::Keep, Default::default());
+        util::after(0.5, || app::address_entered("https://www.zoho.com/"));
+    });
+    util::after(11.0, || {
+        let inspectable = web::active_view().is_some_and(|v| unsafe { v.isInspectable() });
+        util::log(format!("SELFTEST SEC inspectable={inspectable} (developer mode off)"));
+        web::eval_active("navigator.userAgent", |r| util::log(format!("SELFTEST SEC userAgent={r}")));
+        web::eval_in_client_world("return typeof window.__zcFill", |r| util::log(format!("SELFTEST SEC login helper on www.zoho.com: {r}")));
+    });
+    util::after(13.0, || {
+        let before = tab_count();
+        web::eval_active("(() => { window.open('https://www.zoho.com/crm/'); return 'window.open without a click'; })()", |r| util::log(format!("SELFTEST SEC {r}")));
+        util::after(2.0, move || util::log(format!("SELFTEST SEC popup without gesture: tabs {before} -> {}", tab_count())));
+    });
+    util::after(16.0, || {
+        let before = downloads::with_items(|v| v.len());
+        web::eval_active(
+            "(() => { const a = document.createElement('a'); a.href = 'data:application/octet-stream,hello'; a.download = 'nogesture.bin'; document.body.appendChild(a); a.click(); return 'download without a click'; })()",
+            |r| util::log(format!("SELFTEST SEC {r}")),
+        );
+        util::after(2.0, move || util::log(format!("SELFTEST SEC download without gesture: items {before} -> {}", downloads::with_items(|v| v.len()))));
+    });
+    util::after(19.0, || {
+        web::eval_active("(() => { location.href = 'mailto:selftest@example.invalid'; return 'mailto without a click'; })()", |r| util::log(format!("SELFTEST SEC {r}")));
+    });
+    util::after(21.0, || {
+        web::eval_active("(() => { navigator.mediaDevices.getUserMedia({video: true}).then(() => 0, () => 0); return 'camera request from www.zoho.com'; })()", |r| {
+            util::log(format!("SELFTEST SEC {r}"))
+        });
+        util::after(2.0, || {
+            for u in web::recent_media_uses() {
+                util::log(format!("SELFTEST SEC media decision: {} {} decision={}", u.origin, u.what, u.decision));
+            }
+        });
+    });
+    util::after(24.0, || {
+        // An HTML file disguised as a PDF must not be shown; a real one is.
+        let Some(client) = app::store(|s| s.active_client_id) else { return };
+        let dir = crate::pdf::new_preview_dir().unwrap();
+        let fake = dir.join("fake.pdf");
+        std::fs::write(&fake, b"<html><body>not a pdf</body></html>").unwrap();
+        app::open_pdf_tab(client, fake, "fake.pdf".into(), None);
+        util::after(2.5, || {
+            web::eval_active("location.href", |r| util::log(format!("SELFTEST SEC disguised PDF tab shows: {r}")));
+            let src = std::env::temp_dir().join("zc-selftest-real.pdf");
+            std::fs::write(&src, b"%PDF-1.1\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj 2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj 3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 300 144]>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF").unwrap();
+            let client = app::store(|s| s.active_client_id).unwrap();
+            let opened = app::open_downloaded_pdf(client, &src, "Real.pdf", None);
+            util::after(2.5, move || {
+                web::eval_active("location.protocol", move |r| util::log(format!("SELFTEST SEC real PDF tab opened={} protocol={r}", opened.is_some())));
+                let path = app::store(|s| s.active_tab().and_then(|(_, t)| t.pdf_path.clone())).unwrap_or_default();
+                use std::os::unix::fs::PermissionsExt;
+                let p = std::path::Path::new(&path);
+                let modes = (
+                    std::fs::metadata(p).map(|m| m.permissions().mode() & 0o777).unwrap_or(0),
+                    p.parent().and_then(|d| std::fs::metadata(d).ok()).map(|m| m.permissions().mode() & 0o777).unwrap_or(0),
+                );
+                util::log(format!("SELFTEST SEC preview file/dir modes = {:o}/{:o}", modes.0, modes.1));
+            });
+        });
+    });
+    util::after(30.0, || {
+        // Signed out, every Meet page redirects to Google's marketing site;
+        // robots.txt stays a document of the meet.google.com origin.
+        app::address_entered_in_new_tab("https://meet.google.com/robots.txt");
+        util::after(7.0, || {
+            web::eval_active("location.origin", |r| util::log(format!("SELFTEST SEC meet page origin: {r}")));
+            web::eval_active(
+                "(() => { navigator.mediaDevices.getUserMedia({audio: true, video: true}).then(s => { window.__zcTracks = s.getTracks().length; }, e => { window.__zcTracks = 'denied ' + e.name; }); return 'camera+mic request from meet.google.com'; })()",
+                |r| util::log(format!("SELFTEST SEC {r}")),
+            );
+            util::after(3.0, || {
+                web::eval_active("String(window.__zcTracks)", |r| util::log(format!("SELFTEST SEC meet tracks: {r}")));
+                for u in web::recent_media_uses().iter().take(2) {
+                    util::log(format!("SELFTEST SEC media decision: {} {} decision={}", u.origin, u.what, u.decision));
+                }
+                util::log(format!("SELFTEST SEC calls={:?} keeping awake={}", web::tabs_in_calls().len(), web::keeping_awake()));
+                if let Some((_, tab, _, _)) = web::tabs_in_calls().first().copied() {
+                    web::stop_media(tab);
+                    util::after(1.5, || util::log(format!("SELFTEST SEC after Stop: calls={} keeping awake={}", web::tabs_in_calls().len(), web::keeping_awake())));
+                }
+            });
+        });
+    });
+    util::after(46.0, || {
+        report("security end");
+        util::log("SELFTEST done");
+        NSApplication::sharedApplication(MainThreadMarker::new().unwrap()).terminate(None);
+    });
+}
+
+/// Walk the window's accessibility tree; log every control and flag any
+/// without a name. Then drive the tab strip with the keyboard.
+fn a11y_test() {
+    util::after(2.0, || {
+        app::add_client("A11y Test", "#2255aa", None, app::LoginChange::Keep, Default::default());
+        app::address_entered("https://www.zoho.com/");
+        util::after(1.0, || app::address_entered_in_new_tab("https://www.zoho.com/crm/"));
+        util::after(2.0, || app::address_entered_in_new_tab("https://www.zoho.com/mail/"));
+    });
+    util::after(9.0, || {
+        let mtm = MainThreadMarker::new().unwrap();
+        let app = NSApplication::sharedApplication(mtm);
+        let Some(window) = app.mainWindow().or_else(|| app.windows().iter().find(|w| w.isVisible())) else { return util::log("SELFTEST A11Y no window") };
+        let mut out = vec![];
+        let mut unlabeled = vec![];
+        walk_ax(&window, 0, &mut out, &mut unlabeled);
+        for line in &out {
+            util::log(format!("SELFTEST A11Y {line}"));
+        }
+        util::log(format!("SELFTEST A11Y controls={} unlabeled={} {unlabeled:?}", out.len(), unlabeled.len()));
+        ui::focus_tab_strip();
+        util::after(0.5, || {
+            util::log(format!("SELFTEST A11Y focus: {}", first_responder()));
+            press("\u{F702}", 123, NSEventModifierFlags::empty());
+            util::after(0.4, || {
+                util::log(format!("SELFTEST A11Y after ←: {}", first_responder()));
+                press("\r", 36, NSEventModifierFlags::empty());
+                util::after(0.6, || {
+                    util::log(format!("SELFTEST A11Y after Return: active tab index={:?}", app::store(|s| s.active_client().and_then(|c| c.active_index()))));
+                    press("\u{F703}", 124, NSEventModifierFlags::Option | NSEventModifierFlags::Shift);
+                    util::after(0.6, || {
+                        util::log(format!(
+                            "SELFTEST A11Y after ⌥⇧→ (move tab): tabs={:?}",
+                            app::store(|s| s.active_client().map(|c| c.tabs.iter().map(|t| t.display_title()).collect::<Vec<_>>()))
+                        ))
+                    });
+                });
+            });
+        });
+    });
+    util::after(14.0, || {
+        util::log("SELFTEST done");
+        NSApplication::sharedApplication(MainThreadMarker::new().unwrap()).terminate(None);
+    });
+}
+
+fn first_responder() -> String {
+    let mtm = MainThreadMarker::new().unwrap();
+    NSApplication::sharedApplication(mtm)
+        .mainWindow()
+        .and_then(|w| w.firstResponder())
+        .map(|r| format!("{} {:?}", r.class().name().to_string_lossy(), ax_string(&r, objc2::sel!(accessibilityLabel))))
+        .unwrap_or_default()
+}
+
+fn responds(el: &objc2::runtime::AnyObject, sel: objc2::runtime::Sel) -> bool {
+    unsafe { objc2::msg_send![el, respondsToSelector: sel] }
+}
+
+fn ax_attr(el: &objc2::runtime::AnyObject, name: &str) -> Option<objc2::rc::Retained<objc2::runtime::AnyObject>> {
+    if !responds(el, objc2::sel!(accessibilityAttributeValue:)) {
+        return None;
+    }
+    unsafe { objc2::msg_send![el, accessibilityAttributeValue: &*util::ns(name)] }
+}
+
+fn ax_string(el: &objc2::runtime::AnyObject, sel: objc2::runtime::Sel) -> Option<String> {
+    if !responds(el, sel) {
+        // Older accessibility objects (table rows) answer only the
+        // attribute API.
+        let attr = match sel.name().to_str().unwrap_or("") {
+            "accessibilityRole" => "AXRole",
+            "accessibilityLabel" => "AXDescription",
+            "accessibilityTitle" => "AXTitle",
+            "accessibilitySubrole" => "AXSubrole",
+            _ => return None,
+        };
+        return ax_attr(el, attr).and_then(|v| v.downcast::<objc2_foundation::NSString>().ok()).map(|s| s.to_string()).filter(|s| !s.is_empty());
+    }
+    let v: Option<objc2::rc::Retained<objc2::runtime::AnyObject>> = unsafe { objc2::msg_send![el, performSelector: sel] };
+    v.and_then(|v| v.downcast::<objc2_foundation::NSString>().ok()).map(|s| s.to_string()).filter(|s| !s.is_empty())
+}
+
+fn walk_ax(el: &objc2::runtime::AnyObject, depth: usize, out: &mut Vec<String>, unlabeled: &mut Vec<String>) {
+    use objc2::msg_send;
+    use objc2::rc::Retained;
+    use objc2::sel;
+    use objc2_foundation::NSArray;
+    if depth > 14 {
+        return;
+    }
+    let is_el: bool = (responds(el, sel!(isAccessibilityElement)) && unsafe { msg_send![el, isAccessibilityElement] })
+        || (!responds(el, sel!(accessibilityRole)) && ax_attr(el, "AXRole").is_some());
+    let role = ax_string(el, sel!(accessibilityRole)).unwrap_or_default();
+    if std::env::var_os("ZCLIENTS_AX_ALL").is_some() && depth < 9 {
+        out.push(format!("{}<{role}> el={is_el} {:?} {}", " ".repeat(depth), ax_string(el, sel!(accessibilityLabel)), el.class().name().to_string_lossy()));
+    }
+    if is_el && matches!(role.as_str(), "AXButton" | "AXRadioButton" | "AXCell" | "AXPopUpButton" | "AXTextField" | "AXCheckBox" | "AXTabGroup" | "AXSearchField" | "AXRow") {
+        let name = ax_string(el, sel!(accessibilityLabel)).or_else(|| ax_string(el, sel!(accessibilityTitle)));
+        let selected: bool = responds(el, sel!(isAccessibilitySelected)) && unsafe { msg_send![el, isAccessibilitySelected] };
+        out.push(format!("{}{role} {:?}{}", " ".repeat(depth), name, if selected { " [selected]" } else { "" }));
+        if name.is_none() {
+            unlabeled.push(format!("{role}/{}", ax_string(el, sel!(accessibilitySubrole)).unwrap_or_default()));
+        }
+    }
+    let kids: Option<Retained<NSArray<objc2::runtime::AnyObject>>> = if responds(el, sel!(accessibilityChildren)) {
+        unsafe { msg_send![el, accessibilityChildren] }
+    } else {
+        ax_attr(el, "AXChildren").and_then(|k| k.downcast::<NSArray>().ok()).map(|a| unsafe { Retained::cast_unchecked(a) })
+    };
+    if let Some(kids) = kids {
+        for k in kids.iter() {
+            // Web content is WebKit's own tree; stop at the web view.
+            let class = k.class().name().to_string_lossy().into_owned();
+            if class.contains("WKWebView") || class.contains("ZWebView") {
+                out.push(format!("{}(web content)", " ".repeat(depth + 1)));
+                continue;
+            }
+            walk_ax(&k, depth + 1, out, unlabeled);
+        }
+    }
+}
+
 pub fn start() {
     if !util::is_test_build() {
         return;
@@ -582,6 +969,10 @@ pub fn start() {
         Ok("find") => return find_test(),
         Ok("memory") => return memory_test(),
         Ok("meet") => return meet_test(),
+        Ok("address") => return address_test(),
+        Ok("security") => return security_test(),
+        Ok("address2") => return address_rules_test(),
+        Ok("a11y") => return a11y_test(),
         Ok(_) => {}
         Err(_) => return,
     }
@@ -590,7 +981,13 @@ pub fn start() {
         let mtm = MainThreadMarker::new().unwrap();
         let app = NSApplication::sharedApplication(mtm);
         let menu = app.mainMenu();
-        util::log(format!("SELFTEST active={} key window={} main menu={} items={}", app.isActive(), app.keyWindow().is_some(), menu.is_some(), menu.as_ref().map(|m| m.numberOfItems()).unwrap_or(0)));
+        util::log(format!(
+            "SELFTEST active={} key window={} main menu={} items={}",
+            app.isActive(),
+            app.keyWindow().is_some(),
+            menu.is_some(),
+            menu.as_ref().map(|m| m.numberOfItems()).unwrap_or(0)
+        ));
         if let Some(menu) = menu {
             for i in 0..menu.numberOfItems() {
                 let item = menu.itemAtIndex(i).unwrap();
@@ -605,7 +1002,18 @@ pub fn start() {
                 }
             }
             let e = NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
-                NSEventType::KeyDown, NSPoint::new(0.0, 0.0), cmd, 0.0, 0, None, &util::ns("s"), &util::ns("s"), false, 1).unwrap();
+                NSEventType::KeyDown,
+                NSPoint::new(0.0, 0.0),
+                cmd,
+                0.0,
+                0,
+                None,
+                &util::ns("s"),
+                &util::ns("s"),
+                false,
+                1,
+            )
+            .unwrap();
             util::log(format!("SELFTEST mainMenu.performKeyEquivalent(⌘S) = {}", menu.performKeyEquivalent(&e)));
         }
     });
@@ -631,9 +1039,12 @@ pub fn start() {
         if let Some(v) = web::active_view() {
             ui::focus_view(&v);
         }
-        web::eval_active("(() => { const f = document.getElementById('zc-test') || Object.assign(document.body.appendChild(document.createElement('textarea')), {id: 'zc-test'}); f.value=''; f.focus(); return 'focused ' + (document.activeElement === f); })()", |r| {
-            util::log(format!("SELFTEST web field: {r}"));
-        });
+        web::eval_active(
+            "(() => { const f = document.getElementById('zc-test') || Object.assign(document.body.appendChild(document.createElement('textarea')), {id: 'zc-test'}); f.value=''; f.focus(); return 'focused ' + (document.activeElement === f); })()",
+            |r| {
+                util::log(format!("SELFTEST web field: {r}"));
+            },
+        );
         util::after(0.6, move || {
             press("v", 9, cmd);
             util::after(0.8, || {

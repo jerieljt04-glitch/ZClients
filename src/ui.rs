@@ -7,19 +7,16 @@ use std::cell::{Cell, OnceCell, RefCell};
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Bool, ProtocolObject, Sel};
-use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadMarker, MainThreadOnly};
+use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSApplication, NSAutoresizingMaskOptions, NSBackingStoreType, NSButton, NSColor, NSColorWell, NSControlStateValueOff, NSControlTextEditingDelegate,
-    NSControlStateValueOn, NSDragOperation, NSDraggingInfo, NSEvent, NSEventModifierFlags, NSFont, NSImage, NSImageView,
-    NSLineBreakMode, NSMenu, NSMenuDelegate, NSMenuItem, NSPasteboardItem, NSPasteboardWriting, NSPopUpButton,
-    NSResponder, NSScrollView, NSSearchField, NSSecureTextField, NSTableColumn, NSTableView, NSTableViewDataSource,
-    NSTableViewDelegate, NSTableViewDropOperation, NSTableViewStyle, NSTextField, NSView, NSVisualEffectBlendingMode,
-    NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView, NSWindow, NSWindowDelegate, NSWindowStyleMask,
-    NSWindowTitleVisibility, NSWorkspace, NSControl, NSTextView, NSTextFieldDelegate, NSSearchFieldDelegate,
+    NSAccessibility, NSApplication, NSAutoresizingMaskOptions, NSBackingStoreType, NSButton, NSColor, NSColorWell, NSControl, NSControlStateValueOff, NSControlStateValueOn,
+    NSControlTextEditingDelegate, NSDragOperation, NSDraggingInfo, NSEvent, NSEventModifierFlags, NSFont, NSImage, NSImageView, NSLineBreakMode, NSMenu, NSMenuDelegate,
+    NSMenuItem, NSPasteboardItem, NSPasteboardWriting, NSPopUpButton, NSResponder, NSScrollView, NSSearchField, NSSearchFieldDelegate, NSSecureTextField, NSTableColumn,
+    NSTableView, NSTableViewDataSource, NSTableViewDelegate, NSTableViewDropOperation, NSTableViewStyle, NSTextField, NSTextFieldDelegate, NSTextView,
+    NSUserInterfaceItemIdentification, NSView, NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView, NSWindow, NSWindowDelegate,
+    NSWindowStyleMask, NSWindowTitleVisibility, NSWorkspace,
 };
-use objc2_foundation::{
-    NSArray, NSIndexSet, NSInteger, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSURL,
-};
+use objc2_foundation::{NSArray, NSIndexSet, NSInteger, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSURL};
 use uuid::Uuid;
 
 use crate::model::{self, SortMode};
@@ -96,6 +93,52 @@ pub struct ChipIvars {
     dragged: Cell<bool>,
     /// What the chip currently shows; it is only rebuilt when this changes.
     rendered: RefCell<String>,
+    /// What VoiceOver reads: the title plus any state (selected is separate).
+    ax_label: RefCell<String>,
+    ax_selected: Cell<bool>,
+}
+
+define_class!(
+    /// The address bar, behaving like a browser's: the first click selects
+    /// the whole address (so ⌘C copies all of it); a drag or a second click
+    /// places the cursor as usual. Its right-click menu adds Paste and Go.
+    #[unsafe(super(NSTextField, NSControl, NSView, NSResponder, NSObject))]
+    #[thread_kind = MainThreadOnly]
+    struct AddressField;
+
+    impl AddressField {
+        #[unsafe(method(mouseDown:))]
+        fn mouse_down(&self, event: &NSEvent) {
+            let was_editing = self.currentEditor().is_some();
+            unsafe {
+                let _: () = msg_send![super(self), mouseDown: event];
+            }
+            if !was_editing
+                && let Some(editor) = self.currentEditor()
+                    && editor.selectedRange().length == 0 {
+                        unsafe { editor.selectAll(None) };
+                    }
+        }
+
+        // The field editor asks its delegate (this field) for its menu.
+        #[unsafe(method_id(textView:menu:forEvent:atIndex:))]
+        fn editor_menu(&self, _tv: &NSTextView, menu: &NSMenu, _event: &NSEvent, _index: usize) -> Option<Retained<NSMenu>> {
+            let paste_at = unsafe { menu.indexOfItemWithTarget_andAction(None, Some(sel!(paste:))) };
+            let at = if paste_at >= 0 { paste_at + 1 } else { 0 };
+            let item = unsafe {
+                NSMenuItem::initWithTitle_action_keyEquivalent(NSMenuItem::alloc(mtm()), &util::ns("Paste and Go"), Some(sel!(pasteAndGo:)), &util::ns(""))
+            };
+            unsafe { item.setTarget(Some(&target())) };
+            item.setEnabled(clipboard_text().is_some());
+            menu.insertItem_atIndex(&item, at);
+            Some(objc2::Message::retain(menu))
+        }
+    }
+);
+
+/// The clipboard's text, if it holds any.
+fn clipboard_text() -> Option<String> {
+    objc2_app_kit::NSPasteboard::generalPasteboard().stringForType(unsafe { objc2_app_kit::NSPasteboardTypeString }).map(|s| s.to_string()).filter(|s| !s.trim().is_empty())
 }
 
 define_class!(
@@ -148,17 +191,145 @@ define_class!(
 
         #[unsafe(method(rightMouseDown:))]
         fn right_mouse_down(&self, event: &NSEvent) {
-            MENU_TAB.set(Some((self.ivars().client, self.ivars().tab)));
-            let menu = NSMenu::new(mtm());
-            add_item(&menu, "Move Tab Left", sel!(tabMenuLeft:), "", 0);
-            add_item(&menu, "Move Tab Right", sel!(tabMenuRight:), "", 0);
-            add_item(&menu, "Duplicate Tab", sel!(tabMenuDuplicate:), "", 0);
-            menu.addItem(&NSMenuItem::separatorItem(mtm()));
-            add_item(&menu, "Close Tab", sel!(tabMenuClose:), "", 0);
+            let menu = self.tab_menu();
             NSMenu::popUpContextMenu_withEvent_forView(&menu, event, self);
+        }
+
+        // ---- keyboard (Full Keyboard Access) ----------------------------
+
+        #[unsafe(method(acceptsFirstResponder))]
+        fn accepts_first_responder(&self) -> bool {
+            true
+        }
+
+        #[unsafe(method(canBecomeKeyView))]
+        fn can_become_key_view(&self) -> bool {
+            true
+        }
+
+        #[unsafe(method(becomeFirstResponder))]
+        fn become_first_responder(&self) -> bool {
+            self.setKeyboardFocusRingNeedsDisplayInRect(self.bounds());
+            true
+        }
+
+        #[unsafe(method(resignFirstResponder))]
+        fn resign_first_responder(&self) -> bool {
+            self.setKeyboardFocusRingNeedsDisplayInRect(self.bounds());
+            true
+        }
+
+        #[unsafe(method(drawFocusRingMask))]
+        fn draw_focus_ring_mask(&self) {
+            let path = objc2_app_kit::NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(self.bounds(), 7.0, 7.0);
+            path.fill();
+        }
+
+        #[unsafe(method(focusRingMaskBounds))]
+        fn focus_ring_mask_bounds(&self) -> NSRect {
+            self.bounds()
+        }
+
+        /// ←/→ move between tabs, Space/Return selects, ⌥⇧←/→ moves the
+        /// tab, Delete closes it, ⇧F10 or the menu key opens its menu.
+        #[unsafe(method(keyDown:))]
+        fn key_down(&self, event: &NSEvent) {
+            let (client, tab) = (self.ivars().client, self.ivars().tab);
+            let chars = event.charactersIgnoringModifiers().map(|c| c.to_string()).unwrap_or_default();
+            let mods = event.modifierFlags() & (NSEventModifierFlags::Option | NSEventModifierFlags::Shift | NSEventModifierFlags::Command | NSEventModifierFlags::Control);
+            let reorder = mods == NSEventModifierFlags::Option | NSEventModifierFlags::Shift;
+            match chars.as_str() {
+                "\u{F702}" if reorder => app::move_tab(client, tab, -1),
+                "\u{F703}" if reorder => app::move_tab(client, tab, 1),
+                "\u{F702}" => focus_chip_offset(tab, -1),
+                "\u{F703}" => focus_chip_offset(tab, 1),
+                " " | "\r" => app::select_tab(client, tab),
+                "\u{7f}" | "\u{F728}" => app::close_tab(client, tab),
+                _ => unsafe {
+                    let _: () = msg_send![super(self), keyDown: event];
+                },
+            }
+        }
+
+        // ---- accessibility ---------------------------------------------
+
+        #[unsafe(method(isAccessibilityElement))]
+        fn is_ax_element(&self) -> bool {
+            true
+        }
+
+        #[unsafe(method_id(accessibilityRole))]
+        fn ax_role(&self) -> Retained<objc2_foundation::NSString> {
+            util::ns("AXRadioButton")
+        }
+
+        #[unsafe(method_id(accessibilitySubrole))]
+        fn ax_subrole(&self) -> Retained<objc2_foundation::NSString> {
+            util::ns("AXTabButton")
+        }
+
+        #[unsafe(method_id(accessibilityRoleDescription))]
+        fn ax_role_description(&self) -> Retained<objc2_foundation::NSString> {
+            util::ns("tab")
+        }
+
+        #[unsafe(method_id(accessibilityLabel))]
+        fn ax_label(&self) -> Retained<objc2_foundation::NSString> {
+            util::ns(&self.ivars().ax_label.borrow())
+        }
+
+        #[unsafe(method(isAccessibilitySelected))]
+        fn ax_selected(&self) -> bool {
+            self.ivars().ax_selected.get()
+        }
+
+        #[unsafe(method_id(accessibilityValue))]
+        fn ax_value(&self) -> Retained<objc2_foundation::NSNumber> {
+            objc2_foundation::NSNumber::new_bool(self.ivars().ax_selected.get())
+        }
+
+        #[unsafe(method(accessibilityPerformPress))]
+        fn ax_press(&self) -> bool {
+            app::select_tab(self.ivars().client, self.ivars().tab);
+            true
+        }
+
+        #[unsafe(method(accessibilityPerformShowMenu))]
+        fn ax_show_menu(&self) -> bool {
+            let menu = self.tab_menu();
+            unsafe { menu.popUpMenuPositioningItem_atLocation_inView(None, NSPoint::new(0.0, self.bounds().size.height), Some(self)) };
+            true
         }
     }
 );
+
+impl TabChip {
+    fn tab_menu(&self) -> Retained<NSMenu> {
+        MENU_TAB.set(Some((self.ivars().client, self.ivars().tab)));
+        let menu = NSMenu::new(mtm());
+        add_item(&menu, "Move Tab Left", sel!(tabMenuLeft:), "", 0);
+        add_item(&menu, "Move Tab Right", sel!(tabMenuRight:), "", 0);
+        add_item(&menu, "Duplicate Tab", sel!(tabMenuDuplicate:), "", 0);
+        menu.addItem(&NSMenuItem::separatorItem(mtm()));
+        add_item(&menu, "Close Tab", sel!(tabMenuClose:), "", 0);
+        menu
+    }
+}
+
+/// Move keyboard focus to the chip `offset` places from `tab`'s.
+fn focus_chip_offset(tab: Uuid, offset: isize) {
+    with_ui(|u| {
+        let chips = u.chips.borrow();
+        let Some(i) = chips.iter().position(|c| c.ivars().tab == tab) else { return };
+        let j = (i as isize + offset).clamp(0, chips.len() as isize - 1) as usize;
+        if let Some(c) = chips.get(j) {
+            if c.isHidden() {
+                app::select_tab(c.ivars().client, c.ivars().tab);
+            }
+            u.window.makeFirstResponder(Some(c));
+        }
+    });
+}
 
 pub struct TileIvars {
     kind: u8,
@@ -187,19 +358,83 @@ define_class!(
         #[unsafe(method(mouseUp:))]
         fn mouse_up(&self, _event: &NSEvent) {
             self.setAlphaValue(1.0);
-            let (kind, index) = (self.ivars().kind, self.ivars().index);
-            util::later(move || match kind {
-                T_SWATCH => sheet_pick_swatch(index),
-                _ => customise_active(),
-            });
+            self.activate();
         }
 
         #[unsafe(method(acceptsFirstMouse:))]
         fn accepts_first_mouse(&self, _e: Option<&NSEvent>) -> bool {
             true
         }
+
+        #[unsafe(method(acceptsFirstResponder))]
+        fn accepts_first_responder(&self) -> bool {
+            true
+        }
+
+        #[unsafe(method(canBecomeKeyView))]
+        fn can_become_key_view(&self) -> bool {
+            true
+        }
+
+        #[unsafe(method(drawFocusRingMask))]
+        fn draw_focus_ring_mask(&self) {
+            let r = self.layer().map(|l| l.cornerRadius()).unwrap_or(6.0);
+            objc2_app_kit::NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(self.bounds(), r, r).fill();
+        }
+
+        #[unsafe(method(focusRingMaskBounds))]
+        fn focus_ring_mask_bounds(&self) -> NSRect {
+            self.bounds()
+        }
+
+        #[unsafe(method(keyDown:))]
+        fn key_down(&self, event: &NSEvent) {
+            let chars = event.charactersIgnoringModifiers().map(|c| c.to_string()).unwrap_or_default();
+            if chars == " " || chars == "\r" {
+                self.activate();
+            } else {
+                unsafe {
+                    let _: () = msg_send![super(self), keyDown: event];
+                }
+            }
+        }
+
+        #[unsafe(method(isAccessibilityElement))]
+        fn is_ax_element(&self) -> bool {
+            true
+        }
+
+        #[unsafe(method_id(accessibilityRole))]
+        fn ax_role(&self) -> Retained<objc2_foundation::NSString> {
+            util::ns("AXButton")
+        }
+
+        #[unsafe(method_id(accessibilityLabel))]
+        fn ax_label(&self) -> Retained<objc2_foundation::NSString> {
+            let (kind, index) = (self.ivars().kind, self.ivars().index);
+            util::ns(&match kind {
+                T_SWATCH => format!("{} colour", model::PROFILE_COLORS.get(index).map(|c| c.0).unwrap_or("Profile")),
+                _ => app::store(|s| s.active_client().map(|c| if c.is_search() { "Google Search workspace".to_string() } else { format!("Profile {}, customise", c.name) })).unwrap_or_default(),
+            })
+        }
+
+        #[unsafe(method(accessibilityPerformPress))]
+        fn ax_press(&self) -> bool {
+            self.activate();
+            true
+        }
     }
 );
+
+impl Tile {
+    fn activate(&self) {
+        let (kind, index) = (self.ivars().kind, self.ivars().index);
+        util::later(move || match kind {
+            T_SWATCH => sheet_pick_swatch(index),
+            _ => customise_active(),
+        });
+    }
+}
 
 fn tile(kind: u8, index: usize, frame: NSRect) -> Retained<Tile> {
     let this = Tile::alloc(mtm()).set_ivars(TileIvars { kind, index });
@@ -258,12 +493,13 @@ define_class!(
             unsafe { NSApplication::sharedApplication(mtm()).orderFrontStandardAboutPanel(None) };
         }
 
-        #[unsafe(method(addressEntered:))]
-        fn a_address(&self, sender: Option<&NSTextField>) {
-            let Some(field) = sender else { return };
-            let text = field.stringValue().to_string();
-            with_ui(|u| u.window.makeFirstResponder(None));
-            util::later(move || app::address_entered(&text));
+        #[unsafe(method(pasteAndGo:))]
+        fn a_paste_and_go(&self, _s: Option<&AnyObject>) {
+            let Some(text) = clipboard_text() else { return };
+            let text = text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("").to_string();
+            let tab = with_ui(|u| u.address_tab.get()).flatten();
+            leave_address(false);
+            util::later(move || app::address_entered_for(tab, &text));
         }
 
         #[unsafe(method(filterChanged:))]
@@ -285,9 +521,23 @@ define_class!(
             downloads::with_items(|items| {
                 for (i, item) in items.iter().enumerate() {
                     any = true;
-                    let mark = match item.state { downloads::State::Done => "✓", downloads::State::Downloading => "↓", downloads::State::Failed => "⚠︎" };
-                    let open = add_item(&menu, &format!("{mark}  {}", item.name), sel!(downloadItem:), "", i as isize);
+                    let mark = match item.state {
+                        downloads::State::Done => "✓".to_string(),
+                        downloads::State::Downloading => match downloads::progress(i) {
+                            Some(f) if f > 0.0 => format!("↓ {:.0}%", f * 100.0),
+                            _ => "↓".into(),
+                        },
+                        downloads::State::Failed => "⚠︎".into(),
+                    };
+                    let note = item.note.as_deref().map(|n| format!(" — {n}")).unwrap_or_default();
+                    let open = add_item(&menu, &format!("{mark}  {}{note}", item.name), sel!(downloadItem:), "", i as isize);
                     open.setEnabled(item.state == downloads::State::Done);
+                    if item.state == downloads::State::Downloading {
+                        add_item(&menu, &format!("    Cancel “{}”", item.name), sel!(cancelDownload:), "", i as isize);
+                    }
+                    if downloads::retry_url(i).is_some() {
+                        add_item(&menu, &format!("    Retry “{}”", item.name), sel!(retryDownload:), "", i as isize);
+                    }
                     let reveal = add_item(&menu, &format!("Show “{}” in Finder", item.name), sel!(revealDownload:), "", i as isize);
                     reveal.setKeyEquivalentModifierMask(NSEventModifierFlags::Option);
                     reveal.setAlternate(true);
@@ -305,6 +555,95 @@ define_class!(
         }
 
         #[unsafe(method(noop:))] fn a_noop(&self, _s: Option<&AnyObject>) {}
+        #[unsafe(method(cancelDownload:))] fn a_cancel_download(&self, s: Option<&NSMenuItem>) { if let Some(s) = s { downloads::cancel(s.tag() as usize); } }
+        #[unsafe(method(retryDownload:))]
+        fn a_retry_download(&self, s: Option<&NSMenuItem>) {
+            if let Some((client, url)) = s.and_then(|s| downloads::retry_url(s.tag() as usize)) {
+                web::download_url(client, &url);
+            }
+        }
+
+        #[unsafe(method(settings:))] fn a_settings(&self, _s: Option<&AnyObject>) { crate::privacy::show(); }
+        #[unsafe(method(exportDiagnostics:))] fn a_diagnostics(&self, _s: Option<&AnyObject>) { crate::privacy::export_diagnostics(); }
+        #[unsafe(method(moveTabLeft:))] fn a_move_left(&self, _s: Option<&AnyObject>) { if let Some((c, t)) = app::store(|s| s.active_tab().map(|(c, t)| (c.id, t.id))) { app::move_tab(c, t, -1); } }
+        #[unsafe(method(moveTabRight:))] fn a_move_right(&self, _s: Option<&AnyObject>) { if let Some((c, t)) = app::store(|s| s.active_tab().map(|(c, t)| (c.id, t.id))) { app::move_tab(c, t, 1); } }
+        #[unsafe(method(focusTabs:))]
+        fn a_focus_tabs(&self, _s: Option<&AnyObject>) {
+            with_ui(|u| {
+                if let Some(c) = u.chips.borrow().iter().find(|c| c.ivars().ax_selected.get()) {
+                    u.window.makeFirstResponder(Some(c));
+                }
+            });
+        }
+
+        /// The All Tabs menu: every tab of the profile, type-to-search, the
+        /// active one ticked.
+        #[unsafe(method(tabOverflow:))]
+        fn a_tab_overflow(&self, _s: Option<&AnyObject>) {
+            let menu = NSMenu::new(mtm());
+            let tabs = app::store(|s| s.active_client().map(|c| c.tabs.iter().map(|t| (t.display_title(), Some(t.id) == c.active_tab_id)).collect::<Vec<_>>())).unwrap_or_default();
+            for (i, (title, active)) in tabs.iter().enumerate() {
+                let item = add_item(&menu, title, sel!(selectTabN:), "", i as isize);
+                item.setState(if *active { NSControlStateValueOn } else { NSControlStateValueOff });
+            }
+            let Some((view, at)) = with_ui(|u| {
+                let anchor: Retained<NSView> = if u.tab_overflow.isHidden() { Retained::into_super(u.tabs.clone()) } else { Retained::into_super(Retained::into_super(u.tab_overflow.clone())) };
+                let h = anchor.bounds().size.height;
+                (anchor, NSPoint::new(0.0, h + 2.0))
+            }) else { return };
+            unsafe { menu.popUpMenuPositioningItem_atLocation_inView(None, at, Some(&view)) };
+        }
+
+        #[unsafe(method(mediaMenu:))]
+        fn a_media_menu(&self, sender: Option<&NSButton>) {
+            let Some(button) = sender else { return };
+            let menu = NSMenu::new(mtm());
+            unsafe { menu.setAutoenablesItems(false) };
+            let calls = web::tabs_in_calls();
+            MEDIA_TABS.with_borrow_mut(|m| *m = calls.iter().map(|(c, t, _, _)| (*c, *t)).collect());
+            for (i, (client, tab, cam, mic)) in calls.iter().enumerate() {
+                let (profile, title) = app::store(|s| (s.client(*client).map(|c| c.name.clone()).unwrap_or_default(), s.find_tab(*tab).map(|t| t.display_title()).unwrap_or_default()));
+                let what = match (cam, mic) { (true, true) => "Camera and microphone", (true, false) => "Camera", _ => "Microphone" };
+                add_item(&menu, &format!("{what} on in “{title}” ({profile})"), sel!(noop:), "", 0).setEnabled(false);
+                add_item(&menu, "    Show Tab", sel!(mediaShow:), "", i as isize);
+                add_item(&menu, "    Stop Camera and Microphone", sel!(mediaStop:), "", i as isize);
+            }
+            if web::keeping_awake() {
+                menu.addItem(&NSMenuItem::separatorItem(mtm()));
+                add_item(&menu, "Keeping the display awake while a call is on", sel!(noop:), "", 0).setEnabled(false);
+            }
+            menu.addItem(&NSMenuItem::separatorItem(mtm()));
+            add_item(&menu, "Privacy Settings…", sel!(settings:), "", 0);
+            let at = NSPoint::new(0.0, button.bounds().size.height + 4.0);
+            unsafe { menu.popUpMenuPositioningItem_atLocation_inView(None, at, Some(button)) };
+        }
+
+        #[unsafe(method(mediaShow:))]
+        fn a_media_show(&self, s: Option<&NSMenuItem>) {
+            let Some(i) = s.map(|s| s.tag() as usize) else { return };
+            if let Some((c, t)) = MEDIA_TABS.with_borrow(|m| m.get(i).copied()) {
+                app::show_tab(c, t);
+            }
+        }
+
+        #[unsafe(method(mediaStop:))]
+        fn a_media_stop(&self, s: Option<&NSMenuItem>) {
+            let Some(i) = s.map(|s| s.tag() as usize) else { return };
+            if let Some((_, t)) = MEDIA_TABS.with_borrow(|m| m.get(i).copied()) {
+                web::stop_media(t);
+            }
+        }
+
+        #[unsafe(method(retryLoad:))]
+        fn a_retry(&self, _s: Option<&AnyObject>) {
+            let Some(tab) = app::store(|s| s.active_tab().map(|(_, t)| t.id)) else { return };
+            let failed = LOAD_ERRORS.with_borrow_mut(|m| m.remove(&tab)).and_then(|(_, url)| url);
+            refresh(app::CONTENT);
+            match failed.and_then(|u| crate::policy::parse(&u)) {
+                Some(u) => web::load_url(&u),
+                None => web::reload(false),
+            }
+        }
 
         #[unsafe(method(showDownloads:))]
         fn a_show_downloads(&self, _s: Option<&AnyObject>) {
@@ -387,14 +726,21 @@ define_class!(
 
         #[unsafe(method(sheetSave:))] fn a_sheet_save(&self, _s: Option<&AnyObject>) { sheet_finish(true); }
         #[unsafe(method(sheetCancel:))] fn a_sheet_cancel(&self, _s: Option<&AnyObject>) { sheet_finish(false); }
-        #[unsafe(method(sheetForgetLogin:))]
-        fn a_sheet_forget(&self, _s: Option<&AnyObject>) {
+        #[unsafe(method(sheetChangeLogin:))]
+        fn a_sheet_change(&self, _s: Option<&AnyObject>) {
+            sheet_set_login_mode(LoginMode::Replace);
+        }
+
+        #[unsafe(method(sheetRemoveLogin:))]
+        fn a_sheet_remove(&self, _s: Option<&AnyObject>) {
+            sheet_set_login_mode(LoginMode::Remove);
+        }
+
+        #[unsafe(method(sheetKeepToggled:))]
+        fn a_sheet_keep(&self, _s: Option<&AnyObject>) {
             SHEET.with_borrow(|s| {
                 if let Some(s) = s {
-                    s.forget.set(true);
-                    s.email.setStringValue(&util::ns(""));
-                    s.password.setStringValue(&util::ns(""));
-                    s.forget_button.setEnabled(false);
+                    s.retention.setEnabled(s.keep_signed_in.state() == NSControlStateValueOn);
                 }
             });
         }
@@ -459,6 +805,23 @@ define_class!(
                 show_find(false);
                 return Bool::YES;
             }
+            // The address bar only acts on Return. It used to act whenever
+            // editing ended, so clicking into a page (even in another tab)
+            // loaded whatever the bar held: the "tab restarted" bug.
+            let is_address = with_ui(|u| std::ptr::eq(control as *const NSControl, Retained::as_ptr(&u.address).cast())).unwrap_or(false);
+            if is_address && (cmd == sel!(insertNewline:) || cmd == sel!(insertNewlineIgnoringFieldEditor:)) {
+                let text = control.stringValue().to_string();
+                // The tab the text was typed for; if another tab is in front
+                // by the time this runs, nothing happens.
+                let tab = with_ui(|u| u.address_tab.get()).flatten();
+                leave_address(false);
+                util::later(move || app::address_entered_for(tab, &text));
+                return Bool::YES;
+            }
+            if is_address && cmd == sel!(cancelOperation:) {
+                leave_address(true);
+                return Bool::YES;
+            }
             Bool::NO
         }
     }
@@ -519,6 +882,82 @@ thread_local! {
     static MENU_CLIENT: Cell<Option<Uuid>> = const { Cell::new(None) };
     static MENU_TAB: Cell<Option<(Uuid, Uuid)>> = const { Cell::new(None) };
     static SHEET: RefCell<Option<Sheet>> = const { RefCell::new(None) };
+    static MEDIA_TABS: RefCell<Vec<(Uuid, Uuid)>> = const { RefCell::new(Vec::new()) };
+    /// Tabs whose last load failed: why, and the address that failed.
+    static LOAD_ERRORS: RefCell<std::collections::HashMap<Uuid, (web::LoadError, Option<String>)>> = RefCell::new(std::collections::HashMap::new());
+}
+
+/// A page failed to load: show a clear explanation with Try Again over it.
+pub fn show_load_error(tab: Uuid, kind: web::LoadError, failing_url: Option<String>) {
+    LOAD_ERRORS.with_borrow_mut(|m| m.insert(tab, (kind, failing_url)));
+    if app::store(|s| s.active_tab().map(|(_, t)| t.id)) == Some(tab) {
+        refresh(app::CONTENT);
+    }
+}
+
+pub fn clear_load_error(tab: Uuid) {
+    if LOAD_ERRORS.with_borrow_mut(|m| m.remove(&tab)).is_some() {
+        refresh(app::CONTENT);
+    }
+}
+
+fn load_error_text(kind: web::LoadError, url: Option<&str>) -> (String, String) {
+    let host = url.and_then(crate::policy::parse).and_then(|u| u.host_str().map(str::to_string)).unwrap_or_else(|| "the page".into());
+    match kind {
+        web::LoadError::Offline => ("You're offline".into(), format!("ZClients can't reach {host}. Check your internet connection, then try again.")),
+        web::LoadError::Certificate => {
+            ("This connection isn't private".into(), format!("{host}'s certificate couldn't be verified, so the page was not opened and nothing was sent to it."))
+        }
+        web::LoadError::Authentication => ("Sign-in needed".into(), format!("{host} asked for a username and password that weren't given.")),
+        web::LoadError::Unsupported => ("Can't open this address".into(), "This kind of address can't be shown in ZClients.".into()),
+        web::LoadError::Other => ("The page couldn't be opened".into(), format!("Something went wrong loading {host}. Try again in a moment.")),
+    }
+}
+
+fn error_overlay(kind: web::LoadError, url: Option<&str>, frame: NSRect) -> Retained<NSView> {
+    let v = flex(K_PLAIN);
+    v.setFrame(frame);
+    set_layer_color(&v, &NSColor::windowBackgroundColor(), 0.0);
+    v.setIdentifier(Some(&util::ns("zcLoadError")));
+    let (title, body) = load_error_text(kind, url);
+    let w = frame.size.width;
+    let t = label(&title, 20.0, true);
+    t.setAlignment(objc2_app_kit::NSTextAlignment::Center);
+    t.setFrame(rect(20.0, frame.size.height * 0.3, w - 40.0, 28.0));
+    t.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
+    v.addSubview(&t);
+    let b = NSTextField::wrappingLabelWithString(&util::ns(&body), mtm());
+    b.setAlignment(objc2_app_kit::NSTextAlignment::Center);
+    b.setTextColor(Some(&NSColor::secondaryLabelColor()));
+    b.setFrame(rect((w - 460.0).max(20.0) / 2.0, frame.size.height * 0.3 + 36.0, 460.0_f64.min(w - 40.0), 48.0));
+    b.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinXMargin | NSAutoresizingMaskOptions::ViewMaxXMargin);
+    v.addSubview(&b);
+    let retry = unsafe { NSButton::buttonWithTitle_target_action(&util::ns("Try Again"), Some(&target()), Some(sel!(retryLoad:)), mtm()) };
+    retry.setFrame(rect((w - 110.0) / 2.0, frame.size.height * 0.3 + 92.0, 110.0, 30.0));
+    retry.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinXMargin | NSAutoresizingMaskOptions::ViewMaxXMargin);
+    v.addSubview(&retry);
+    v.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable);
+    Retained::into_super(v)
+}
+
+/// Ask which profile something should open in.
+pub fn pick_profile(question: &str, profiles: &[(Uuid, String)]) -> Option<Uuid> {
+    let mtm = mtm();
+    let alert = objc2_app_kit::NSAlert::new(mtm);
+    alert.setMessageText(&util::ns(question));
+    alert.setInformativeText(&util::ns("Each profile has its own sign-in. The Search workspace has none."));
+    alert.addButtonWithTitle(&util::ns("Open"));
+    alert.addButtonWithTitle(&util::ns("Cancel"));
+    let popup = NSPopUpButton::initWithFrame_pullsDown(NSPopUpButton::alloc(mtm), rect(0.0, 0.0, 260.0, 26.0), false);
+    for (_, name) in profiles {
+        popup.addItemWithTitle(&util::ns(name));
+    }
+    popup.setAccessibilityLabel(Some(&util::ns("Profile")));
+    alert.setAccessoryView(Some(&popup));
+    if alert.runModal() != objc2_app_kit::NSAlertFirstButtonReturn {
+        return None;
+    }
+    profiles.get(popup.indexOfSelectedItem().max(0) as usize).map(|p| p.0)
 }
 
 fn drag_writer(row: NSInteger) -> Option<Retained<ProtocolObject<dyn NSPasteboardWriting>>> {
@@ -597,6 +1036,8 @@ struct Ui {
     tabs: Retained<FlexView>,
     chips: RefCell<Vec<Retained<TabChip>>>,
     tab_plus: Retained<NSButton>,
+    tab_overflow: Retained<NSButton>,
+    media_button: Retained<NSButton>,
     find: Retained<FlexView>,
     find_field: Retained<NSSearchField>,
     find_status: Retained<NSTextField>,
@@ -606,6 +1047,8 @@ struct Ui {
     launcher: RefCell<Option<(Uuid, Retained<NSView>)>>,
     sidebar_visible: Cell<bool>,
     find_visible: Cell<bool>,
+    /// The tab whose address the address bar shows.
+    address_tab: Cell<Option<Uuid>>,
     rows: RefCell<Vec<Uuid>>,
     filter: RefCell<String>,
 }
@@ -639,20 +1082,28 @@ pub(crate) fn symbol(name: &str) -> Option<Retained<NSImage>> {
     thread_local! {
         static CACHE: RefCell<std::collections::HashMap<String, Option<Retained<NSImage>>>> = RefCell::new(std::collections::HashMap::new());
     }
-    CACHE.with_borrow_mut(|c| {
-        c.entry(name.to_string())
-            .or_insert_with(|| NSImage::imageWithSystemSymbolName_accessibilityDescription(&util::ns(name), None))
-            .clone()
-    })
+    CACHE.with_borrow_mut(|c| c.entry(name.to_string()).or_insert_with(|| NSImage::imageWithSystemSymbolName_accessibilityDescription(&util::ns(name), None)).clone())
 }
 
 pub(crate) fn sym_button(name: &str, tip: &str, action: Sel) -> Retained<NSButton> {
-    let image = symbol(name).unwrap_or_else(|| NSImage::new());
+    let image = symbol(name).unwrap_or_default();
     let b = unsafe { NSButton::buttonWithImage_target_action(&image, Some(&target()), Some(action), mtm()) };
     b.setBordered(false);
     b.setToolTip(Some(&util::ns(tip)));
+    set_ax_label(&b, tip.split(" (").next().unwrap_or(tip));
     b.setContentTintColor(Some(&NSColor::secondaryLabelColor()));
     b
+}
+
+/// Name a button for VoiceOver. AppKit reads a button's name from its cell
+/// (otherwise from the image: an SF Symbol's own name, e.g. "refresh"), so
+/// the label goes on both.
+pub(crate) fn set_ax_label(b: &NSButton, text: &str) {
+    let label = util::ns(text);
+    b.setAccessibilityLabel(Some(&label));
+    if let Some(cell) = b.cell() {
+        cell.setAccessibilityLabel(Some(&label));
+    }
 }
 
 fn set_layer_color(view: &NSView, color: &NSColor, radius: f64) {
@@ -704,6 +1155,13 @@ fn client_row(c: &model::Client, width: f64) -> Retained<NSView> {
     sub.setFrame(rect(46.0, 23.0, width - 54.0, 16.0));
     sub.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
     row.addSubview(&sub);
+    // One element for VoiceOver: "Acme, 3 tabs" rather than three pieces.
+    for v in [&*b, &*name as &NSView, &*sub] {
+        v.setAccessibilityElement(false);
+    }
+    row.setAccessibilityElement(true);
+    row.setAccessibilityRole(Some(&util::ns("AXCell")));
+    row.setAccessibilityLabel(Some(&util::ns(&format!("{}, {sub_text}", c.name))));
     Retained::into_super(Retained::into_super(row)).downcast::<NSView>().ok().unwrap_or_else(|| NSView::new(mtm()))
 }
 
@@ -713,11 +1171,7 @@ pub fn build() {
         NSWindow::initWithContentRect_styleMask_backing_defer(
             NSWindow::alloc(mtm),
             rect(0.0, 0.0, 1320.0, 860.0),
-            NSWindowStyleMask::Titled
-                | NSWindowStyleMask::Closable
-                | NSWindowStyleMask::Miniaturizable
-                | NSWindowStyleMask::Resizable
-                | NSWindowStyleMask::FullSizeContentView,
+            NSWindowStyleMask::Titled | NSWindowStyleMask::Closable | NSWindowStyleMask::Miniaturizable | NSWindowStyleMask::Resizable | NSWindowStyleMask::FullSizeContentView,
             NSBackingStoreType::Buffered,
             false,
         )
@@ -751,6 +1205,10 @@ pub fn build() {
 
     let filter_field = NSSearchField::initWithFrame(NSSearchField::alloc(mtm), rect(0.0, 0.0, 200.0, 24.0));
     filter_field.setPlaceholderString(Some(&util::ns("Search clients")));
+    filter_field.setAccessibilityLabel(Some(&util::ns("Search clients")));
+    if let Some(cell) = filter_field.cell() {
+        cell.setAccessibilityLabel(Some(&util::ns("Search clients")));
+    }
     unsafe {
         filter_field.setTarget(Some(&target()));
         filter_field.setAction(Some(sel!(filterChanged:)));
@@ -791,6 +1249,7 @@ pub fn build() {
     if let Some(img) = symbol("plus.circle.fill") {
         add_button.setImage(Some(&img));
         add_button.setImagePosition(objc2_app_kit::NSCellImagePosition::ImageLeading);
+        set_ax_label(&add_button, "Add Client");
     }
     add_button.setContentTintColor(Some(&NSColor::controlAccentColor()));
     side.addSubview(&add_button);
@@ -802,23 +1261,43 @@ pub fn build() {
     let forward = sym_button("chevron.right", "Forward (⌘])", sel!(forward:));
     let reload = sym_button("arrow.clockwise", "Reload (⌘R)", sel!(reloadOrStop:));
     let home = sym_button("square.grid.2x2", "App launcher (⌘⇧H)", sel!(home:));
-    let address = NSTextField::textFieldWithString(&util::ns(""), mtm);
+    let address: Retained<NSTextField> = {
+        let this = AddressField::alloc(mtm).set_ivars(());
+        let field: Retained<AddressField> = unsafe { msg_send![super(this), initWithFrame: rect(0.0, 0.0, 400.0, 24.0)] };
+        Retained::into_super(field)
+    };
+    address.setStringValue(&util::ns(""));
+    address.setEditable(true);
+    address.setSelectable(true);
+    address.setBezeled(true);
+    address.setDrawsBackground(true);
+    if let Some(cell) = address.cell() {
+        cell.setScrollable(true);
+        cell.setWraps(false);
+        cell.setUsesSingleLineMode(true);
+    }
     address.setPlaceholderString(Some(&util::ns("Search Zoho or enter address")));
+    address.setAccessibilityLabel(Some(&util::ns("Address and search")));
+    if let Some(cell) = address.cell() {
+        cell.setAccessibilityLabel(Some(&util::ns("Address and search")));
+    }
     address.setFont(Some(&NSFont::systemFontOfSize(13.0)));
     address.setBezelStyle(objc2_app_kit::NSTextFieldBezelStyle::RoundedBezel);
-    unsafe {
-        address.setTarget(Some(&target()));
-        address.setAction(Some(sel!(addressEntered:)));
-    }
+    unsafe { address.setDelegate(Some(ProtocolObject::from_ref(&*actions()))) };
     let search = sym_button("magnifyingglass", "Google Search workspace", sel!(search:));
     let meet = sym_button("video.fill", "Google Meet for this client", sel!(meet:));
     let downloads_button = sym_button("arrow.down.circle", "Downloads (⌘⇧J)", sel!(downloads:));
     let plus = sym_button("plus", "New tab (⌘T)", sel!(newTab:));
+    // Shown while any tab uses the camera or microphone; one click lists
+    // them with Stop.
+    let media_button = sym_button("video.fill", "Camera or microphone in use", sel!(mediaMenu:));
+    media_button.setContentTintColor(Some(&NSColor::systemRedColor()));
+    media_button.setHidden(true);
     for b in [&back, &forward, &reload, &home] {
         toolbar.addSubview(b);
     }
     toolbar.addSubview(&address);
-    for b in [&search, &meet, &downloads_button, &plus] {
+    for b in [&media_button, &search, &meet, &downloads_button, &plus] {
         toolbar.addSubview(b);
     }
     root.addSubview(&toolbar);
@@ -827,12 +1306,22 @@ pub fn build() {
     let tabs = flex(K_TABS);
     let tab_plus = sym_button("plus", "New tab (⌘T)", sel!(newTab:));
     tabs.addSubview(&tab_plus);
+    let tab_overflow = sym_button("chevron.down", "All tabs (⇧⌘A)", sel!(tabOverflow:));
+    tab_overflow.setHidden(true);
+    tabs.addSubview(&tab_overflow);
+    tabs.setAccessibilityElement(true);
+    tabs.setAccessibilityRole(Some(&util::ns("AXTabGroup")));
+    tabs.setAccessibilityLabel(Some(&util::ns("Tabs")));
     root.addSubview(&tabs);
 
     // ---- find bar ----
     let find = flex(K_FIND);
     let find_field = NSSearchField::initWithFrame(NSSearchField::alloc(mtm), rect(0.0, 0.0, 240.0, 24.0));
     find_field.setPlaceholderString(Some(&util::ns("Find in page")));
+    find_field.setAccessibilityLabel(Some(&util::ns("Find in page")));
+    if let Some(cell) = find_field.cell() {
+        cell.setAccessibilityLabel(Some(&util::ns("Find in page")));
+    }
     unsafe {
         find_field.setTarget(Some(&target()));
         find_field.setAction(Some(sel!(findEntered:)));
@@ -874,11 +1363,13 @@ pub fn build() {
         reload,
         home,
         address,
-        right_buttons: vec![search, meet, downloads_button.clone(), plus],
+        right_buttons: vec![media_button.clone(), search, meet, downloads_button.clone(), plus],
         downloads_button,
         tabs,
         chips: RefCell::new(vec![]),
         tab_plus,
+        tab_overflow,
+        media_button,
         find,
         find_field,
         find_status,
@@ -888,6 +1379,7 @@ pub fn build() {
         launcher: RefCell::new(None),
         sidebar_visible: Cell::new(true),
         find_visible: Cell::new(false),
+        address_tab: Cell::new(None),
         rows: RefCell::new(vec![]),
         filter: RefCell::new(String::new()),
     };
@@ -903,11 +1395,16 @@ pub fn build() {
         let close = window.standardWindowButton(objc2_app_kit::NSWindowButton::CloseButton);
         util::log(format!(
             "window frame {:?} style {:?} close button: {:?} hidden={:?} frame={:?}",
-            f, window.styleMask(), close.is_some(), close.as_ref().map(|c| c.isHidden()), close.as_ref().map(|c| c.frame())
+            f,
+            window.styleMask(),
+            close.is_some(),
+            close.as_ref().map(|c| c.isHidden()),
+            close.as_ref().map(|c| c.frame())
         ));
-        if let Some(screen) = window.screen() { util::log(format!("screen {:?}", screen.frame())); }
+        if let Some(screen) = window.screen() {
+            util::log(format!("screen {:?}", screen.frame()));
+        }
     }
-
 }
 
 // ---------------------------------------------------------------------------
@@ -954,27 +1451,36 @@ fn layout(kind: u8, view: &FlexView) {
                 btn.setFrame(rect(x, 9.0, 28.0, 28.0));
                 x += 30.0;
             }
-            let right_w = u.right_buttons.len() as f64 * 32.0 + 8.0;
+            let shown: Vec<&Retained<NSButton>> = u.right_buttons.iter().filter(|b| !b.isHidden()).collect();
+            let right_w = shown.len() as f64 * 32.0 + 8.0;
             let addr_w = (b.width - x - right_w - 12.0).max(120.0);
             u.address.setFrame(rect(x + 6.0, 11.0, addr_w, 24.0));
             let mut rx = x + 6.0 + addr_w + 10.0;
-            for btn in &u.right_buttons {
+            for btn in shown {
                 btn.setFrame(rect(rx, 9.0, 28.0, 28.0));
                 rx += 32.0;
             }
         }
         K_TABS => {
+            // However many tabs there are, the active one, the + button and
+            // (when some do not fit) the All Tabs menu stay on screen.
             let chips = u.chips.borrow();
-            let n = chips.len().max(1) as f64;
-            let avail = b.width - 16.0 - 34.0;
-            let w = (avail / n).clamp(64.0, 210.0);
+            let active = chips.iter().position(|c| c.ivars().ax_selected.get()).unwrap_or(0);
+            let (start, count, w) = tab_window(chips.len(), active, b.width);
+            let overflow = count < chips.len();
             let mut x = 8.0;
-            for c in chips.iter() {
-                c.setFrame(rect(x, 3.0, w - 4.0, TAB_H - 6.0));
-                layout_chip(c);
-                x += w;
+            for (i, c) in chips.iter().enumerate() {
+                let visible = i >= start && i < start + count;
+                c.setHidden(!visible);
+                if visible {
+                    c.setFrame(rect(x, 3.0, w - 4.0, TAB_H - 6.0));
+                    layout_chip(c);
+                    x += w;
+                }
             }
             u.tab_plus.setFrame(rect(x + 2.0, 4.0, 26.0, 26.0));
+            u.tab_overflow.setHidden(!overflow);
+            u.tab_overflow.setFrame(rect(x + 30.0, 4.0, 26.0, 26.0));
         }
         K_FIND => {
             u.find_field.setFrame(rect(12.0, 6.0, 260.0, 24.0));
@@ -983,6 +1489,23 @@ fn layout(kind: u8, view: &FlexView) {
         }
         _ => {}
     });
+}
+
+/// Which tabs fit in a strip `width` wide: (first shown, how many, width
+/// each). Tabs never get narrower than a readable minimum; when they would,
+/// a window of tabs around the active one is shown instead.
+pub fn tab_window(n: usize, active: usize, width: f64) -> (usize, usize, f64) {
+    const MIN_W: f64 = 96.0;
+    const MAX_W: f64 = 210.0;
+    let n = n.max(1);
+    let avail = (width - 16.0 - 34.0).max(MIN_W);
+    if avail / n as f64 >= MIN_W {
+        return (0, n, (avail / n as f64).min(MAX_W));
+    }
+    let avail = (avail - 30.0).max(MIN_W);
+    let count = ((avail / MIN_W).floor() as usize).clamp(1, n);
+    let start = active.saturating_sub(count / 2).min(n - count);
+    (start, count, avail / count as f64)
 }
 
 fn layout_chip(chip: &TabChip) {
@@ -1039,12 +1562,7 @@ pub fn refresh(what: u8) {
 fn refresh_sidebar() {
     let filter = with_ui(|u| u.filter.borrow().clone()).unwrap_or_default();
     let (rows, active, count) = app::store(|s| {
-        let rows: Vec<Uuid> = s
-            .ordered()
-            .iter()
-            .filter(|c| filter.is_empty() || c.name.to_lowercase().contains(&filter))
-            .map(|c| c.id)
-            .collect();
+        let rows: Vec<Uuid> = s.ordered().iter().filter(|c| filter.is_empty() || c.name.to_lowercase().contains(&filter)).map(|c| c.id).collect();
         let count = s.clients.iter().filter(|c| !c.is_search()).count();
         (rows, s.active_client_id, count)
     });
@@ -1083,7 +1601,15 @@ fn refresh_tabs() {
     } else {
         tabs.iter()
             .map(|(t, _)| {
-                let this = TabChip::alloc(mtm).set_ivars(ChipIvars { client, tab: t.id, down: Cell::new(None), dragged: Cell::new(false), rendered: RefCell::new(String::new()) });
+                let this = TabChip::alloc(mtm).set_ivars(ChipIvars {
+                    client,
+                    tab: t.id,
+                    down: Cell::new(None),
+                    dragged: Cell::new(false),
+                    rendered: RefCell::new(String::new()),
+                    ax_label: RefCell::new(String::new()),
+                    ax_selected: Cell::new(false),
+                });
                 let chip: Retained<TabChip> = unsafe { msg_send![super(this), initWithFrame: rect(0.0, 0.0, 150.0, 28.0)] };
                 chip
             })
@@ -1103,6 +1629,23 @@ fn refresh_tabs() {
         let title = t.display_title();
         let color = tab_color(t);
         let call = web::call_state(t.id);
+        // State in words, never by colour alone.
+        let mut ax = title.clone();
+        if t.pdf_path.is_some() {
+            ax.push_str(", PDF");
+        }
+        if let Some((camera, mic)) = call {
+            ax.push_str(match (camera, mic) {
+                (true, true) => ", camera and microphone on",
+                (true, false) => ", camera on",
+                _ => ", microphone on",
+            });
+        }
+        if asleep {
+            ax.push_str(", asleep");
+        }
+        chip.ivars().ax_label.replace(ax);
+        chip.ivars().ax_selected.set(is_active);
         let key = format!("{i}|{is_active}|{closable}|{color}|{title}|{call:?}");
         if *chip.ivars().rendered.borrow() == key {
             continue;
@@ -1115,7 +1658,7 @@ fn refresh_tabs() {
         // A tab in a call shows a red camera (or microphone) instead of its
         // colour dot, so the call is easy to find among the tabs.
         if let Some((camera, _)) = call {
-            let icon = NSImageView::imageViewWithImage(&symbol(if camera { "video.fill" } else { "mic.fill" }).unwrap_or_else(NSImage::new), mtm);
+            let icon = NSImageView::imageViewWithImage(&symbol(if camera { "video.fill" } else { "mic.fill" }).unwrap_or_default(), mtm);
             icon.setContentTintColor(Some(&NSColor::systemRedColor()));
             chip.addSubview(&icon);
         } else {
@@ -1128,6 +1671,7 @@ fn refresh_tabs() {
         if *closable {
             let close = sym_button("xmark", "Close tab (⌘W)", sel!(tabClose:));
             close.setTag(i as isize);
+            set_ax_label(&close, &format!("Close {title}"));
             chip.addSubview(&close);
         }
         layout_chip(chip);
@@ -1145,7 +1689,26 @@ fn refresh_tabs() {
             u.chips.replace(chips);
         });
     }
-    with_ui(|u| u.tabs.setNeedsLayout(true));
+    let calls = web::tabs_in_calls();
+    with_ui(|u| {
+        u.tabs.setNeedsLayout(true);
+        let hidden = calls.is_empty();
+        if u.media_button.isHidden() != hidden {
+            u.media_button.setHidden(hidden);
+            u.toolbar.setNeedsLayout(true);
+        }
+        if !hidden {
+            let (cam, mic) = calls.iter().fold((false, false), |(a, b), c| (a || c.2, b || c.3));
+            let what = match (cam, mic) {
+                (true, true) => "Camera and microphone in use",
+                (true, false) => "Camera in use",
+                _ => "Microphone in use",
+            };
+            u.media_button.setImage(symbol(if cam { "video.fill" } else { "mic.fill" }).as_deref());
+            u.media_button.setToolTip(Some(&util::ns(&format!("{what} — click to see where or stop"))));
+            set_ax_label(&u.media_button, what);
+        }
+    });
 }
 
 fn tab_color(t: &model::Tab) -> String {
@@ -1195,7 +1758,21 @@ fn refresh_content() {
             view.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable);
             u.content.addSubview(&view);
         }
-        if u.address.currentEditor().is_none() && u.window.firstResponder().is_some_and(|r| !r.isKindOfClass(<objc2_app_kit::NSText as objc2::ClassType>::class())) {
+        for v in u.content.subviews().iter() {
+            if v.identifier().is_some_and(|i| i.to_string() == "zcLoadError") {
+                v.removeFromSuperview();
+            }
+        }
+        if let Some((kind, url)) = LOAD_ERRORS.with_borrow(|m| m.get(&tab.id).cloned()) {
+            u.content.addSubview(&error_overlay(kind, url.as_deref(), u.content.bounds()));
+        }
+        // Keyboard focus stays where the user put it: in a text field, or on
+        // the tab strip (keyboard tab switching); otherwise the page gets it.
+        let keep_focus = u
+            .window
+            .firstResponder()
+            .is_some_and(|r| r.isKindOfClass(<objc2_app_kit::NSText as objc2::ClassType>::class()) || r.isKindOfClass(<TabChip as objc2::ClassType>::class()));
+        if u.address.currentEditor().is_none() && !keep_focus {
             u.window.makeFirstResponder(Some(&view));
         }
     });
@@ -1224,9 +1801,7 @@ fn show_launcher(client: Uuid, name: &str) {
 }
 
 fn refresh_toolbar() {
-    let info = app::store(|s| {
-        s.active_tab().map(|(c, t)| (c.color_hex.clone(), c.symbol_name.clone(), c.initials(), c.name.clone(), c.is_search(), t.id, t.url.clone()))
-    });
+    let info = app::store(|s| s.active_tab().map(|(c, t)| (c.color_hex.clone(), c.symbol_name.clone(), c.initials(), c.name.clone(), c.is_search(), t.id, t.url.clone())));
     let page = info.as_ref().and_then(|i| web::page_state(i.5));
     let active_downloads = downloads::active_count();
     with_ui(|u| {
@@ -1263,6 +1838,16 @@ fn refresh_toolbar() {
         u.forward.setEnabled(can_fwd);
         if let Some(img) = symbol(if loading { "xmark" } else { "arrow.clockwise" }) {
             u.reload.setImage(Some(&img));
+        }
+        // Another tab came to the front while the address bar was being
+        // edited: drop the edit, like a browser, so one tab's half-typed
+        // address can never be applied to another tab.
+        let tab = info.as_ref().map(|i| i.5);
+        if u.address_tab.replace(tab) != tab && u.address.currentEditor().is_some() {
+            u.address.abortEditing();
+            if let Some(v) = web::active_view() {
+                u.window.makeFirstResponder(Some(&v));
+            }
         }
         if u.address.currentEditor().is_none() {
             let shown = if url.starts_with("file:") { String::new() } else { url };
@@ -1303,12 +1888,112 @@ pub fn sidebar_visible() -> bool {
     with_ui(|u| u.sidebar_visible.get()).unwrap_or(false)
 }
 
+/// End editing the address bar. With `revert` (Esc) the tab's own address
+/// comes back. The cursor goes back to the page.
+fn leave_address(revert: bool) {
+    with_ui(|u| {
+        if revert {
+            u.address.abortEditing();
+        }
+        match web::active_view() {
+            Some(v) => u.window.makeFirstResponder(Some(&v)),
+            None => u.window.makeFirstResponder(None),
+        };
+    });
+    if revert {
+        refresh(app::TOOLBAR);
+    }
+}
+
 pub fn address_text() -> String {
     with_ui(|u| u.address.stringValue().to_string()).unwrap_or_default()
 }
 
 pub fn set_address(text: &str) {
     with_ui(|u| u.address.setStringValue(&util::ns(text)));
+}
+
+/// Self-tests: a real mouse click (down + up through `NSApp.sendEvent`) in
+/// the middle of the address bar, or of tab chip `index`.
+pub fn click_address() {
+    if let Some(v) = with_ui(|u| u.address.clone()) {
+        click_center(&v);
+    }
+}
+
+pub fn click_tab_chip(index: usize) {
+    if let Some(c) = with_ui(|u| u.chips.borrow().get(index).cloned()).flatten() {
+        click_center(&c);
+    }
+}
+
+/// Self-tests: the address bar's text, whether it is being edited, and the
+/// selected range in it.
+pub fn address_state() -> String {
+    with_ui(|u| {
+        let editing = u.address.currentEditor();
+        let sel = editing.as_ref().map(|e| e.selectedRange());
+        format!("text={:?} editing={} selection={:?}", u.address.stringValue().to_string(), editing.is_some(), sel.map(|r| (r.location, r.length)))
+    })
+    .unwrap_or_default()
+}
+
+/// Self-tests: replace the address bar's text as if typed (it must already
+/// be being edited).
+pub fn type_in_address(text: &str) {
+    with_ui(|u| {
+        if let Some(e) = u.address.currentEditor() {
+            unsafe {
+                e.selectAll(None);
+                let _: () = msg_send![&*e, insertText: &*util::ns(text)];
+            }
+        }
+    });
+}
+
+/// Self-tests: select characters `from..to` of the address bar's text.
+pub fn select_in_address(from: usize, to: usize) {
+    with_ui(|u| {
+        if let Some(e) = u.address.currentEditor() {
+            e.setSelectedRange(objc2_foundation::NSRange::new(from, to - from));
+        }
+    });
+}
+
+fn click_center(view: &NSView) {
+    let Some(window) = view.window() else { return };
+    let b = view.bounds();
+    let at = view.convertPoint_toView(NSPoint::new(b.size.width / 2.0, b.size.height / 2.0), None);
+    let app = NSApplication::sharedApplication(mtm());
+    let event = |kind| {
+        NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+            kind,
+            at,
+            NSEventModifierFlags::empty(),
+            0.0,
+            window.windowNumber(),
+            None,
+            0,
+            1,
+            1.0,
+        )
+    };
+    // A text field tracks the mouse inside mouseDown until the button comes
+    // up, so the mouse-up must already be waiting in the queue.
+    if let (Some(down), Some(up)) = (event(objc2_app_kit::NSEventType::LeftMouseDown), event(objc2_app_kit::NSEventType::LeftMouseUp)) {
+        app.postEvent_atStart(&up, false);
+        app.sendEvent(&down);
+    }
+}
+
+/// Self-tests and the Focus Tab Strip command: keyboard focus to the
+/// active tab's chip.
+pub fn focus_tab_strip() {
+    with_ui(|u| {
+        if let Some(c) = u.chips.borrow().iter().find(|c| c.ivars().ax_selected.get()) {
+            u.window.makeFirstResponder(Some(c));
+        }
+    });
 }
 
 pub fn focus_view(view: &NSView) {
@@ -1401,8 +2086,23 @@ struct Sheet {
     symbol_names: Vec<Option<String>>,
     email: Retained<NSTextField>,
     password: Retained<NSSecureTextField>,
-    forget_button: Retained<NSButton>,
-    forget: Cell<bool>,
+    login_status: Retained<NSTextField>,
+    change_button: Retained<NSButton>,
+    remove_button: Retained<NSButton>,
+    keep_signed_in: Retained<NSButton>,
+    retention: Retained<NSPopUpButton>,
+    /// What Save does with the saved login.
+    login_mode: Cell<LoginMode>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum LoginMode {
+    /// Leave it as it is (the default for an existing profile).
+    Keep,
+    /// The fields are showing: save what is typed there (if anything).
+    Replace,
+    /// Remove the saved login on Save.
+    Remove,
 }
 
 fn pretty_symbol(name: &str) -> String {
@@ -1420,8 +2120,10 @@ pub fn show_client_sheet(client: Option<Uuid>) {
     if client.is_some() && existing.is_none() {
         return;
     }
-    let login = client.and_then(keychain::read_login);
-    let (w, h) = (480.0, 430.0);
+    // Only whether a login is saved, and for which address. The password
+    // itself is never put into a field.
+    let saved_email = client.and_then(keychain::saved_login_email);
+    let (w, h) = (480.0, 500.0);
     let window = unsafe {
         NSWindow::initWithContentRect_styleMask_backing_defer(NSWindow::alloc(mtm), rect(0.0, 0.0, w, h), NSWindowStyleMask::Titled, NSBackingStoreType::Buffered, false)
     };
@@ -1488,35 +2190,74 @@ pub fn show_client_sheet(client: Option<Uuid>) {
     symbol_popup.selectItemAtIndex(selected as isize);
     body.addSubview(&symbol_popup);
 
-    let section = label("Saved Zoho sign-in", 13.0, true);
-    section.setFrame(rect(20.0, 194.0, w - 40.0, 18.0));
+    let section = label("Sign-in", 13.0, true);
+    section.setFrame(rect(20.0, 190.0, w - 40.0, 18.0));
     body.addSubview(&section);
 
-    caption("Email", 220.0);
-    let email = NSTextField::textFieldWithString(&util::ns(login.as_ref().map(|l| l.email.as_str()).unwrap_or("")), mtm);
+    let retention = existing.as_ref().map(|c| c.retention()).unwrap_or_default();
+    let keep = unsafe { NSButton::checkboxWithTitle_target_action(&util::ns("Keep me signed in"), Some(&target()), Some(sel!(sheetKeepToggled:)), mtm) };
+    keep.setState(if retention.keep { NSControlStateValueOn } else { NSControlStateValueOff });
+    keep.setFrame(rect(108.0, 214.0, 160.0, 22.0));
+    keep.setToolTip(Some(&util::ns("Stay signed in to Zoho across quits. Signing out, or Zoho ending the session, always signs you out here too.")));
+    body.addSubview(&keep);
+    let retention_popup = NSPopUpButton::initWithFrame_pullsDown(NSPopUpButton::alloc(mtm), rect(272.0, 212.0, w - 292.0, 26.0), false);
+    for days in crate::session::RETENTION_CHOICES {
+        let title = match days {
+            7 => "for up to 1 week unused".to_string(),
+            365 => "for up to 1 year unused".to_string(),
+            d => format!("for up to {d} days unused"),
+        };
+        retention_popup.addItemWithTitle(&util::ns(&title));
+    }
+    let at = crate::session::RETENTION_CHOICES.iter().position(|d| *d == retention.days).unwrap_or(2);
+    retention_popup.selectItemAtIndex(at as isize);
+    retention_popup.setEnabled(retention.keep);
+    retention_popup.setAccessibilityLabel(Some(&util::ns("How long to stay signed in without using this profile")));
+    body.addSubview(&retention_popup);
+
+    caption("Saved login", 248.0);
+    let status_text = match (&existing, &saved_email) {
+        (None, _) => "Optional — fill in below, or sign in once and ZClients offers to save it.".to_string(),
+        (Some(_), Some(e)) => format!("Saved for {e}"),
+        (Some(_), None) => "Not saved".to_string(),
+    };
+    let login_status = label(&status_text, 12.0, false);
+    login_status.setFrame(rect(108.0, 251.0, w - 290.0, 18.0));
+    body.addSubview(&login_status);
+    let change_button = unsafe {
+        NSButton::buttonWithTitle_target_action(&util::ns(if saved_email.is_some() { "Change…" } else { "Add…" }), Some(&target()), Some(sel!(sheetChangeLogin:)), mtm)
+    };
+    change_button.setFrame(rect(w - 180.0, 245.0, 84.0, 28.0));
+    change_button.setHidden(existing.is_none());
+    body.addSubview(&change_button);
+    let remove_button = unsafe { NSButton::buttonWithTitle_target_action(&util::ns("Remove"), Some(&target()), Some(sel!(sheetRemoveLogin:)), mtm) };
+    remove_button.setFrame(rect(w - 94.0, 245.0, 78.0, 28.0));
+    remove_button.setHidden(existing.is_none());
+    remove_button.setEnabled(saved_email.is_some());
+    remove_button.setAccessibilityLabel(Some(&util::ns("Remove saved login")));
+    body.addSubview(&remove_button);
+
+    caption("Email", 284.0);
+    let email = NSTextField::textFieldWithString(&util::ns(""), mtm);
     email.setPlaceholderString(Some(&util::ns("you@company.com")));
-    email.setFrame(rect(108.0, 220.0, w - 128.0, 24.0));
+    email.setFrame(rect(108.0, 284.0, w - 128.0, 24.0));
     body.addSubview(&email);
 
-    caption("Password", 254.0);
-    let password = NSSecureTextField::initWithFrame(NSSecureTextField::alloc(mtm), rect(108.0, 254.0, w - 128.0, 24.0));
-    password.setStringValue(&util::ns(login.as_ref().map(|l| l.password.as_str()).unwrap_or("")));
+    caption("Password", 318.0);
+    let password = NSSecureTextField::initWithFrame(NSSecureTextField::alloc(mtm), rect(108.0, 318.0, w - 128.0, 24.0));
+    password.setPlaceholderString(Some(&util::ns(if saved_email.is_some() { "New password" } else { "Password" })));
     body.addSubview(&password);
 
     let note = NSTextField::wrappingLabelWithString(
-        &util::ns("Optional. Stored encrypted in your Mac's Keychain for this profile only, and used to sign it back in automatically if Zoho ever ends the session. You can also just sign in once — ZClients offers to save it."),
+        &util::ns(
+            "A saved login is stored encrypted in ZClients's vault, for this profile only; the vault's key is protected by your Mac's Keychain. If Zoho asks this profile to sign in again, ZClients fills it in on Zoho's own sign-in page and you press Sign In.",
+        ),
         mtm,
     );
     note.setFont(Some(&NSFont::systemFontOfSize(11.0)));
     note.setTextColor(Some(&NSColor::secondaryLabelColor()));
-    note.setFrame(rect(108.0, 286.0, w - 128.0, 58.0));
+    note.setFrame(rect(108.0, 350.0, w - 128.0, 72.0));
     body.addSubview(&note);
-
-    let forget_button = unsafe { NSButton::buttonWithTitle_target_action(&util::ns("Forget Saved Sign-in"), Some(&target()), Some(sel!(sheetForgetLogin:)), mtm) };
-    forget_button.setFrame(rect(16.0, h - 46.0, 170.0, 28.0));
-    forget_button.setEnabled(login.is_some());
-    forget_button.setHidden(existing.is_none());
-    body.addSubview(&forget_button);
 
     let cancel = unsafe { NSButton::buttonWithTitle_target_action(&util::ns("Cancel"), Some(&target()), Some(sel!(sheetCancel:)), mtm) };
     cancel.setKeyEquivalent(&util::ns("\u{1b}"));
@@ -1527,10 +2268,57 @@ pub fn show_client_sheet(client: Option<Uuid>) {
     save.setFrame(rect(w - 104.0, h - 46.0, 88.0, 28.0));
     body.addSubview(&save);
 
+    let mode = if existing.is_some() { LoginMode::Keep } else { LoginMode::Replace };
     window.setInitialFirstResponder(Some(&name));
-    let sheet = Sheet { window: window.clone(), client, name, well, symbol: symbol_popup, symbol_names: names, email, password, forget_button, forget: Cell::new(false) };
+    let sheet = Sheet {
+        window: window.clone(),
+        client,
+        name,
+        well,
+        symbol: symbol_popup,
+        symbol_names: names,
+        email,
+        password,
+        login_status,
+        change_button,
+        remove_button,
+        keep_signed_in: keep,
+        retention: retention_popup,
+        login_mode: Cell::new(mode),
+    };
     SHEET.with_borrow_mut(|s| *s = Some(sheet));
+    sheet_set_login_mode(mode);
     with_ui(|u| unsafe { u.window.beginSheet_completionHandler(&window, None) });
+}
+
+/// Show the email/password fields only while the user is entering a new
+/// login; say plainly what Save will do.
+fn sheet_set_login_mode(mode: LoginMode) {
+    SHEET.with_borrow(|s| {
+        let Some(s) = s else { return };
+        s.login_mode.set(mode);
+        let fields = mode == LoginMode::Replace;
+        for f in [&*s.email as &NSTextField, &*s.password] {
+            f.setEnabled(fields);
+            f.setStringValue(&util::ns(""));
+        }
+        if s.client.is_some() {
+            let saved = s.client.and_then(keychain::saved_login_email);
+            let text = match (mode, &saved) {
+                (LoginMode::Keep, Some(e)) => format!("Saved for {e}"),
+                (LoginMode::Keep, None) => "Not saved".into(),
+                (LoginMode::Replace, Some(_)) => "Enter the new login; Save replaces the saved one".into(),
+                (LoginMode::Replace, None) => "Enter a login to save".into(),
+                (LoginMode::Remove, _) => "Will be removed when you click Save".into(),
+            };
+            s.login_status.setStringValue(&util::ns(&text));
+            s.remove_button.setEnabled(saved.is_some() && mode != LoginMode::Remove);
+            s.change_button.setEnabled(mode != LoginMode::Replace);
+        }
+        if fields {
+            s.window.makeFirstResponder(Some(&s.email));
+        }
+    });
 }
 
 fn sheet_pick_swatch(index: usize) {
@@ -1554,12 +2342,23 @@ fn sheet_finish(save: bool) {
         }
         let color = util::color_hex(&sheet.well.color()).unwrap_or_else(|| "#e42527".into());
         let symbol = sheet.symbol_names.get(sheet.symbol.indexOfSelectedItem().max(0) as usize).cloned().flatten();
-        let login = keychain::Login { email: sheet.email.stringValue().to_string().trim().to_string(), password: sheet.password.stringValue().to_string() };
-        let login = (!login.is_empty()).then_some(login);
+        let login = match sheet.login_mode.get() {
+            LoginMode::Keep => app::LoginChange::Keep,
+            LoginMode::Remove => app::LoginChange::Remove,
+            LoginMode::Replace => {
+                let l = keychain::Login { email: sheet.email.stringValue().to_string().trim().to_string(), password: sheet.password.stringValue().to_string() };
+                if l.is_empty() { app::LoginChange::Keep } else { app::LoginChange::Replace(l) }
+            }
+        };
+        sheet.password.setStringValue(&util::ns(""));
+        let days = crate::session::RETENTION_CHOICES.get(sheet.retention.indexOfSelectedItem().max(0) as usize).copied().unwrap_or(crate::session::DEFAULT_RETENTION_DAYS);
+        let retention = crate::session::Retention { keep: sheet.keep_signed_in.state() == NSControlStateValueOn, days };
         match sheet.client {
-            Some(id) => app::update_client(id, &name, &color, symbol, login, sheet.forget.get()),
-            None => app::add_client(&name, &color, symbol, login),
+            Some(id) => app::update_client(id, &name, &color, symbol, login, retention),
+            None => app::add_client(&name, &color, symbol, login, retention),
         }
+    } else {
+        sheet.password.setStringValue(&util::ns(""));
     }
     with_ui(|u| u.window.endSheet(&sheet.window));
     sheet.window.orderOut(None);
@@ -1610,6 +2409,8 @@ fn build_menu() {
     let app_menu = submenu(&bar, "ZClients");
     add_item(&app_menu, "About ZClients", sel!(about:), "", 0);
     app_menu.addItem(&NSMenuItem::separatorItem(mtm));
+    key(&app_menu, "Settings…", sel!(settings:), ",", cmd);
+    app_menu.addItem(&NSMenuItem::separatorItem(mtm));
     std_item(&app_menu, "Hide ZClients", sel!(hide:), "h", cmd);
     std_item(&app_menu, "Hide Others", sel!(hideOtherApplications:), "h", cmd | NSEventModifierFlags::Option);
     std_item(&app_menu, "Show All", sel!(unhideAllApplications:), "", cmd);
@@ -1624,6 +2425,8 @@ fn build_menu() {
     file.addItem(&NSMenuItem::separatorItem(mtm));
     key(&file, "Customise Client…", sel!(customise:), ",", cmd_shift);
     key(&file, "Download Current Page", sel!(downloadPage:), "s", cmd_shift);
+    // Always available, even while a page owns ⇧⌘S.
+    alt_key(&file, "Download Current Page ", sel!(downloadPage:), "s", cmd | NSEventModifierFlags::Option);
     key(&file, "Print…", sel!(printPage:), "p", cmd);
     file.addItem(&NSMenuItem::separatorItem(mtm));
     key(&file, "Close Tab", sel!(closeTab:), "w", cmd);
@@ -1635,7 +2438,12 @@ fn build_menu() {
     std_item(&edit, "Cut", sel!(cut:), "x", cmd);
     std_item(&edit, "Copy", sel!(copy:), "c", cmd);
     std_item(&edit, "Paste", sel!(paste:), "v", cmd);
-    std_item(&edit, "Paste and Match Style", sel!(pasteAsPlainText:), "v", cmd_shift | NSEventModifierFlags::Option);
+    std_item(&edit, "Paste and Match Style", sel!(pasteAsPlainText:), "v", cmd_shift);
+    let alt = unsafe { edit.addItemWithTitle_action_keyEquivalent(&util::ns("Paste and Match Style "), Some(sel!(pasteAsPlainText:)), &util::ns("v")) };
+    alt.setKeyEquivalentModifierMask(cmd_shift | NSEventModifierFlags::Option);
+    alt.setHidden(true);
+    alt.setAllowsKeyEquivalentWhenHidden(true);
+    std_item(&edit, "Delete", sel!(delete:), "", NSEventModifierFlags::empty());
     std_item(&edit, "Select All", sel!(selectAll:), "a", cmd);
     edit.addItem(&NSMenuItem::separatorItem(mtm));
     key(&edit, "Find…", sel!(find:), "f", cmd);
@@ -1644,9 +2452,13 @@ fn build_menu() {
 
     let view = submenu(&bar, "View");
     // Not `toggleSidebar:` — AppKit reserves that name and re-routes it.
-    key(&view, "Toggle Sidebar", sel!(zcToggleSidebar:), "s", cmd);
+    // ⌃⌘S is the standard Mac shortcut and always works; ⌘S still does when
+    // no page has the keyboard (pages keep ⌘S for their own Save).
+    key(&view, "Toggle Sidebar", sel!(zcToggleSidebar:), "s", cmd | ctrl);
+    alt_key(&view, "Toggle Sidebar ", sel!(zcToggleSidebar:), "s", cmd);
     view.addItem(&NSMenuItem::separatorItem(mtm));
     key(&view, "Zoom In", sel!(zoomIn:), "=", cmd);
+    alt_key(&view, "Zoom In ", sel!(zoomIn:), "+", cmd);
     key(&view, "Zoom Out", sel!(zoomOut:), "-", cmd);
     key(&view, "Actual Size", sel!(zoomReset:), "0", cmd);
     view.addItem(&NSMenuItem::separatorItem(mtm));
@@ -1662,6 +2474,7 @@ fn build_menu() {
     key(&go, "App Launcher (Home)", sel!(home:), "h", cmd_shift);
     key(&go, "Open Location", sel!(openLocation:), "l", cmd);
     key(&go, "Google Search", sel!(search:), "k", cmd);
+    alt_key(&go, "Google Search ", sel!(search:), "k", cmd | NSEventModifierFlags::Option);
     key(&go, "Google Meet", sel!(meet:), "m", cmd_shift);
 
     let tabs = submenu(&bar, "Tabs");
@@ -1678,11 +2491,20 @@ fn build_menu() {
         item.setTag((n - 1) as isize);
     }
     key(&tabs, "Last Tab", sel!(lastTab:), "9", cmd);
+    tabs.addItem(&NSMenuItem::separatorItem(mtm));
+    key(&tabs, "Search Tabs…", sel!(tabOverflow:), "a", cmd_shift);
+    key(&tabs, "Move Tab Left", sel!(moveTabLeft:), "\u{F702}", cmd | ctrl | NSEventModifierFlags::Option);
+    key(&tabs, "Move Tab Right", sel!(moveTabRight:), "\u{F703}", cmd | ctrl | NSEventModifierFlags::Option);
+    key(&tabs, "Focus Tab Strip", sel!(focusTabs:), "t", cmd | ctrl);
 
     let window = submenu(&bar, "Window");
     std_item(&window, "Minimize", sel!(performMiniaturize:), "m", cmd);
     std_item(&window, "Zoom", sel!(performZoom:), "", cmd);
     app.setWindowsMenu(Some(&window));
+
+    let help = submenu(&bar, "Help");
+    add_item(&help, "Export Diagnostics…", sel!(exportDiagnostics:), "", 0);
+    app.setHelpMenu(Some(&help));
 
     app.setMainMenu(Some(&bar));
 }

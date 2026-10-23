@@ -127,12 +127,10 @@ pub fn downloads_dir() -> PathBuf {
     home().join("Downloads")
 }
 
-/// PDFs a page opened in a window, kept so they can be shown as a tab.
-/// Each file belongs to one tab and is removed when that tab goes.
+/// PDFs shown as tabs. Each preview has its own random 0700 folder inside
+/// this one (see `pdf.rs`); the folder itself is private too.
 pub fn pdf_previews_dir() -> PathBuf {
-    let dir = support_dir().join("PDF Previews");
-    ensure_dir(&dir, None);
-    dir
+    private_dir("PDF Previews")
 }
 
 enum Write {
@@ -189,19 +187,58 @@ pub fn flush_writes() {
     }
 }
 
-/// Write via a temporary file and rename, so a crash mid-write can never
-/// leave a half-written file behind.
+/// macOS `O_NOFOLLOW`: never open through a symbolic link.
+pub const O_NOFOLLOW: i32 = 0x0100;
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only failure injection: the next write fails after the
+    /// temporary file was partly written (a full disk, a crash).
+    pub static FAIL_NEXT_WRITE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Write `data` to `path` so that a crash, a full disk or a planted link can
+/// never leave a half-written or redirected file:
+///
+/// * the temporary file has an unpredictable name and is created with
+///   `O_CREAT|O_EXCL|O_NOFOLLOW`, so a symlink or file planted there by
+///   another process makes the write fail instead of following it;
+/// * it is flushed to disk before it replaces `path` with `rename(2)`,
+///   which swaps the directory entry (a symlink at `path` is replaced, not
+///   followed);
+/// * the directory is synced afterwards so the rename itself survives a
+///   power cut.
+///
+/// On any error the original file is untouched and the temporary removed.
 pub fn write_atomic(path: &std::path::Path, data: &[u8], mode: u32) -> std::io::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-    let tmp = path.with_extension("tmp~");
-    {
-        let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(mode).open(&tmp)?;
+    let dir = path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."));
+    let name = path.file_name().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "no file name"))?;
+    let tmp = dir.join(format!(".{}.{}.tmp", name.to_string_lossy(), Uuid::new_v4().simple()));
+    let result = (|| {
+        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(mode).custom_flags(O_NOFOLLOW).open(&tmp)?;
+        #[cfg(test)]
+        if FAIL_NEXT_WRITE.replace(false) {
+            f.write_all(&data[..data.len() / 2])?;
+            return Err(std::io::Error::other("injected write failure"));
+        }
         f.write_all(data)?;
-        f.sync_data()?;
+        f.set_permissions(std::fs::Permissions::from_mode(mode))?;
+        f.sync_all()?;
+        drop(f);
+        std::fs::rename(&tmp, path)?;
+        // Make the rename durable. Failure here is not fatal: the data is
+        // already in place.
+        if let Ok(d) = std::fs::File::open(dir) {
+            let _ = d.sync_all();
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
     }
-    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode))?;
-    std::fs::rename(&tmp, path)
+    result
 }
 
 static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
@@ -217,4 +254,67 @@ pub fn ms_since_start() -> f64 {
 
 pub fn log(msg: impl AsRef<str>) {
     eprintln!("ZClients: {}", msg.as_ref());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch() -> PathBuf {
+        let d = std::env::temp_dir().join(format!("zc-util-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn atomic_write_replaces_and_sets_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = scratch();
+        let p = d.join("clients.json");
+        write_atomic(&p, b"one", 0o600).unwrap();
+        write_atomic(&p, b"two", 0o600).unwrap();
+        assert_eq!(std::fs::read(&p).unwrap(), b"two");
+        assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(std::fs::read_dir(&d).unwrap().count(), 1, "no temporary files left");
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn failed_write_keeps_the_original_and_cleans_up() {
+        let d = scratch();
+        let p = d.join("clients.json");
+        write_atomic(&p, b"good", 0o600).unwrap();
+        FAIL_NEXT_WRITE.set(true);
+        assert!(write_atomic(&p, b"partial-and-lost", 0o600).is_err());
+        assert_eq!(std::fs::read(&p).unwrap(), b"good", "partial write never replaces the file");
+        assert_eq!(std::fs::read_dir(&d).unwrap().count(), 1);
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn read_only_directory_fails_without_damage() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = scratch();
+        let p = d.join("clients.json");
+        write_atomic(&p, b"good", 0o600).unwrap();
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let r = write_atomic(&p, b"new", 0o600);
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(r.is_err());
+        assert_eq!(std::fs::read(&p).unwrap(), b"good");
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn a_symlink_at_the_destination_is_replaced_not_followed() {
+        let d = scratch();
+        let victim = d.join("victim");
+        std::fs::write(&victim, b"precious").unwrap();
+        let p = d.join("clients.json");
+        std::os::unix::fs::symlink(&victim, &p).unwrap();
+        write_atomic(&p, b"data", 0o600).unwrap();
+        assert_eq!(std::fs::read(&victim).unwrap(), b"precious", "link target untouched");
+        assert!(!std::fs::symlink_metadata(&p).unwrap().file_type().is_symlink());
+        let _ = std::fs::remove_dir_all(d);
+    }
 }

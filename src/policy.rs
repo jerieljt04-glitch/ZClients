@@ -10,45 +10,290 @@ use crate::model::Workspace;
 
 /// Zoho's own data centres. A host matches when it is the domain itself or any
 /// subdomain of it.
-const ZOHO_DOMAINS: &[&str] = &[
-    "zoho.com", "zoho.eu", "zoho.in", "zoho.com.au", "zoho.jp", "zoho.ca", "zoho.sa",
-    "zoho.com.cn", "zoho.uk", "zohocloud.ca",
-];
+const ZOHO_DOMAINS: &[&str] = &["zoho.com", "zoho.eu", "zoho.in", "zoho.com.au", "zoho.jp", "zoho.ca", "zoho.sa", "zoho.com.cn", "zoho.uk", "zohocloud.ca", "zoho.ae", "zoho.sg"];
+
+/// One entry per Zoho data centre, as Zoho's multi-DC documentation lists
+/// them (accounts.<this> is that centre's sign-in server): US, EU, IN, AU,
+/// JP, CA, SA, UK, CN, plus the newer UAE and Singapore centres.
+/// <https://www.zoho.com/accounts/protocol/oauth/multi-dc.html>
+pub const ZOHO_DATA_CENTRES: &[&str] = &["zoho.com", "zoho.eu", "zoho.in", "zoho.com.au", "zoho.jp", "zohocloud.ca", "zoho.sa", "zoho.uk", "zoho.com.cn", "zoho.ae", "zoho.sg"];
+
+/// Zoho products that place calls in the browser (Zoho Meeting, Cliq).
+/// Their exact origin in each data centre may use the camera and microphone
+/// without WebKit asking on every call.
+const ZOHO_CALL_PRODUCTS: &[&str] = &["meeting", "cliq"];
+
+/// The cookie domains whose sign-in cookies the session keeper may back up
+/// and restore: Zoho's own data centres and Google's account cookies (Meet
+/// and the Search workspace sign in through them).
+const SESSION_GOOGLE_DOMAINS: &[&str] = &["google.com", "google.ae"];
 
 /// Where Zoho serves CRM widgets, extensions and Sigma apps from. These run
 /// inside an iframe on crm.zoho.*, so they need the same trust as Zoho itself:
 /// without it a widget's `confirm()` silently answers "Cancel", its file
 /// upload never opens and "open in new tab" is cancelled.
 const ZOHO_WIDGET_DOMAINS: &[&str] = &[
-    "zappsusercontent.com", "zappsusercontent.eu", "zappsusercontent.in",
-    "zappsusercontent.com.au", "zappsusercontent.jp", "zappsusercontent.ca",
-    "zappsusercontent.sa", "zappsusercontent.com.cn", "zappsusercontent.uk",
+    "zappsusercontent.com",
+    "zappsusercontent.eu",
+    "zappsusercontent.in",
+    "zappsusercontent.com.au",
+    "zappsusercontent.jp",
+    "zappsusercontent.ca",
+    "zappsusercontent.sa",
+    "zappsusercontent.com.cn",
+    "zappsusercontent.uk",
 ];
 
 /// Zoho-owned static, API and public-content hosts that widgets and embedded
 /// Zoho views load from.
 const ZOHO_CONTENT_DOMAINS: &[&str] = &[
-    "zohostatic.com", "zohocdn.com", "zohowebstatic.com", "zohoexternal.com",
-    "zohopublic.com", "zohopublic.eu", "zohopublic.in", "zohopublic.com.au",
-    "zohopublic.jp", "zohopublic.ca", "zohopublic.sa", "zohopublic.com.cn",
-    "zohoapis.com", "zohoapis.eu", "zohoapis.in", "zohoapis.com.au", "zohoapis.jp",
-    "zohoapis.ca", "zohoapis.sa", "zohoapis.com.cn",
+    "zohostatic.com",
+    "zohocdn.com",
+    "zohowebstatic.com",
+    "zohoexternal.com",
+    "zohopublic.com",
+    "zohopublic.eu",
+    "zohopublic.in",
+    "zohopublic.com.au",
+    "zohopublic.jp",
+    "zohopublic.ca",
+    "zohopublic.sa",
+    "zohopublic.com.cn",
+    "zohoapis.com",
+    "zohoapis.eu",
+    "zohoapis.in",
+    "zohoapis.com.au",
+    "zohoapis.jp",
+    "zohoapis.ca",
+    "zohoapis.sa",
+    "zohoapis.com.cn",
 ];
 
 /// Zoho's Log360 Cloud runs under ManageEngine (Zoho's IT brand), one host
 /// per data centre.
 const ZOHO_PARTNER_DOMAINS: &[&str] = &[
-    "log360cloud.manageengine.com", "log360cloud.manageengine.eu", "log360cloud.manageengine.in",
-    "log360cloud.manageengine.com.au", "log360cloud.manageengine.jp", "log360cloud.manageengine.ca",
-    "log360cloud.manageengine.uk", "log360cloud.manageengine.ae",
+    "log360cloud.manageengine.com",
+    "log360cloud.manageengine.eu",
+    "log360cloud.manageengine.in",
+    "log360cloud.manageengine.com.au",
+    "log360cloud.manageengine.jp",
+    "log360cloud.manageengine.ca",
+    "log360cloud.manageengine.uk",
+    "log360cloud.manageengine.ae",
 ];
 
 const GOOGLE_AUTH_HOSTS: &[&str] = &["accounts.google.com", "consent.google.com"];
 
-const GOOGLE_SEARCH_HOSTS: &[&str] = &[
-    "google.com", "www.google.com", "images.google.com", "news.google.com",
-    "lens.google.com", "google.ae", "www.google.ae", "images.google.ae",
-];
+const GOOGLE_SEARCH_HOSTS: &[&str] = &["google.com", "www.google.com", "images.google.com", "news.google.com", "lens.google.com", "google.ae", "www.google.ae", "images.google.ae"];
+
+/// A web origin (scheme, host, port) normalised the way browsers compare
+/// them. Built only from a parsed URL or WebKit's `WKSecurityOrigin`.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Origin {
+    pub scheme: String,
+    pub host: String,
+    /// The effective port (443 for https with no explicit port).
+    pub port: u16,
+}
+
+impl Origin {
+    /// The origin of `url`. URLs that carry credentials (`user@host`) are
+    /// refused outright: they are only ever used to disguise a host.
+    pub fn of(url: &Url) -> Option<Origin> {
+        // blob:https://crm.zoho.com/uuid belongs to the origin inside it.
+        if url.scheme() == "blob" {
+            return parse(&url.as_str()["blob:".len()..]).filter(|inner| inner.scheme() != "blob").and_then(|inner| Origin::of(&inner));
+        }
+        if !url.username().is_empty() || url.password().is_some() {
+            return None;
+        }
+        let host = url.host_str()?.to_ascii_lowercase();
+        let port = url.port_or_known_default()?;
+        Some(Origin { scheme: url.scheme().to_ascii_lowercase(), host, port })
+    }
+
+    /// From WebKit's security-origin parts. An empty scheme or host is an
+    /// opaque origin (sandboxed frame, data:, about:blank) and has none.
+    pub fn from_parts(scheme: &str, host: &str, port: i64) -> Option<Origin> {
+        if scheme.is_empty() || host.is_empty() {
+            return None;
+        }
+        let scheme = scheme.to_ascii_lowercase();
+        let port = match port {
+            p if p > 0 && p <= u16::MAX as i64 => p as u16,
+            _ if scheme == "https" => 443,
+            _ if scheme == "http" => 80,
+            _ => return None,
+        };
+        Some(Origin { scheme, host: host.to_ascii_lowercase(), port })
+    }
+
+    /// `https://<one of hosts>` on port 443 and nothing else: no other
+    /// port, no trailing dot, no subdomain, no look-alike.
+    pub fn is_exact_https(&self, hosts: &[String]) -> bool {
+        self.scheme == "https" && self.port == 443 && hosts.contains(&self.host)
+    }
+
+    pub fn url(&self) -> Option<Url> {
+        let default = (self.scheme == "https" && self.port == 443) || (self.scheme == "http" && self.port == 80);
+        let text = if default { format!("{}://{}/", self.scheme, self.host) } else { format!("{}://{}:{}/", self.scheme, self.host, self.port) };
+        parse(&text)
+    }
+
+    pub fn display(&self) -> String {
+        match self.url() {
+            Some(u) => u.as_str().trim_end_matches('/').to_string(),
+            None => self.host.clone(),
+        }
+    }
+}
+
+/// `accounts.<data centre>` for every Zoho data centre.
+pub fn sign_in_hosts() -> Vec<String> {
+    ZOHO_DATA_CENTRES.iter().map(|d| format!("accounts.{d}")).collect()
+}
+
+/// The exact origins that may use the camera and microphone (and get the
+/// screen picker) without an extra prompt: Google Meet, and Zoho Meeting
+/// and Cliq in every data centre.
+pub fn call_hosts() -> Vec<String> {
+    let mut v = vec!["meet.google.com".to_string()];
+    for p in ZOHO_CALL_PRODUCTS {
+        for d in ZOHO_DATA_CENTRES {
+            v.push(format!("{p}.{d}"));
+        }
+    }
+    v
+}
+
+/// What a page is asking to do. Being allowed to *display* a page grants
+/// none of the others: each is decided on its own, by exact origin.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Capability {
+    Display,
+    Camera,
+    Microphone,
+    ScreenCapture,
+    Autofill,
+    Bridge,
+    Download,
+    FileChooser,
+    ExternalLink,
+    Popup,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Decision {
+    /// Granted without asking the user again (macOS still asks once per app
+    /// for the camera/microphone).
+    Allow,
+    /// Allowed only once the user says so (WebKit's prompt, the system
+    /// screen picker, or the app's own confirmation).
+    Prompt,
+    Deny,
+}
+
+/// Where a request comes from.
+#[derive(Clone, Debug)]
+pub struct Request {
+    /// The requesting frame's live security origin (None = opaque).
+    pub origin: Option<Origin>,
+    /// The tab's main-frame origin right now.
+    pub top: Option<Origin>,
+    pub main_frame: bool,
+    /// A real keyboard or mouse event reached this web view recently.
+    pub user_gesture: bool,
+    pub workspace: Workspace,
+}
+
+impl Request {
+    fn origin_url(&self) -> Option<Url> {
+        self.origin.as_ref().and_then(Origin::url)
+    }
+
+    /// The request comes from the main frame, and that frame is the origin
+    /// the tab is showing (not a frame that navigated away underneath).
+    fn is_top_level(&self) -> bool {
+        self.main_frame && self.origin.is_some() && self.origin == self.top
+    }
+
+    fn displayable(&self) -> bool {
+        self.origin_url().is_some_and(|u| is_allowed_web(&u, self.workspace))
+    }
+}
+
+/// The single place a capability is decided.
+pub fn decide(cap: Capability, r: &Request) -> Decision {
+    let Some(origin) = r.origin.as_ref() else { return Decision::Deny };
+    let secure = origin.scheme == "https";
+    match cap {
+        Capability::Display => {
+            if r.displayable() {
+                Decision::Allow
+            } else {
+                Decision::Deny
+            }
+        }
+        Capability::Camera | Capability::Microphone => {
+            if r.is_top_level() && origin.is_exact_https(&call_hosts()) {
+                Decision::Allow
+            } else if secure {
+                // WebKit's own prompt names the origin asking.
+                Decision::Prompt
+            } else {
+                Decision::Deny
+            }
+        }
+        Capability::ScreenCapture => {
+            if !secure || !r.main_frame || !r.is_top_level() {
+                Decision::Deny
+            } else if origin.is_exact_https(&call_hosts()) {
+                // The system picker is itself the user's choice.
+                Decision::Allow
+            } else if r.displayable() {
+                Decision::Prompt
+            } else {
+                Decision::Deny
+            }
+        }
+        Capability::Autofill => {
+            if r.is_top_level() && origin.is_exact_https(&sign_in_hosts()) && r.workspace == Workspace::Zoho {
+                Decision::Allow
+            } else {
+                Decision::Deny
+            }
+        }
+        // The app's own isolated-world scripts may report to it only from
+        // pages this app shows.
+        Capability::Bridge => {
+            if secure && r.displayable() {
+                Decision::Allow
+            } else {
+                Decision::Deny
+            }
+        }
+        // A file panel is always the user's own choice; pages this app shows
+        // may open one.
+        Capability::FileChooser => {
+            if r.displayable() {
+                Decision::Allow
+            } else {
+                Decision::Deny
+            }
+        }
+        Capability::Download | Capability::ExternalLink | Capability::Popup => {
+            if !r.displayable() {
+                // An outside page (OAuth provider, ad frame) never acts on
+                // its own; a user click still gets a confirmation.
+                if r.user_gesture && secure { Decision::Prompt } else { Decision::Deny }
+            } else if r.user_gesture {
+                Decision::Allow
+            } else {
+                Decision::Prompt
+            }
+        }
+    }
+}
 
 pub fn parse(text: &str) -> Option<Url> {
     Url::parse(text).ok()
@@ -59,9 +304,7 @@ fn host_lower(url: &Url) -> Option<String> {
 }
 
 fn host_in(host: &str, domains: &[&str]) -> bool {
-    domains
-        .iter()
-        .any(|d| host == *d || (host.len() > d.len() && host.ends_with(d) && host.as_bytes()[host.len() - d.len() - 1] == b'.'))
+    domains.iter().any(|d| host == *d || (host.len() > d.len() && host.ends_with(d) && host.as_bytes()[host.len() - d.len() - 1] == b'.'))
 }
 
 /// Every host this app trusts serves TLS. Requiring it means a downgraded or
@@ -70,20 +313,10 @@ pub fn is_https(url: &Url) -> bool {
     url.scheme() == "https"
 }
 
-/// The Zoho application itself (crm.zoho.com, accounts.zoho.eu, ...).
-pub fn is_zoho_app(url: &Url) -> bool {
-    is_https(url) && host_lower(url).is_some_and(|h| host_in(&h, ZOHO_DOMAINS))
-}
-
 /// Zoho plus every Zoho-owned host widgets are served from.
 pub fn is_zoho_family(url: &Url) -> bool {
     is_https(url)
-        && host_lower(url).is_some_and(|h| {
-            host_in(&h, ZOHO_DOMAINS)
-                || host_in(&h, ZOHO_WIDGET_DOMAINS)
-                || host_in(&h, ZOHO_CONTENT_DOMAINS)
-                || host_in(&h, ZOHO_PARTNER_DOMAINS)
-        })
+        && host_lower(url).is_some_and(|h| host_in(&h, ZOHO_DOMAINS) || host_in(&h, ZOHO_WIDGET_DOMAINS) || host_in(&h, ZOHO_CONTENT_DOMAINS) || host_in(&h, ZOHO_PARTNER_DOMAINS))
 }
 
 pub fn is_zoho_widget(url: &Url) -> bool {
@@ -142,14 +375,6 @@ pub fn is_safe_download(url: &Url, workspace: Workspace) -> bool {
     is_https(url) || is_allowed_blob(url, workspace) || url.scheme() == "data"
 }
 
-/// Sites whose camera/microphone (and screen-sharing) requests are granted
-/// without WebKit asking on every call: Google Meet and Zoho's own apps
-/// (Zoho Meeting, Cliq). macOS still asks once per app. Third-party code,
-/// including CRM widgets on zappsusercontent, keeps the per-request prompt.
-pub fn auto_grants_media(url: &Url) -> bool {
-    is_https(url) && (host_lower(url).is_some_and(|h| h == "meet.google.com") || is_zoho_app(url))
-}
-
 /// May an embedded frame turn this response into a download? Only files
 /// served by Zoho itself (WorkDrive folder zips, exports) or a Zoho page's
 /// own blob:/data: URLs. Third-party frames inside a widget (ads, embeds)
@@ -164,28 +389,13 @@ pub fn should_open_in_client_workspace(url: &Url) -> bool {
     is_zoho_family(url) || is_google_meet(url)
 }
 
-/// A frame's live security origin (scheme + host + port), as WebKit reports
-/// it. Opaque origins (sandboxed frames, about:blank, data:) report an empty
-/// scheme or host and are never trusted.
-pub fn is_allowed_origin(scheme: &str, host: &str, port: i64, workspace: Workspace) -> bool {
-    if scheme.is_empty() || host.is_empty() {
-        return false;
-    }
-    let text = if port > 0 { format!("{scheme}://{host}:{port}/") } else { format!("{scheme}://{host}/") };
-    parse(&text).is_some_and(|u| is_allowed_web(&u, workspace))
-}
-
 /// Sign-in pages. A tab that lands here (because a session ended) must not
 /// overwrite where the user really was, or the place is lost after signing in.
 pub fn is_auth_page(url: &Url) -> bool {
     if is_google_auth(url) {
         return true;
     }
-    if !is_zoho_app(url) {
-        return false;
-    }
-    let host = host_lower(url).unwrap_or_default();
-    host.starts_with("accounts.")
+    is_zoho_sign_in(url)
 }
 
 /// For a Zoho sign-in URL, the page it will return to afterwards (its
@@ -198,9 +408,11 @@ pub fn sign_in_destination(url: &Url) -> Option<Url> {
     parse(&target).filter(|t| is_zoho_family(t) && !is_auth_page(t))
 }
 
-/// Zoho's own sign-in host, where saved credentials may be filled in.
+/// Zoho's own sign-in origin, where saved credentials may be filled in:
+/// exactly `https://accounts.<data centre>` on the default port. Never a
+/// prefix match: `accounts.` + anything is not an authentication boundary.
 pub fn is_zoho_sign_in(url: &Url) -> bool {
-    is_zoho_app(url) && host_lower(url).is_some_and(|h| h.starts_with("accounts."))
+    Origin::of(url).is_some_and(|o| o.is_exact_https(&sign_in_hosts()))
 }
 
 /// Whether a cookie for `domain` may be mirrored to the session backup. The
@@ -211,7 +423,8 @@ pub fn is_persistable_cookie_domain(domain: &str) -> bool {
     if host.is_empty() || host.contains('/') || host.contains('@') {
         return false;
     }
-    parse(&format!("https://{host}/")).is_some_and(|u| is_zoho_family(&u) || is_allowed_google_search(&u))
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    !host.is_empty() && parse(&format!("https://{host}/")).is_some() && (host_in(&host, ZOHO_DOMAINS) || host_in(&host, SESSION_GOOGLE_DOMAINS))
 }
 
 /// Turn typed text into an https URL, or None when it is not address-like.
@@ -223,8 +436,7 @@ pub fn normalized_http_url(text: &str) -> Option<Url> {
     }
     let has_scheme = {
         let mut chars = s.chars();
-        chars.next().is_some_and(|c| c.is_ascii_alphabetic())
-            && s.find(':').is_some_and(|i| s[..i].chars().all(|c| c.is_ascii_alphanumeric() || "+.-".contains(c)))
+        chars.next().is_some_and(|c| c.is_ascii_alphabetic()) && s.find(':').is_some_and(|i| s[..i].chars().all(|c| c.is_ascii_alphanumeric() || "+.-".contains(c)))
     };
     let candidate = if has_scheme {
         let (scheme, rest) = s.split_once(':')?;
@@ -271,15 +483,129 @@ mod tests {
         parse(s).unwrap()
     }
 
+    fn req(url: &str, main: bool, gesture: bool) -> Request {
+        let o = Origin::of(&parse(url).unwrap());
+        Request { origin: o.clone(), top: if main { o } else { Origin::of(&u("https://crm.zoho.com/")) }, main_frame: main, user_gesture: gesture, workspace: Workspace::Zoho }
+    }
+
     #[test]
-    fn calls_on_meet_and_zoho_apps_skip_the_prompt_widgets_do_not() {
-        assert!(auto_grants_media(&u("https://meet.google.com/")));
-        assert!(auto_grants_media(&u("https://meeting.zoho.com/")));
-        assert!(auto_grants_media(&u("https://cliq.zoho.eu/")));
-        assert!(!auto_grants_media(&u("https://123-abc.zappsusercontent.com/")), "third-party widget");
-        assert!(!auto_grants_media(&u("https://www.google.com/")));
-        assert!(!auto_grants_media(&u("http://meet.google.com/")));
-        assert!(!auto_grants_media(&u("https://meet.google.com.evil.net/")));
+    fn meet_and_zoho_call_products_keep_media_without_prompts() {
+        for s in ["https://meet.google.com/abc-defg-hij", "https://meeting.zoho.com/meeting/x", "https://cliq.zoho.eu/", "https://meeting.zohocloud.ca/", "https://cliq.zoho.sa/"] {
+            assert_eq!(decide(Capability::Camera, &req(s, true, false)), Decision::Allow, "{s}");
+            assert_eq!(decide(Capability::Microphone, &req(s, true, false)), Decision::Allow, "{s}");
+            assert_eq!(decide(Capability::ScreenCapture, &req(s, true, false)), Decision::Allow, "{s}");
+        }
+    }
+
+    #[test]
+    fn no_zoho_family_host_is_granted_media_automatically() {
+        for s in [
+            "https://crm.zoho.com/",
+            "https://mail.zoho.eu/",
+            "https://accounts.zoho.com/",
+            "https://123-abc.zappsusercontent.com/",
+            "https://forms.zohopublic.com/x",
+            "https://acme.zohosites.com/",
+            "https://static.zohocdn.com/",
+            "https://www.google.com/",
+            "https://log360cloud.manageengine.com/",
+        ] {
+            assert_ne!(decide(Capability::Camera, &req(s, true, true)), Decision::Allow, "{s}");
+            assert_ne!(decide(Capability::Microphone, &req(s, true, true)), Decision::Allow, "{s}");
+            assert_ne!(decide(Capability::ScreenCapture, &req(s, true, true)), Decision::Allow, "{s}");
+        }
+    }
+
+    #[test]
+    fn disguised_meeting_origins_get_no_privilege() {
+        for s in [
+            "https://x.meet.google.com/",
+            "https://meet.google.com.evil.net/",
+            "https://meet.google.com:8443/",
+            "http://meet.google.com/",
+            "https://meet.google.com./",
+            "https://user@meet.google.com/",
+            "https://user:pw@meeting.zoho.com/",
+            "https://meeting.zoho.com.evil.net/",
+            "https://evil-meeting.zoho.com/",
+            "https://a.meeting.zoho.com/",
+            "https://xn--meet-goo-k3a.google.com/",
+            "https://meeting.zoho.com:444/",
+            "https://meetíng.zoho.com/",
+        ] {
+            let Some(url) = parse(s) else { continue };
+            let o = Origin::of(&url);
+            let r = Request { origin: o.clone(), top: o, main_frame: true, user_gesture: true, workspace: Workspace::Zoho };
+            assert_ne!(decide(Capability::Camera, &r), Decision::Allow, "{s}");
+            assert_ne!(decide(Capability::ScreenCapture, &r), Decision::Allow, "{s}");
+            assert_ne!(decide(Capability::Autofill, &r), Decision::Allow, "{s}");
+        }
+    }
+
+    #[test]
+    fn media_in_a_subframe_or_after_the_top_moved_is_never_automatic() {
+        assert_eq!(decide(Capability::Camera, &req("https://meet.google.com/", false, true)), Decision::Prompt, "Meet framed inside CRM");
+        let meet = Origin::of(&u("https://meet.google.com/"));
+        let moved = Request { origin: meet, top: Origin::of(&u("https://evil.example/")), main_frame: true, user_gesture: true, workspace: Workspace::Zoho };
+        assert_ne!(decide(Capability::Camera, &moved), Decision::Allow);
+        assert_eq!(decide(Capability::ScreenCapture, &req("https://meet.google.com/", false, true)), Decision::Deny);
+        let opaque = Request { origin: None, top: None, main_frame: true, user_gesture: true, workspace: Workspace::Zoho };
+        for cap in [Capability::Camera, Capability::Autofill, Capability::Download, Capability::Popup, Capability::Bridge] {
+            assert_eq!(decide(cap, &opaque), Decision::Deny, "{cap:?} from an opaque origin");
+        }
+    }
+
+    #[test]
+    fn credentials_only_on_exact_sign_in_origins() {
+        for s in ["https://accounts.zoho.com/signin", "https://accounts.zoho.eu/", "https://accounts.zohocloud.ca/", "https://accounts.zoho.com.cn/"] {
+            assert_eq!(decide(Capability::Autofill, &req(s, true, false)), Decision::Allow, "{s}");
+            assert!(is_zoho_sign_in(&u(s)), "{s}");
+        }
+        for s in [
+            "https://accounts.evil.zoho.com/",
+            "https://x.accounts.zoho.com/",
+            "https://accounts.zoho.com.evil.net/",
+            "https://accounts.zohopublic.com/",
+            "https://accounts.zappsusercontent.com/",
+            "http://accounts.zoho.com/",
+            "https://accounts.zoho.com:8443/",
+            "https://accounts.zoho.com./",
+            "https://u@accounts.zoho.com/",
+            "https://accountsx.zoho.com/",
+            "https://accounts.zoho.ca/",
+        ] {
+            let url = u(s);
+            assert!(!is_zoho_sign_in(&url), "{s}");
+            assert_ne!(decide(Capability::Autofill, &req(s, true, true)), Decision::Allow, "{s}");
+        }
+        assert_eq!(decide(Capability::Autofill, &req("https://accounts.zoho.com/", false, true)), Decision::Deny, "never a subframe");
+        let mut search = req("https://accounts.zoho.com/", true, true);
+        search.workspace = Workspace::GoogleSearch;
+        assert_eq!(decide(Capability::Autofill, &search), Decision::Deny, "never in the Search workspace");
+    }
+
+    #[test]
+    fn downloads_popups_and_deep_links_need_a_gesture_or_consent() {
+        for cap in [Capability::Download, Capability::Popup, Capability::ExternalLink] {
+            assert_eq!(decide(cap, &req("https://crm.zoho.com/", true, true)), Decision::Allow);
+            assert_eq!(decide(cap, &req("https://crm.zoho.com/", true, false)), Decision::Prompt, "{cap:?} without a click asks");
+            assert_eq!(decide(cap, &req("https://ads.example.com/", true, false)), Decision::Deny, "{cap:?} outside page, no click");
+            assert_eq!(decide(cap, &req("https://ads.example.com/", true, true)), Decision::Prompt, "{cap:?} outside page asks even after a click");
+            assert_eq!(decide(cap, &req("http://crm.zoho.com/", true, true)), Decision::Deny, "{cap:?} over cleartext");
+        }
+    }
+
+    #[test]
+    fn origins_compare_like_browsers() {
+        assert_eq!(Origin::of(&u("https://Meet.Google.com:443/x")), Origin::of(&u("https://meet.google.com/")));
+        assert_eq!(Origin::from_parts("https", "meet.google.com", 0), Origin::of(&u("https://meet.google.com/")));
+        assert_eq!(Origin::from_parts("", "x", 0), None);
+        assert_eq!(Origin::from_parts("https", "", 0), None);
+        assert_ne!(Origin::from_parts("https", "meet.google.com", 444), Origin::of(&u("https://meet.google.com/")));
+        assert!(Origin::of(&u("https://a@b.com/")).is_none());
+        assert_eq!(Origin::of(&u("blob:https://workdrive.zoho.com/1234")), Origin::of(&u("https://workdrive.zoho.com/")));
+        assert_eq!(Origin::of(&u("blob:blob:https://x.com/1")), None);
+        assert_eq!(Origin::of(&u("data:text/plain,hi")), None, "data: is opaque");
     }
 
     #[test]
@@ -294,8 +620,9 @@ mod tests {
 
     #[test]
     fn zoho_regions_and_subdomains_are_allowed() {
-        for s in ["https://zoho.com", "https://crm.zoho.com/crm/org1/tab/Home", "https://books.zoho.eu",
-                  "https://crm.zoho.in", "https://accounts.zohocloud.ca", "https://crm.zoho.uk"] {
+        for s in
+            ["https://zoho.com", "https://crm.zoho.com/crm/org1/tab/Home", "https://books.zoho.eu", "https://crm.zoho.in", "https://accounts.zohocloud.ca", "https://crm.zoho.uk"]
+        {
             assert!(is_allowed_web(&u(s), Workspace::Zoho), "{s}");
         }
     }
@@ -305,7 +632,9 @@ mod tests {
         let widget = u("https://123456-abcdef.zappsusercontent.com/appfiles/widget.html");
         assert!(is_zoho_widget(&widget));
         assert!(is_allowed_web(&widget, Workspace::Zoho));
-        assert!(is_allowed_origin("https", "123456-abcdef.zappsusercontent.eu", 0, Workspace::Zoho));
+        let widget_frame =
+            Request { origin: Origin::from_parts("https", "123456-abcdef.zappsusercontent.eu", 0), top: None, main_frame: false, user_gesture: false, workspace: Workspace::Zoho };
+        assert_eq!(decide(Capability::Display, &widget_frame), Decision::Allow);
         assert!(is_allowed_web(&u("https://static.zohocdn.com/x.js"), Workspace::Zoho));
         assert!(is_allowed_web(&u("https://log360cloud.manageengine.com/"), Workspace::Zoho));
         assert!(!is_allowed_web(&u("https://www.manageengine.com/"), Workspace::Zoho));
@@ -313,8 +642,8 @@ mod tests {
 
     #[test]
     fn lookalike_hosts_and_userinfo_are_rejected() {
-        for s in ["https://evilzoho.com", "https://zoho.com.evil.net", "https://crm.zoho.com@evil.net/",
-                  "https://zappsusercontent.com.evil.net", "https://notzappsusercontent.com"] {
+        for s in ["https://evilzoho.com", "https://zoho.com.evil.net", "https://crm.zoho.com@evil.net/", "https://zappsusercontent.com.evil.net", "https://notzappsusercontent.com"]
+        {
             assert!(!is_allowed_web(&u(s), Workspace::Zoho), "{s}");
         }
     }
@@ -323,7 +652,8 @@ mod tests {
     fn cleartext_is_never_trusted() {
         assert!(!is_allowed_web(&u("http://crm.zoho.com"), Workspace::Zoho));
         assert!(!is_allowed_web(&u("http://www.google.com"), Workspace::GoogleSearch));
-        assert!(!is_allowed_origin("http", "crm.zoho.com", 0, Workspace::Zoho));
+        let cleartext = Request { origin: Origin::from_parts("http", "crm.zoho.com", 0), top: None, main_frame: true, user_gesture: true, workspace: Workspace::Zoho };
+        assert_eq!(decide(Capability::Display, &cleartext), Decision::Deny);
         assert!(!is_safe_download(&u("http://files.example.com/a.pdf"), Workspace::Zoho));
     }
 
@@ -375,6 +705,9 @@ mod tests {
         assert!(is_persistable_cookie_domain("accounts.zoho.eu"));
         assert!(is_persistable_cookie_domain(".google.com"));
         assert!(!is_persistable_cookie_domain(".doubleclick.net"));
+        assert!(!is_persistable_cookie_domain(".zappsusercontent.com"), "customer widget hosts never hold sign-ins");
+        assert!(!is_persistable_cookie_domain(".zohopublic.com"));
+        assert!(!is_persistable_cookie_domain("zoho.com.evil.net"));
         assert!(!is_persistable_cookie_domain(""));
         assert!(!is_persistable_cookie_domain("evil.net/zoho.com"));
     }

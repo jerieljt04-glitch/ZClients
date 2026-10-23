@@ -49,11 +49,7 @@ pub fn best_zoho_url(input: &str) -> Option<Url> {
     }
     let pricing = w.iter().any(|x| x == "pricing" || x == "price");
     let app = matching_app(input)?;
-    if pricing {
-        Url::parse(&format!("https://www.zoho.com/{}/pricing/", app.slug)).ok()
-    } else {
-        Url::parse(app.url).ok()
-    }
+    if pricing { Url::parse(&format!("https://www.zoho.com/{}/pricing/", app.slug)).ok() } else { Url::parse(app.url).ok() }
 }
 
 #[cfg(test)]

@@ -9,11 +9,10 @@ use std::cell::{Cell, RefCell};
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject, Sel};
-use objc2::{define_class, msg_send, sel, MainThreadMarker, MainThreadOnly};
+use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSButton, NSColor, NSControl, NSControlTextEditingDelegate, NSEvent, NSFont, NSResponder, NSScrollView, NSSearchField,
-    NSSearchFieldDelegate, NSTableColumn, NSTableView, NSTableViewDataSource, NSTableViewDelegate, NSTableViewStyle,
-    NSTextField, NSTextFieldDelegate, NSTextView, NSView,
+    NSButton, NSColor, NSControl, NSControlTextEditingDelegate, NSEvent, NSFont, NSResponder, NSScrollView, NSSearchField, NSSearchFieldDelegate, NSTableColumn, NSTableView,
+    NSTableViewDataSource, NSTableViewDelegate, NSTableViewStyle, NSTextField, NSTextFieldDelegate, NSTextView, NSView,
 };
 use objc2_foundation::{NSIndexSet, NSInteger, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize};
 
@@ -261,20 +260,7 @@ pub fn build(client_name: &str) -> Retained<NSView> {
     }
     panel.setHidden(true);
 
-    let picker = Picker {
-        page: page.clone(),
-        title,
-        subtitle,
-        field,
-        chevron,
-        hint,
-        panel,
-        scroll,
-        table,
-        _ctl: ctl,
-        rows: RefCell::new(vec![]),
-        open: Cell::new(false),
-    };
+    let picker = Picker { page: page.clone(), title, subtitle, field, chevron, hint, panel, scroll, table, _ctl: ctl, rows: RefCell::new(vec![]), open: Cell::new(false) };
     PICKER.with_borrow_mut(|p| *p = Some(picker));
     filter("");
     Retained::into_super(page)
@@ -356,7 +342,7 @@ fn step(dir: isize) {
         if n == 0 {
             return;
         }
-        let mut i = p.table.selectedRow() as isize;
+        let mut i = p.table.selectedRow();
         if i < 0 {
             i = if dir > 0 { -1 } else { n };
         }

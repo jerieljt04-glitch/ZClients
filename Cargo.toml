@@ -1,8 +1,17 @@
 [package]
 name = "zclients-rs"
 description = "ZClients — one Mac app for many signed-in Zoho profiles"
-version = "0.1.0"
+version = "1.5.0"
 edition = "2024"
+license = "LicenseRef-Proprietary"
+publish = false
+build = "build.rs"
+
+# The one place the app's version lives. CFBundleShortVersionString is the
+# package version above; CFBundleVersion is this build number. build.sh and
+# the About/Settings text read both from here.
+[package.metadata.zclients]
+build = 15
 
 [dependencies]
 aes-gcm = "0.11.1"
@@ -28,3 +37,6 @@ lto = "fat"
 codegen-units = 1
 strip = true
 panic = "abort"
+
+[dev-dependencies]
+proptest = { version = "1", default-features = false, features = ["std"] }
