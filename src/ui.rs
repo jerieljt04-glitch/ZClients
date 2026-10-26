@@ -484,6 +484,25 @@ define_class!(
         #[unsafe(method(zcToggleSidebar:))] fn a_sidebar(&self, _s: Option<&AnyObject>) { toggle_sidebar(); }
         #[unsafe(method(search:))] fn a_search(&self, _s: Option<&AnyObject>) { app::open_search(""); }
         #[unsafe(method(meet:))] fn a_meet(&self, _s: Option<&AnyObject>) { app::open_meet(); }
+        /// Commands that have nothing to act on are greyed out instead of
+        /// silently doing nothing (Back on the launcher, Print in the
+        /// Search workspace's empty tab, Customise for Search...).
+        #[unsafe(method(validateMenuItem:))]
+        fn validate_menu_item(&self, item: &NSMenuItem) -> bool {
+            let Some(action) = item.action() else { return true.into() };
+            let name = action.name().to_str().unwrap_or("");
+            // Menus that enable their items by hand say so here too: an
+            // auto-enabling menu asks this method and ignores setEnabled.
+            match name {
+                "clientUp:" | "clientDown:" => {
+                    let dir = if name == "clientUp:" { -1 } else { 1 };
+                    MENU_CLIENT.get().is_some_and(|id| !is_filtering() && app::store(|s| s.can_move_client(id, dir)))
+                }
+                "pasteAndGo:" => clipboard_text().is_some(),
+                _ => menu_enabled(name, item.tag(), &MenuContext::now()),
+            }
+        }
+
         #[unsafe(method(nextClient:))] fn a_next_client(&self, _s: Option<&AnyObject>) { app::cycle_client(1); }
         #[unsafe(method(prevClient:))] fn a_prev_client(&self, _s: Option<&AnyObject>) { app::cycle_client(-1); }
         #[unsafe(method(selectClientN:))] fn a_client_n(&self, s: Option<&NSMenuItem>) { if let Some(s) = s { app::select_client_number(s.tag() as usize); } }
@@ -944,6 +963,57 @@ thread_local! {
     static MEDIA_TABS: RefCell<Vec<(Uuid, Uuid)>> = const { RefCell::new(Vec::new()) };
     /// Tabs whose last load failed: why, and the address that failed.
     static LOAD_ERRORS: RefCell<std::collections::HashMap<Uuid, (web::LoadError, Option<String>)>> = RefCell::new(std::collections::HashMap::new());
+}
+
+/// What the menus need to know to enable their commands.
+#[derive(Clone, Debug, Default)]
+pub struct MenuContext {
+    /// A page (or PDF) is on screen in the tab in front.
+    pub page: bool,
+    pub can_back: bool,
+    pub can_forward: bool,
+    /// The client in front is a real client (not the Search workspace).
+    pub real_client: bool,
+    pub tabs: usize,
+    pub clients: usize,
+    pub real_clients: usize,
+}
+
+impl MenuContext {
+    fn now() -> MenuContext {
+        let (tab, url, real_client, tabs, clients, real_clients) = app::store(|s| {
+            let (tab, url) = s.active_tab().map(|(_, t)| (Some(t.id), t.url.is_some())).unwrap_or((None, false));
+            let real = s.active_client().is_some_and(|c| !c.is_search());
+            let tabs = s.active_client().map_or(0, |c| c.tabs.len());
+            (tab, url, real, tabs, s.clients.len(), s.client_ids_in_order().len())
+        });
+        let state = tab.and_then(web::page_state);
+        MenuContext {
+            page: url && state.is_some(),
+            can_back: state.as_ref().is_some_and(|p| p.can_back),
+            can_forward: state.as_ref().is_some_and(|p| p.can_forward),
+            real_client,
+            tabs,
+            clients,
+            real_clients,
+        }
+    }
+}
+
+/// Whether the menu command with this selector name (and tag) can do
+/// anything right now. Unknown commands stay enabled.
+pub fn menu_enabled(action: &str, tag: isize, c: &MenuContext) -> bool {
+    match action {
+        "back:" => c.can_back,
+        "forward:" => c.can_forward,
+        "reload:" | "forceReload:" | "reloadOrStop:" | "printPage:" | "downloadPage:" | "find:" | "findNext:" | "findPrev:" | "zoomIn:" | "zoomOut:" | "zoomReset:" => c.page,
+        "customise:" => c.real_client,
+        "moveTabLeft:" | "moveTabRight:" | "nextTab:" | "prevTab:" | "lastTab:" => c.tabs > 1,
+        "selectTabN:" => (tag as usize) < c.tabs,
+        "nextClient:" | "prevClient:" | "switchClient:" => c.clients > 1,
+        "selectClientN:" => (tag as usize) < c.real_clients,
+        _ => true,
+    }
 }
 
 /// A page failed to load: show a clear explanation with Try Again over it.
@@ -2856,6 +2926,24 @@ fn build_menu() {
 mod tests {
     use super::*;
     use crate::web::LoadError as E;
+
+    #[test]
+    fn menu_commands_are_enabled_only_when_they_can_act() {
+        let launcher = MenuContext { page: false, real_client: true, tabs: 1, clients: 2, real_clients: 1, ..Default::default() };
+        for a in ["back:", "forward:", "reload:", "printPage:", "find:", "zoomIn:", "downloadPage:", "moveTabLeft:", "nextClient:"] {
+            assert!(!menu_enabled(a, 0, &MenuContext::default()), "{a} with nothing open");
+        }
+        assert!(!menu_enabled("printPage:", 0, &launcher), "the launcher has nothing to print");
+        assert!(menu_enabled("customise:", 0, &launcher));
+        assert!(menu_enabled("nextClient:", 0, &launcher));
+        assert!(menu_enabled("selectClientN:", 0, &launcher));
+        assert!(!menu_enabled("selectClientN:", 1, &launcher), "only one real client");
+        let search = MenuContext { page: true, can_back: true, real_client: false, tabs: 3, clients: 2, real_clients: 1, ..Default::default() };
+        assert!(!menu_enabled("customise:", 0, &search), "Search has nothing to customise");
+        assert!(menu_enabled("back:", 0, &search) && !menu_enabled("forward:", 0, &search));
+        assert!(menu_enabled("selectTabN:", 2, &search) && !menu_enabled("selectTabN:", 3, &search));
+        assert!(menu_enabled("newTab:", 0, &MenuContext::default()), "unlisted commands stay on");
+    }
 
     #[test]
     fn half_a_login_is_never_silently_dropped() {
