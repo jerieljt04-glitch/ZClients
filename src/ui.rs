@@ -109,6 +109,9 @@ pub struct ChipIvars {
     closable: Cell<bool>,
     /// Draw the 1 pt divider on the right (both neighbours unselected).
     divider: Cell<bool>,
+    /// The state `style_chip` last drew (bits: selected, hover, closable,
+    /// divider; 0xff = draw again).
+    styled: Cell<u8>,
 }
 
 define_class!(
@@ -1492,7 +1495,9 @@ thread_local! {
     /// Every layer whose colour was copied from an AppKit colour: a CGColor
     /// is a snapshot, so these are re-resolved when the appearance or the
     /// accent colour changes (see `reapply_layer_colors`).
-    static LAYER_COLORS: RefCell<Vec<Painted>> = const { RefCell::new(Vec::new()) };
+    static LAYER_COLORS: RefCell<std::collections::HashMap<(usize, bool), Painted>> = RefCell::new(std::collections::HashMap::new());
+    /// How many entries there were after the last sweep of dead views.
+    static LAYER_SWEPT: Cell<usize> = const { Cell::new(64) };
 }
 
 /// A view, the colour its layer was given, and whether that is its border.
@@ -1518,9 +1523,13 @@ pub(crate) fn set_layer_border(view: &NSView, color: &NSColor, width: f64) {
 
 fn remember_paint(view: &NSView, color: &NSColor, border: bool) {
     paint_layer(view, color, border);
-    LAYER_COLORS.with_borrow_mut(|v| {
-        v.retain(|(w, _, b)| w.load().is_some_and(|live| *b != border || !std::ptr::eq(&*live, view)));
-        v.push((objc2::rc::Weak::from(view), objc2::Message::retain(color), border));
+    LAYER_COLORS.with_borrow_mut(|m| {
+        m.insert((view as *const NSView as usize, border), (objc2::rc::Weak::from(view), objc2::Message::retain(color), border));
+        // Chips come and go: drop dead views once the map has doubled.
+        if m.len() > LAYER_SWEPT.get() * 2 {
+            m.retain(|_, (w, _, _)| w.load().is_some());
+            LAYER_SWEPT.set(m.len().max(64));
+        }
     });
 }
 
@@ -1539,9 +1548,9 @@ fn paint_layer(view: &NSView, color: &NSColor, border: bool) {
 /// every layer colour is resolved again, and the chips that bake colours
 /// into their views are rebuilt.
 pub fn reapply_layer_colors() {
-    let live: Vec<(Retained<NSView>, Retained<NSColor>, bool)> = LAYER_COLORS.with_borrow_mut(|v| {
-        v.retain(|(w, _, _)| w.load().is_some());
-        v.iter().filter_map(|(w, c, b)| Some((w.load()?, c.clone(), *b))).collect()
+    let live: Vec<(Retained<NSView>, Retained<NSColor>, bool)> = LAYER_COLORS.with_borrow_mut(|m| {
+        m.retain(|_, (w, _, _)| w.load().is_some());
+        m.values().filter_map(|(w, c, b)| Some((w.load()?, c.clone(), *b))).collect()
     });
     for (view, color, border) in live {
         paint_layer(&view, &color, border);
@@ -1550,6 +1559,7 @@ pub fn reapply_layer_colors() {
         u.chip_key.replace(String::new());
         for c in u.chips.borrow().iter() {
             c.ivars().rendered.replace(String::new());
+            c.ivars().styled.set(0xff);
         }
     });
     refresh(app::ALL);
@@ -2053,6 +2063,12 @@ fn layout_chip(chip: &TabChip) {
 fn style_chip(chip: &TabChip) {
     let iv = chip.ivars();
     let (active, hover) = (iv.ax_selected.get(), iv.hover.get());
+    // Restyling every chip on every page-title change was most of the tab
+    // strip's cost: only a change of state redraws.
+    let state = u8::from(active) | u8::from(hover) << 1 | u8::from(iv.closable.get()) << 2 | u8::from(iv.divider.get()) << 3;
+    if iv.styled.replace(state) == state {
+        return;
+    }
     let fill = if active {
         theme::selected_tab_fill()
     } else if hover {
@@ -2196,6 +2212,7 @@ fn refresh_tabs() {
                     hover: Cell::new(false),
                     closable: Cell::new(false),
                     divider: Cell::new(false),
+                    styled: Cell::new(0xff),
                 });
                 let chip: Retained<TabChip> = unsafe { msg_send![super(this), initWithFrame: rect(0.0, 0.0, 150.0, 28.0)] };
                 chip
@@ -2293,6 +2310,7 @@ fn refresh_tabs() {
         set_layer_color(&divider, &theme::separator(), 0.0);
         part(&divider, "divider");
         chip.ivars().rendered.replace(key);
+        chip.ivars().styled.set(0xff);
         style_chip(chip);
     }
 
