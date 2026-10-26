@@ -658,10 +658,23 @@ define_class!(
                     util::later(move || release(tab));
                     return;
                 }
-            let ok = unsafe { web.URL() }.and_then(|u| util::url_string(&u)).and_then(|s| policy::parse(&s))
-                .is_some_and(|u| policy::is_allowed_web(&u, self.ivars().workspace));
-            if ok {
-                unsafe { web.reload() };
+            let url = ns_str_url(unsafe { web.URL() });
+            let ok = url.as_deref().and_then(policy::parse).is_some_and(|u| policy::is_allowed_web(&u, self.ivars().workspace));
+            if !ok {
+                return;
+            }
+            // A page that keeps crashing WebKit would otherwise reload
+            // forever: after a second crash within a minute it waits for
+            // the user (Try Again) instead.
+            let again = self.ivars().tab_id.is_some_and(|tab| POOL.with_borrow_mut(|p| !crash_allows_reload(p.crashes.entry(tab).or_default(), Instant::now())));
+            match self.ivars().tab_id {
+                Some(tab) if again => {
+                    util::log("a page crashed twice within a minute; not reloading it again");
+                    util::later(move || ui::show_load_error(tab, LoadError::Crashed, url));
+                }
+                _ => unsafe {
+                    web.reload();
+                },
             }
         }
 
@@ -907,6 +920,8 @@ pub fn recent_media_uses() -> Vec<MediaUse> {
 /// are not errors to show (a navigation cancelled or turned into a download).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum LoadError {
+    /// The page's web content process ended twice in a short time.
+    Crashed,
     Offline,
     Certificate,
     Authentication,
@@ -925,6 +940,18 @@ pub fn load_error_kind(domain: &str, code: isize) -> Option<LoadError> {
         ("NSURLErrorDomain", -1002) | ("WebKitErrorDomain", 100 | 101) => Some(LoadError::Unsupported),
         _ => Some(LoadError::Other),
     }
+}
+
+/// How often a page may crash before it is no longer reloaded by itself.
+const CRASH_LIMIT: usize = 2;
+const CRASH_WINDOW: Duration = Duration::from_secs(60);
+
+/// Record a crash at `now` in `recent` (that tab's earlier crashes) and say
+/// whether reloading on the spot is still reasonable.
+fn crash_allows_reload(recent: &mut Vec<Instant>, now: Instant) -> bool {
+    recent.retain(|t| now.saturating_duration_since(*t) < CRASH_WINDOW);
+    recent.push(now);
+    recent.len() < CRASH_LIMIT
 }
 
 fn apply_saved_zoom(web: &WKWebView, client: Uuid, url: &Url) {
@@ -1454,6 +1481,8 @@ pub struct Pool {
     /// has not been made yet.
     opened_by_page: HashSet<Uuid>,
     sign_in_attempts: HashMap<Uuid, Vec<Instant>>,
+    /// When each tab's page last crashed (see `crash_allows_reload`).
+    crashes: HashMap<Uuid, Vec<Instant>>,
     bridge: Option<Retained<Bridge>>,
     max_live: usize,
 }
@@ -1469,6 +1498,7 @@ thread_local! {
         pressure: PRESSURE_NORMAL,
         opened_by_page: HashSet::new(),
         sign_in_attempts: HashMap::new(),
+        crashes: HashMap::new(),
         bridge: None,
         max_live: base_live_cap(),
     });
@@ -2259,6 +2289,17 @@ mod tests {
         assert_eq!(load_error_kind("NSURLErrorDomain", -1012), Some(LoadError::Authentication));
         assert_eq!(load_error_kind("NSURLErrorDomain", -1002), Some(LoadError::Unsupported));
         assert_eq!(load_error_kind("Other", 5), Some(LoadError::Other));
+    }
+
+    #[test]
+    fn a_page_that_keeps_crashing_stops_reloading() {
+        let t0 = Instant::now();
+        let mut recent = vec![];
+        assert!(crash_allows_reload(&mut recent, t0), "first crash reloads");
+        assert!(!crash_allows_reload(&mut recent, t0 + Duration::from_secs(20)), "second within a minute shows the error");
+        let mut later = vec![t0];
+        assert!(crash_allows_reload(&mut later, t0 + Duration::from_secs(61)), "an old crash is forgotten");
+        assert_eq!(later.len(), 1);
     }
 
     #[test]

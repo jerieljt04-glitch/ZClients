@@ -904,6 +904,9 @@ pub fn clear_load_error(tab: Uuid) {
 fn load_error_text(kind: web::LoadError, url: Option<&str>) -> (String, String) {
     let host = url.and_then(crate::policy::parse).and_then(|u| u.host_str().map(str::to_string)).unwrap_or_else(|| "the page".into());
     match kind {
+        web::LoadError::Crashed => {
+            ("This page stopped working".into(), format!("{host} closed unexpectedly more than once, so ZClients stopped reloading it. Try Again to load it once more."))
+        }
         web::LoadError::Offline => ("You're offline".into(), format!("ZClients can't reach {host}. Check your internet connection, then try again.")),
         web::LoadError::Certificate => {
             ("This connection isn't private".into(), format!("{host}'s certificate couldn't be verified, so the page was not opened and nothing was sent to it."))
