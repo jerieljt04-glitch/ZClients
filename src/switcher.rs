@@ -7,7 +7,7 @@ use std::cell::{Cell, RefCell};
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject, Sel};
-use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
+use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAccessibility, NSBackingStoreType, NSControl, NSControlTextEditingDelegate, NSPanel, NSScrollView, NSSearchField, NSSearchFieldDelegate, NSTableColumn, NSTableView,
     NSTableViewDataSource, NSTableViewDelegate, NSTableViewStyle, NSTextFieldDelegate, NSTextView, NSView, NSWindowDelegate, NSWindowStyleMask,
