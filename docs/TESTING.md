@@ -5,7 +5,7 @@
 ```sh
 scripts/check.sh          # every CI gate (fmt, clippy, tests, property tests,
                           # audit, deny, universal build, Miri)
-cargo test                # 110 unit / migration / failure-injection / property tests
+cargo test                # 135 unit / migration / failure-injection / property tests
 ./build.sh --test         # "ZClients Test": own bundle id + data, ad-hoc signed
 ```
 
@@ -18,7 +18,13 @@ HOME=$H ZCLIENTS_SELFTEST=security ZCLIENTS_ALERTS=decline ZCLIENTS_MOCK_MEDIA=1
 HOME=$H ZCLIENTS_SELFTEST=a11y ZCLIENTS_ALERTS=decline "$APP"
 HOME=$H ZCLIENTS_SELFTEST=address2 "$APP"
 HOME=$H ZCLIENTS_SELFTEST=downloads ZCLIENTS_ALERTS=accept "$APP"
+HOME=$H ZCLIENTS_SELFTEST=stability ZCLIENTS_ALERTS=decline ZCLIENTS_MOCK_MEDIA=1 "$APP"
+HOME=$H ZCLIENTS_SELFTEST=stability ZCLIENTS_ALERTS=accept ZCLIENTS_MOCK_MEDIA=1 "$APP"   # then: the logged partial file must not exist
 ```
+
+Since 2.0.0, logs also go to the unified log:
+`log show --last 10m --predicate 'subsystem == "com.zport.swift"'` (redacted),
+and the last 300 lines are in Help › Export Diagnostics.
 
 `ZCLIENTS_ALERTS=accept|decline` (test builds only) answers every app
 question with its first / last button and logs it.
@@ -30,6 +36,7 @@ question with its first / last button and logs it.
 | `address2` | Typed address text is dropped on tab switch and never navigates on page click; Esc restores; a Return for a tab no longer in front is dropped; Return on the same tab navigates |
 | `editor` | ⌘A, ⌘Z, ⇧⌘Z and Control-A reach a code editor's own key handler (CodeMirror/Ace/Monaco/hidden-textarea editors such as Zoho's Deluge editor); ⌘A in a plain text box still selects all |
 | `downloads` | PDF popups become tabs with viewer controls; hidden-frame and popup zips download; PDF attachments open as tabs; the PDF viewer's download button saves; every file is quarantined |
+| `stability` (2.0) | U6 closing a tab in a call asks; U1 a newer download leaves an item's key on the same file; S1 quitting with a download and a call asks (decline: both continue; accept: real quit path, partial file deleted); S2 a page whose WebContent process is killed twice shows "This page stopped working" instead of reloading |
 | `meet`, `input`, `find`, `memory`, `perf`, `address`, `prep` | Unchanged from 1.4.0 (see README); `address`, `input`, `find` need System Events keystrokes |
 
 Recovery can be exercised by writing a truncated
@@ -40,7 +47,19 @@ file untouched) or `accept` (Restore: damaged file kept as
 
 ## Manual verification checklist (real app, real accounts)
 
-Run on the test app first; on the real app only after installing 1.5.0.
+Run on the test app first; on the real app only after installing 2.0.0.
+
+**New in 2.0.0**
+- [ ] ⌘Q / red close button during a download → "Quit and cancel 1 download?"; Cancel keeps the window; Quit leaves no partial file in ~/Downloads.
+- [ ] ⌘W on a Meet tab during a call → "Close … and end the call?".
+- [ ] A page `alert()` appears as a sheet titled "<client> — <host>"; a second one within 10 s offers "Don't allow more dialogs from this page".
+- [ ] Customise: email without password → red message under Password, sheet stays open; empty name → "Enter a client name."
+- [ ] ⇧⌘O switcher (type, ↑/↓, ↩, Esc); ⌃⌘↑/↓; ⌥⌘1…9.
+- [ ] EU/IN/UK/AU account: after one page loads, the launcher opens `https://<app>.zoho.<dc>`; a CRM widget on zappsusercontent.<dc> can show `confirm()`.
+- [ ] Microsoft/Okta SSO sign-in completes in a tab.
+- [ ] Turn Wi-Fi off, reload (offline screen), turn it on → the page reloads by itself.
+- [ ] Light ↔ Dark and a new accent colour in System Settings with the app open: tab strip wash, separators, progress line, picker border and sidebar bar all update.
+- [ ] Accessibility › Display › Text size larger: chrome text follows.
 
 **Login / logout / sessions**
 - [ ] Sign in to Zoho in profile A; quit (⌘Q); relaunch → still signed in.
@@ -66,7 +85,7 @@ Run on the test app first; on the real app only after installing 1.5.0.
 - [ ] CRM attachment PDF → downloads and opens as a tab; a .zip → asks once ("Always Allow Archives from This Site" stops further asks).
 - [ ] WorkDrive folder download (slow zip) → asks "wants to download a file" if more than ~10 s passed; "Always Allow for This Site" works.
 - [ ] A .dmg/.pkg/.exe link → always asks.
-- [ ] Downloads menu: progress %, Cancel, Retry, ⌥-click Show in Finder.
+- [ ] Downloads menu: size and % while running, size and "N min ago" when done, Cancel, Retry, Show in Finder; Dock badge while downloading; a notification when one finishes in the background.
 - [ ] Settings › Clear PDF previews: open PDF tabs stay, others removed.
 
 **Deletion**
@@ -92,7 +111,8 @@ Run on the test app first; on the real app only after installing 1.5.0.
 2. VO-U → Window rotor: one window "ZClients".
 3. VO-Right through the toolbar: "Back, button", "Forward", "Reload", "App launcher", "Address and search, text field", "Google Search workspace", "Google Meet for this client", "Downloads", "New tab".
 4. Into "Tabs, tab group": each tab is read as "<title>, tab, selected/…"; a PDF tab adds "PDF", a call adds "camera and microphone on", a sleeping tab "asleep". VO-Space selects. VO-Shift-M opens the tab menu (Move Left/Right, Duplicate, Close).
-5. Sidebar: "Search clients, search text field"; the table reads "<name>, <n> tabs". VO-Shift-M → Customise, Move Up/Down, Delete.
+5. Sidebar: "Search clients, search text field"; the table reads "<name>, <n> tabs". VO-Shift-M → Customise, Move Up/Down, Delete Client.
+5a. ⇧⌘O: "Switch to client, search text field" and a "Clients" table read the same way.
 6. Settings (⌘,): headings are navigable with VO-Command-H.
 
 ## Browser-interaction compatibility matrix

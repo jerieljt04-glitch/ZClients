@@ -12,7 +12,7 @@ scripts/check.sh        # every CI gate: fmt, clippy -D warnings, tests, propert
 ./build.sh --test       # "ZClients Test": separate bundle id and data, ad-hoc signed
 ./build.sh              # test, build universal, sign (local identity), ask, install
 ./build.sh --no-install # build and sign into .build/
-cargo test              # 110 unit, migration, failure-injection and property tests
+cargo test              # 135 unit, migration, failure-injection and property tests
 ```
 
 The version lives only in `Cargo.toml` (`version` + `[package.metadata.zclients]
@@ -50,6 +50,8 @@ Run the test app with its own home so nothing real is touched:
 - `security`, `a11y`, `address2`: the 1.5 hardening, accessibility tree and
   address-bar rules (see `docs/TESTING.md`). `ZCLIENTS_ALERTS=accept|decline`
   answers the app's questions unattended.
+- `stability` (2.0): quit/close confirmations, partial-download cleanup, the
+  crash-loop guard and download-menu keys (see `docs/TESTING.md`).
 - `memory`: with `ZCLIENTS_IDLE_SECS=6`, four tabs are shown once and Memory
   Saver should leave only the front tab awake (measure the WebContent
   processes with `footprint`).
@@ -58,22 +60,26 @@ Run the test app with its own home so nothing real is touched:
 
 | File | What it does |
 |---|---|
-| `main.rs` | App delegate: launch, background, quit |
+| `main.rs` | App delegate: launch, background, quit (asks first during a download or call) |
 | `app.rs` | The hub: profile store, saving, every user command |
-| `model.rs` | Profiles, tabs, sorting; reads/writes the Swift-compatible `clients.json` |
-| `policy.rs` | Which URLs load; one `decide(Capability, Request)` for camera, mic, screen, autofill, bridge, downloads, file chooser, deep links, popups — by exact origin |
+| `model.rs` | Clients, tabs, sorting, each client's data centre; reads/writes the Swift-compatible `clients.json` |
+| `policy.rs` | Which URLs load; one `decide(Capability, Request)` for camera, mic, screen, autofill, bridge, downloads, file chooser, deep links, popups — by exact origin; per-data-centre host lists; SSO identity-provider steps |
 | `settings.rs` | settings.json: per-site download permission, zoom, keyboard choices, developer mode |
 | `pdf.rs` | PDF validation (magic, size, no links) and private per-preview folders |
 | `cleanup.rs` | Profile deletion as a persisted, verified, retryable job |
 | `privacy.rs` | Settings & Privacy window (⌘,) and redacted diagnostics export |
-| `web.rs` | Web views, data stores, sleeping tabs, navigation/UI delegates, popups |
+| `web.rs` | Web views, data stores, sleeping tabs, navigation/UI delegates, page dialogs (sheets), crash guard, popups, network watch |
 | `session.rs` | "Keep me signed in": bounded per-profile retention, logout-aware backups |
 | `keychain.rs` | AES-GCM vault (format 2, bound to app/kind/profile), one Keychain key |
 | `tabstate.rs` | Each tab's exact place (history + scroll) across quits |
 | `scripts.rs` | Isolated-world scripts: right-click downloads, sign-in helper |
-| `downloads.rs` | Downloads to ~/Downloads; PDFs a page opens in a window become tabs |
-| `ui.rs` | Window, sidebar, toolbar, tab strip, launcher, sheets, menus |
-| `suggest.rs` | Address bar: Zoho app names and Google search |
+| `downloads.rs` | Downloads to ~/Downloads (by stable key, with sizes, Dock badge, notification); PDFs a page opens in a window become tabs |
+| `ui.rs` | Window, sidebar, toolbar, tab strip, launcher, sheets, menus, error and empty screens |
+| `theme.rs` | The only source of fonts (AppKit text styles), sizes (4-pt grid), icon weights and colours for the chrome |
+| `switcher.rs` | Switch to Client… (⇧⌘O): searchable list of clients |
+| `picker.rs` | The new-tab page: searchable list of Zoho apps |
+| `suggest.rs` | Address bar: Zoho app names (in the client's data centre) and Google search |
+| `util.rs` | Timers (common run-loop modes), ordered background writes, atomic files, logging (ring buffer + unified log) |
 
 ## Data
 
@@ -89,6 +95,9 @@ Profiles and tabs carry over; the Swift app reads `clients.json` unchanged.
 
 To go back to 1.0.0 (before folder downloads and PDF tabs):
 `rm -rf /Applications/ZClients.app && ditto backup/ZClients-1.0.0.app /Applications/ZClients.app`.
+
+To go back to 1.5.0 after installing 2.0.0 (no data changes; see `docs/MIGRATION.md`):
+`rm -rf /Applications/ZClients.app && ditto backup/ZClients-1.5.0.app /Applications/ZClients.app`.
 
 To go back to 1.4.0 after installing 1.5.0:
 `rm -rf /Applications/ZClients.app && ditto backup/ZClients-1.4.0.app /Applications/ZClients.app`.

@@ -1,4 +1,23 @@
-# Data migration and rollback (1.4.0 → 1.5.0)
+# Data migration and rollback
+
+## 1.5.0 → 2.0.0
+
+2.0.0 changes no data format. The only addition:
+
+| Data | 2.0.0 change | Automatic? | Readable by 1.5.0 afterwards? |
+|---|---|---|---|
+| `clients.json` | New optional per-client field `zohoDataCentre` (e.g. `"zoho.eu"`), learned from the last Zoho *app* page the client loaded (never www.zoho.* or the shared US sign-in page). Absent until learned; `version` stays 4. | Yes | **Yes.** 1.5.0 and the Swift build ignore unknown keys (and drop it if they save; 2.0.0 learns it again on the next app page). Unit test `data_centre_is_learned_saved_and_optional` round-trips the file with the field present and absent. |
+| `settings.json`, vault, session backups, PDF previews, `cleanup.json` | Unchanged | — | Yes |
+
+Rollback to 1.5.0: quit ZClients, then
+`rm -rf /Applications/ZClients.app && ditto backup/ZClients-1.5.0.app /Applications/ZClients.app`.
+Clients, tabs, saved logins (vault format 2) and sign-ins all carry over.
+
+Visible changes that are not data: the Blue swatch is one step darker
+(#2470dd) for readable initials; clients that already use the old blue
+keep it.
+
+## 1.4.0 → 1.5.0
 
 All data lives in `~/Library/Application Support/ZPortSwift/` (the test app:
 `ZPortSwift Test/`). WebKit's per-profile stores
@@ -16,7 +35,8 @@ migrated or touched by the upgrade.
 | `cleanup.json` | New: unfinished profile deletions, retried at launch. | — | Ignored (1.4.0 will not retry them) |
 
 Nothing is migrated while the profile file is unreadable: recovery mode is
-read-only until you choose Restore / Start with No Profiles / Quit.
+read-only until you choose Restore / Start with No Clients / Quit (2.0.0
+wording; 1.5.0 said "Profiles").
 
 ## Rollback to 1.4.0
 
