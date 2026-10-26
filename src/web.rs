@@ -1625,7 +1625,7 @@ pub fn view_for(client_id: Uuid, tab: &Tab) -> Retained<ZWebView> {
     if new_store {
         session::register(store_id, &store, retention);
     }
-    enforce_cap();
+    enforce_cap_keeping(Some(tab.id));
     app::changed(app::TABS);
 
     // Hold the first load until the profile's cookies are back, otherwise the
@@ -1845,6 +1845,20 @@ mod pressure_tests {
     }
 
     #[test]
+    fn a_tab_being_woken_is_never_the_one_put_to_sleep() {
+        let ids: Vec<Uuid> = (0..4).map(|_| Uuid::new_v4()).collect();
+        let (front, calling, new) = (ids[1], ids[2], ids[3]);
+        // Critical pressure (cap 3), every older tab in front or in a call:
+        // nothing else can go, and the new tab stays.
+        let lru = [front, calling, new];
+        assert_eq!(pick_victim(&lru, 3, 2, Some(front), Some(new), |id| id == calling), None);
+        assert_eq!(pick_victim(&lru, 3, 2, Some(front), None, |id| id == calling), Some(new), "without the guard it was evicted");
+        let lru = [ids[0], front, new];
+        assert_eq!(pick_victim(&lru, 3, 2, Some(front), Some(new), |_| false), Some(ids[0]));
+        assert_eq!(pick_victim(&lru, 3, 3, Some(front), Some(new), |_| false), None, "under the cap");
+    }
+
+    #[test]
     fn pressure_lowers_the_awake_tab_count_but_a_warning_keeps_eight() {
         let base = base_live_cap();
         assert!(base >= 10);
@@ -1855,14 +1869,24 @@ mod pressure_tests {
     }
 }
 
+/// Which awake tab goes to sleep when more than `max_live` are awake: the
+/// least recently shown one that is not in front, not in a call and not
+/// `keep` (the tab being woken right now, which must not be put straight
+/// back to sleep when every older tab is in front or in a call).
+fn pick_victim(lru: &[Uuid], live: usize, max_live: usize, active: Option<Uuid>, keep: Option<Uuid>, calling: impl Fn(Uuid) -> bool) -> Option<Uuid> {
+    if live <= max_live {
+        return None;
+    }
+    lru.iter().copied().find(|id| Some(*id) != active && Some(*id) != keep && !calling(*id))
+}
+
 fn enforce_cap() {
+    enforce_cap_keeping(None);
+}
+
+fn enforce_cap_keeping(keep: Option<Uuid>) {
     loop {
-        let victim = POOL.with_borrow(|p| {
-            if p.live.len() <= p.max_live {
-                return None;
-            }
-            p.lru.iter().copied().find(|id| Some(*id) != p.active && !p.live.get(id).is_some_and(|l| in_call(&l.view)))
-        });
+        let victim = POOL.with_borrow(|p| pick_victim(&p.lru, p.live.len(), p.max_live, p.active, keep, |id| p.live.get(&id).is_some_and(|l| in_call(&l.view))));
         match victim {
             Some(id) => sleep_tab(id),
             None => break,
