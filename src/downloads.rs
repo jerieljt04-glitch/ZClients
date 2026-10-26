@@ -608,6 +608,7 @@ pub fn save_from_tab(data: Vec<u8>, suggested: &str, client: Uuid, tab: Option<U
 }
 
 fn save(data: Vec<u8>, suggested: &str, client: Option<Uuid>, tab: Option<Uuid>) -> Option<usize> {
+    let _ = std::fs::create_dir_all(util::downloads_dir());
     let path = unique_path(&util::downloads_dir(), &safe_filename(suggested));
     let name = path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
     let key = own_key();
