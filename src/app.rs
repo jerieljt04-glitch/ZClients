@@ -695,6 +695,7 @@ pub fn start_background_work() {
     std::mem::forget(util::every(45.0, || web::capture_sessions(false)));
     std::mem::forget(util::every(60.0, web::save_all_states));
     web::watch_memory_pressure();
+    web::watch_network(ui::network_restored);
     std::mem::forget(util::every(300.0, web::sleep_idle_tabs));
     util::after(3.0, crate::session::migrate_legacy);
     util::after(2.0, || {

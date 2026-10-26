@@ -1043,6 +1043,21 @@ pub fn show_load_error(tab: Uuid, kind: web::LoadError, failing_url: Option<Stri
     }
 }
 
+/// The network came back: every tab showing "You're offline" tries again
+/// by itself, the way Safari does.
+pub fn network_restored() {
+    let offline: Vec<(Uuid, Option<String>)> =
+        LOAD_ERRORS.with_borrow_mut(|m| m.extract_if(|_, (kind, _)| *kind == web::LoadError::Offline).map(|(tab, (_, url))| (tab, url)).collect());
+    if offline.is_empty() {
+        return;
+    }
+    util::log(format!("retrying {} offline tab(s)", offline.len()));
+    for (tab, url) in offline {
+        web::reload_tab_at(tab, url.as_deref().and_then(crate::policy::parse).as_ref());
+    }
+    refresh(app::CONTENT);
+}
+
 /// A tab closed or went away: its error screen (if any) goes with it.
 pub fn forget_tab(tab: Uuid) {
     LOAD_ERRORS.with_borrow_mut(|m| m.remove(&tab));

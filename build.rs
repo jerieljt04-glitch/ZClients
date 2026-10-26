@@ -23,4 +23,6 @@ fn main() {
     // "Download finished" notifications (UNUserNotificationCenter), called
     // through the Objective-C runtime rather than another binding crate.
     println!("cargo:rustc-link-lib=framework=UserNotifications");
+    // NWPathMonitor (C API): retry offline pages when the network returns.
+    println!("cargo:rustc-link-lib=framework=Network");
 }

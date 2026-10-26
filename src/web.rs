@@ -1989,6 +1989,57 @@ pub fn watch_memory_pressure() {
     }
 }
 
+// Network.framework's path monitor (C API).
+unsafe extern "C" {
+    fn nw_path_monitor_create() -> *mut c_void;
+    fn nw_path_monitor_set_update_handler(monitor: *mut c_void, handler: &block2::DynBlock<dyn Fn(*mut c_void)>);
+    fn nw_path_monitor_set_queue(monitor: *mut c_void, queue: *const c_void);
+    fn nw_path_monitor_start(monitor: *mut c_void);
+    fn nw_path_get_status(path: *mut c_void) -> i32;
+}
+const NW_PATH_STATUS_SATISFIED: i32 = 1;
+
+thread_local! {
+    static ONLINE: Cell<Option<bool>> = const { Cell::new(None) };
+}
+
+/// Call `back_online` on the main thread each time the Mac regains a usable
+/// network connection (not on the first report at launch).
+pub fn watch_network(back_online: fn()) {
+    unsafe {
+        let monitor = nw_path_monitor_create();
+        if monitor.is_null() {
+            return;
+        }
+        let handler = RcBlock::new(move |path: *mut c_void| {
+            let online = nw_path_get_status(path) == NW_PATH_STATUS_SATISFIED;
+            if ONLINE.replace(Some(online)) == Some(false) && online {
+                util::log("network is back");
+                util::later(back_online);
+            }
+        });
+        nw_path_monitor_set_update_handler(monitor, &handler);
+        nw_path_monitor_set_queue(monitor, &_dispatch_main_q);
+        nw_path_monitor_start(monitor);
+        // Lives as long as the app.
+    }
+}
+
+/// Load `url` again in a tab's own web view, if it is awake.
+pub fn reload_tab_at(tab: Uuid, url: Option<&Url>) {
+    let Some(v) = live_view(tab) else { return };
+    unsafe {
+        match url.and_then(|u| util::ns_url(u.as_str())) {
+            Some(u) => {
+                v.loadRequest(&NSURLRequest::requestWithURL(&u));
+            }
+            None => {
+                v.reload();
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod pressure_tests {
     use super::*;
