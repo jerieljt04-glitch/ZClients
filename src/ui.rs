@@ -22,10 +22,7 @@ use uuid::Uuid;
 use crate::model::{self, SortMode};
 use crate::{app, downloads, keychain, theme, util, web};
 
-const SIDEBAR_W: f64 = 250.0;
-const TOP: f64 = 46.0;
-const TAB_H: f64 = 34.0;
-const FIND_H: f64 = 36.0;
+use theme::{FIND_H, SIDEBAR_W, TAB_STRIP_H as TAB_H, TOOLBAR_H as TOP};
 
 const K_ROOT: u8 = 1;
 const K_SIDEBAR: u8 = 2;
@@ -1361,6 +1358,8 @@ struct Ui {
     reload: Retained<NSButton>,
     home: Retained<NSButton>,
     address: Retained<NSTextField>,
+    /// Lock for https, globe for anything else, just before the address.
+    address_icon: Retained<NSImageView>,
     right_buttons: Vec<Retained<NSButton>>,
     downloads_button: Retained<NSButton>,
     tabs: Retained<FlexView>,
@@ -1453,7 +1452,10 @@ pub(crate) fn sym_button(name: &str, tip: &str, action: Sel) -> Retained<NSButto
 pub(crate) fn sym_button_sized(name: &str, tip: &str, action: Sel, icon: theme::Icon) -> Retained<NSButton> {
     let image = theme::symbol(name, icon).unwrap_or_default();
     let b = unsafe { NSButton::buttonWithImage_target_action(&image, Some(&target()), Some(action), mtm()) };
-    b.setBordered(false);
+    // A rounded background appears under the pointer, like toolbar items.
+    b.setBezelStyle(objc2_app_kit::NSBezelStyle::Toolbar);
+    b.setBordered(true);
+    b.setShowsBorderOnlyWhileMouseInside(true);
     b.setToolTip(Some(&util::ns(tip)));
     set_ax_label(&b, tip.split(" (").next().unwrap_or(tip));
     b.setContentTintColor(Some(&NSColor::secondaryLabelColor()));
@@ -1740,6 +1742,11 @@ pub fn build() {
     }
     address.setFont(Some(&theme::font(theme::Text::Body)));
     address.setBezelStyle(objc2_app_kit::NSTextFieldBezelStyle::RoundedBezel);
+    // A 28 pt field with its text centred.
+    address.setControlSize(objc2_app_kit::NSControlSize::Large);
+    let address_icon = NSImageView::imageViewWithImage(&theme::symbol("globe", theme::Icon::Tab).unwrap_or_default(), mtm);
+    address_icon.setContentTintColor(Some(&theme::secondary_text()));
+    address_icon.setHidden(true);
     unsafe { address.setDelegate(Some(ProtocolObject::from_ref(&*actions()))) };
     let search = sym_button("magnifyingglass", "Google Search workspace", sel!(search:));
     let meet = sym_button("video.fill", "Google Meet for this client", sel!(meet:));
@@ -1754,6 +1761,7 @@ pub fn build() {
         toolbar.addSubview(b);
     }
     toolbar.addSubview(&address);
+    toolbar.addSubview(&address_icon);
     for b in [&media_button, &search, &meet, &downloads_button, &plus] {
         toolbar.addSubview(b);
     }
@@ -1830,6 +1838,7 @@ pub fn build() {
         reload,
         home,
         address,
+        address_icon,
         right_buttons: vec![media_button.clone(), search, meet, downloads_button.clone(), plus],
         downloads_button,
         tabs,
@@ -1908,34 +1917,45 @@ fn layout(kind: u8, view: &FlexView) {
             u.content.setFrame(rect(side_w, y + 1.0, mw, b.height - y - 1.0));
         }
         K_SIDEBAR => {
+            use theme::GRID as G;
             u.side.setFrame(u.sidebar.bounds());
-            u.side_title.setFrame(rect(18.0, 44.0, b.width - 60.0, 16.0));
-            u.sort_button.setFrame(rect(b.width - 38.0, 40.0, 24.0, 22.0));
-            u.filter_field.setFrame(rect(10.0, 66.0, b.width - 20.0, 24.0));
-            u.table_scroll.setFrame(rect(0.0, 98.0, b.width, b.height - 98.0 - 40.0));
-            u.count_label.setFrame(rect(16.0, b.height - 28.0, 100.0, 16.0));
-            u.add_button.setFrame(rect(b.width - 116.0, b.height - 33.0, 104.0, 24.0));
+            // Below the traffic lights; everything on the 4-pt grid.
+            u.side_title.setFrame(rect(G * 5.0, G * 11.0, b.width - G * 16.0, 16.0));
+            u.sort_button.setFrame(rect(b.width - G * 3.0 - theme::ICON_BUTTON, G * 10.0, theme::ICON_BUTTON, G * 6.0));
+            u.filter_field.setFrame(rect(G * 3.0, G * 17.0, b.width - G * 6.0, theme::FIELD_H));
+            let list_top = G * 25.0;
+            u.table_scroll.setFrame(rect(0.0, list_top, b.width, b.height - list_top - G * 10.0));
+            u.count_label.setFrame(rect(G * 4.0, b.height - G * 7.0, 100.0, 16.0));
+            u.add_button.setFrame(rect(b.width - 116.0, b.height - G * 8.0 - 1.0, 104.0, G * 6.0));
         }
         K_TOOLBAR => {
+            use theme::{GRID as G, ICON_BUTTON as BTN, TOOLBAR_GAP as GAP};
+            let y = (TOP - BTN) / 2.0;
             // Leave room for the traffic lights when the sidebar is hidden.
-            let mut x = if u.sidebar_visible.get() { 10.0 } else { 84.0 };
+            let mut x = if u.sidebar_visible.get() { G * 3.0 } else { G * 21.0 };
             if let Some(chip) = u.chip.borrow().as_ref() {
                 let w = chip.frame().size.width;
-                chip.setFrame(rect(x, 9.0, w, 28.0));
-                x += w + 8.0;
+                chip.setFrame(rect(x, y, w, BTN));
+                x += w + GAP;
             }
             for btn in [&u.back, &u.forward, &u.reload, &u.home] {
-                btn.setFrame(rect(x, 9.0, 28.0, 28.0));
-                x += 30.0;
+                btn.setFrame(rect(x, y, BTN, BTN));
+                x += BTN + G;
             }
+            x += GAP - G;
             let shown: Vec<&Retained<NSButton>> = u.right_buttons.iter().filter(|b| !b.isHidden()).collect();
-            let right_w = shown.len() as f64 * 32.0 + 8.0;
-            let addr_w = (b.width - x - right_w - 12.0).max(120.0);
-            u.address.setFrame(rect(x + 6.0, 11.0, addr_w, 24.0));
-            let mut rx = x + 6.0 + addr_w + 10.0;
+            let right_w = shown.len() as f64 * (BTN + G) - G + GAP * 2.0;
+            let addr_w = (b.width - x - right_w).max(120.0);
+            let ay = (TOP - theme::ADDRESS_H) / 2.0;
+            // The lock (https) or globe sits just before the field.
+            u.address_icon.setFrame(rect(x, ay + (theme::ADDRESS_H - 16.0) / 2.0, 16.0, 16.0));
+            let fx = x + 16.0 + G;
+            let addr_w = (addr_w - 16.0 - G).max(120.0);
+            u.address.setFrame(rect(fx, ay, addr_w, theme::ADDRESS_H));
+            let mut rx = fx + addr_w + GAP;
             for btn in shown {
-                btn.setFrame(rect(rx, 9.0, 28.0, 28.0));
-                rx += 32.0;
+                btn.setFrame(rect(rx, y, BTN, BTN));
+                rx += BTN + G;
             }
         }
         K_TABS => {
@@ -1950,7 +1970,7 @@ fn layout(kind: u8, view: &FlexView) {
                 let visible = i >= start && i < start + count;
                 c.setHidden(!visible);
                 if visible {
-                    c.setFrame(rect(x, 3.0, w - 4.0, TAB_H - 6.0));
+                    c.setFrame(rect(x, theme::GRID - 1.0, w - theme::GRID, TAB_H - theme::GRID * 2.0 + 2.0));
                     layout_chip(c);
                     x += w;
                 }
@@ -2483,7 +2503,15 @@ fn refresh_toolbar() {
         }
         if u.address.currentEditor().is_none() {
             let shown = if url.starts_with("file:") { String::new() } else { url };
+            let glyph = address_glyph(&shown);
+            u.address_icon.setHidden(glyph.is_none());
+            if let Some((name, tip)) = glyph {
+                u.address_icon.setImage(theme::symbol(name, theme::Icon::Tab).as_deref());
+                u.address_icon.setToolTip(Some(&util::ns(tip)));
+            }
             u.address.setStringValue(&util::ns(&shown));
+        } else {
+            u.address_icon.setHidden(true);
         }
         // The Dock icon shows how many files are downloading, like Safari.
         let dock = NSApplication::sharedApplication(mtm()).dockTile();
@@ -2498,6 +2526,18 @@ fn refresh_toolbar() {
         }
         u.toolbar.setNeedsLayout(true);
     });
+}
+
+/// The glyph inside the address field: a lock for an https page, a globe
+/// for anything else, none for an empty field.
+pub fn address_glyph(url: &str) -> Option<(&'static str, &'static str)> {
+    if url.is_empty() {
+        None
+    } else if url.starts_with("https:") {
+        Some(("lock.fill", "Secure connection (https)"))
+    } else {
+        Some(("globe", "Not a secure (https) address"))
+    }
 }
 
 /// Grow the progress line while the page in front loads (never less than a
@@ -3286,6 +3326,13 @@ fn build_menu() {
 mod tests {
     use super::*;
     use crate::web::LoadError as E;
+
+    #[test]
+    fn the_address_bar_says_whether_the_page_is_https() {
+        assert_eq!(address_glyph("https://crm.zoho.com/").map(|g| g.0), Some("lock.fill"));
+        assert_eq!(address_glyph("http://example.com/").map(|g| g.0), Some("globe"));
+        assert_eq!(address_glyph(""), None);
+    }
 
     #[test]
     fn menu_commands_are_enabled_only_when_they_can_act() {
