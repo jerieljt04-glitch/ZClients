@@ -5,7 +5,7 @@
 ```sh
 scripts/check.sh          # every CI gate (fmt, clippy, tests, property tests,
                           # audit, deny, universal build, Miri)
-cargo test                # 136 unit / migration / failure-injection / property tests
+cargo test                # 137 unit / migration / failure-injection / property tests
 ./build.sh --test         # "ZClients Test": own bundle id + data, ad-hoc signed
 ```
 
@@ -57,6 +57,7 @@ Run on the test app first; on the real app only after installing 2.0.0.
 - [ ] A page `alert()` appears as a sheet titled "<client> — <host>"; a second one within 10 s offers "Don't allow more dialogs from this page".
 - [ ] Customise: email without password → red message under Password, sheet stays open; empty name → "Enter a client name."
 - [ ] ⇧⌘O switcher (type, ↑/↓, ↩, Esc); ⌃⌘↑/↓; ⌥⌘1…9.
+- [ ] (2.2) The sidebar button at the top left, before the client name, hides the client list and shows it again (same as ⌃S); with the list hidden it sits just right of the window buttons.
 - [ ] EU/IN/UK/AU account: after one page loads, the launcher opens `https://<app>.zoho.<dc>`; a CRM widget on zappsusercontent.<dc> can show `confirm()`.
 - [ ] Microsoft/Okta SSO sign-in completes in a tab.
 - [ ] Turn Wi-Fi off, reload (offline screen), turn it on → the page reloads by itself.
@@ -112,7 +113,7 @@ Run on the test app first; on the real app only after installing 2.0.0.
 
 1. ⌘F5 to start VoiceOver; ⌘Tab to ZClients.
 2. VO-U → Window rotor: one window "ZClients".
-3. VO-Right through the toolbar: "Back, button", "Forward", "Reload", "App launcher", "Address and search, text field", "Google Search workspace", "Google Meet for this client", "Downloads", "New tab".
+3. VO-Right through the toolbar: "Hide Clients, button" (or "Show Clients" when the sidebar is hidden), "Back, button", "Forward", "Reload", "App launcher", "Address and search, text field", "Google Search workspace", "Google Meet for this client", "Downloads", "New tab".
 4. Into "Tabs, tab group": each tab is read as "<title>, tab, selected/…"; a PDF tab adds "PDF", a call adds "camera and microphone on", a sleeping tab "asleep". VO-Space selects. VO-Shift-M opens the tab menu (Move Left/Right, Duplicate, Close).
 5. Sidebar: "Search clients, search text field"; the table reads "<name>, <n> tabs". VO-Shift-M → Customise, Move Up/Down, Delete Client.
 5a. ⇧⌘O: "Switch to client, search text field" and a "Clients" table read the same way.

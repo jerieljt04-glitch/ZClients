@@ -12,7 +12,7 @@ scripts/check.sh        # every CI gate: fmt, clippy -D warnings, tests, propert
 ./build.sh --test       # "ZClients Test": separate bundle id and data, ad-hoc signed
 ./build.sh              # test, build universal, sign (local identity), ask, install
 ./build.sh --no-install # build and sign into .build/
-cargo test              # 136 unit, migration, failure-injection and property tests
+cargo test              # 137 unit, migration, failure-injection and property tests
 ```
 
 The version lives only in `Cargo.toml` (`version` + `[package.metadata.zclients]

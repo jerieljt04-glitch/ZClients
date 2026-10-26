@@ -1380,6 +1380,9 @@ struct Ui {
     toolbar: Retained<FlexView>,
     chip: RefCell<Option<Retained<Tile>>>,
     chip_key: RefCell<String>,
+    /// Shows or hides the client list; first in the toolbar, before the
+    /// client's name.
+    sidebar_button: Retained<NSButton>,
     back: Retained<NSButton>,
     forward: Retained<NSButton>,
     reload: Retained<NSButton>,
@@ -1753,6 +1756,8 @@ pub fn build() {
 
     // ---- toolbar ----
     let toolbar = flex(K_TOOLBAR);
+    let sidebar_button = sym_button("sidebar.left", "Hide Clients (⌃S)", sel!(zcToggleSidebar:));
+    toolbar.addSubview(&sidebar_button);
     let back = sym_button("chevron.left", "Back (⌘[)", sel!(back:));
     let forward = sym_button("chevron.right", "Forward (⌘])", sel!(forward:));
     let reload = sym_button("arrow.clockwise", "Reload (⌘R)", sel!(reloadOrStop:));
@@ -1870,6 +1875,7 @@ pub fn build() {
         toolbar,
         chip: RefCell::new(None),
         chip_key: RefCell::new(String::new()),
+        sidebar_button,
         back,
         forward,
         reload,
@@ -1970,6 +1976,8 @@ fn layout(kind: u8, view: &FlexView) {
             let y = (TOP - BTN) / 2.0;
             // Leave room for the traffic lights when the sidebar is hidden.
             let mut x = if u.sidebar_visible.get() { G * 3.0 } else { G * 21.0 };
+            u.sidebar_button.setFrame(rect(x, y, BTN, BTN));
+            x += BTN + G;
             if let Some(chip) = u.chip.borrow().as_ref() {
                 let w = chip.frame().size.width;
                 chip.setFrame(rect(x, y, w, BTN));
@@ -2767,9 +2775,17 @@ pub fn focus_new_tab_soon() {
     util::after(0.08, || if crate::picker::is_showing() { crate::picker::focus() } else { focus_address() });
 }
 
+/// What the sidebar button says it will do, for its tooltip and VoiceOver.
+pub fn sidebar_button_label(visible: bool) -> &'static str {
+    if visible { "Hide Clients (⌃S)" } else { "Show Clients (⌃S)" }
+}
+
 fn toggle_sidebar() {
     with_ui(|u| {
         u.sidebar_visible.set(!u.sidebar_visible.get());
+        let tip = sidebar_button_label(u.sidebar_visible.get());
+        u.sidebar_button.setToolTip(Some(&util::ns(tip)));
+        set_ax_label(&u.sidebar_button, tip.split(" (").next().unwrap_or(tip));
         u.root.setNeedsLayout(true);
         u.toolbar.setNeedsLayout(true);
     });
@@ -3382,6 +3398,12 @@ fn build_menu() {
 mod tests {
     use super::*;
     use crate::web::LoadError as E;
+
+    #[test]
+    fn the_sidebar_button_says_what_it_will_do() {
+        assert_eq!(sidebar_button_label(true), "Hide Clients (⌃S)");
+        assert_eq!(sidebar_button_label(false), "Show Clients (⌃S)");
+    }
 
     #[test]
     fn the_address_bar_says_whether_the_page_is_https() {
