@@ -41,6 +41,12 @@ pub struct Item {
 }
 
 impl Item {
+    /// Stable for the item's whole life, unlike its place in the list
+    /// (new downloads go to the top). Menus refer to items by this.
+    pub fn key(&self) -> usize {
+        self.key
+    }
+
     fn new(key: usize, name: String, path: Option<PathBuf>, state: State, client: Option<Uuid>) -> Self {
         Item { key, name, path, state, note: None, mime: None, client, source_url: None, tab: None }
     }
@@ -105,14 +111,21 @@ thread_local! {
     static LIVE: RefCell<HashMap<usize, Retained<WKDownload>>> = RefCell::new(HashMap::new());
 }
 
+/// The item with this key, if it is still listed.
+fn find<R>(key: usize, f: impl FnOnce(&Item) -> R) -> Option<R> {
+    ITEMS.with_borrow(|v| v.iter().find(|i| i.key == key).map(f))
+}
+
 /// Fraction done (0..1) of a download still running, when known.
-pub fn progress(index: usize) -> Option<f64> {
-    let key = ITEMS.with_borrow(|v| v.get(index).filter(|i| i.state == State::Downloading).map(|i| i.key))?;
+pub fn progress(key: usize) -> Option<f64> {
+    find(key, |i| i.state == State::Downloading).filter(|d| *d)?;
     LIVE.with_borrow(|m| m.get(&key).map(|d| d.progress().fractionCompleted()))
 }
 
-pub fn cancel(index: usize) {
-    let Some(key) = ITEMS.with_borrow(|v| v.get(index).map(|i| i.key)) else { return };
+pub fn cancel(key: usize) {
+    if find(key, |i| i.state == State::Downloading) != Some(true) {
+        return;
+    }
     if let Some(d) = LIVE.with_borrow_mut(|m| m.remove(&key)) {
         unsafe { d.cancel(None) };
     }
@@ -123,8 +136,18 @@ pub fn cancel(index: usize) {
 }
 
 /// The address to download again, for Retry.
-pub fn retry_url(index: usize) -> Option<(Option<Uuid>, String)> {
-    ITEMS.with_borrow(|v| v.get(index).filter(|i| i.state == State::Failed).and_then(|i| Some((i.client, i.source_url.clone()?))))
+pub fn retry_url(key: usize) -> Option<(Option<Uuid>, String)> {
+    find(key, |i| (i.state == State::Failed).then(|| Some((i.client, i.source_url.clone()?)))).flatten().flatten()
+}
+
+/// Where the item's file is (or will be).
+pub fn path_of(key: usize) -> Option<PathBuf> {
+    find(key, |i| i.path.clone()).flatten()
+}
+
+/// Explain on the item why an action could not be done.
+pub fn set_note(key: usize, note: &str) {
+    update(key, |i| i.note = Some(note.to_string()));
 }
 
 /// A download that becomes a PDF tab of `client` when it finishes.
@@ -418,11 +441,10 @@ pub fn pdf_name(suggested: &str) -> String {
     }
 }
 
-/// Show the PDF at `index` in the downloads list as a tab. False when it
-/// is not a finished PDF, so the caller opens it some other way.
-pub fn show_pdf(index: usize) -> bool {
-    let key = ITEMS.with_borrow(|v| v.get(index).map(|i| i.key));
-    key.is_some_and(|k| show_pdf_where(|i| i.key == k))
+/// Show the listed PDF with this key as a tab. False when it is not a
+/// finished PDF, so the caller opens it some other way.
+pub fn show_pdf(key: usize) -> bool {
+    show_pdf_where(|i| i.key == key)
 }
 
 fn show_pdf_where(find: impl Fn(&Item) -> bool) -> bool {
@@ -632,6 +654,24 @@ mod tests {
         assert!(ensure_quarantined(&f));
         assert!(!quarantine(&dir.join("missing")), "a failure is reported, not ignored");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn menu_actions_follow_the_item_not_its_place_in_the_list() {
+        ITEMS.with_borrow_mut(|v| v.clear());
+        let mut failed = Item::new(own_key(), "Report.pdf".into(), None, State::Failed, None);
+        failed.source_url = Some("https://crm.zoho.com/report.pdf".into());
+        let report = failed.key();
+        ITEMS.with_borrow_mut(|v| v.insert(0, failed));
+        // The menu was built here (Report.pdf at index 0); then a new
+        // download arrives at the top before the user clicks Retry.
+        ITEMS.with_borrow_mut(|v| v.insert(0, Item::new(own_key(), "Other.zip".into(), None, State::Failed, None)));
+        assert_eq!(retry_url(report).map(|(_, u)| u).as_deref(), Some("https://crm.zoho.com/report.pdf"));
+        assert!(path_of(report).is_none());
+        let other = ITEMS.with_borrow(|v| v[0].key());
+        assert!(retry_url(other).is_none(), "the new item has nothing to retry");
+        assert!(retry_url(12345).is_none(), "a key no longer listed does nothing");
+        ITEMS.with_borrow_mut(|v| v.clear());
     }
 
     #[test]

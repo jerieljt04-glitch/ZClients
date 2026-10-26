@@ -519,26 +519,30 @@ define_class!(
             unsafe { menu.setAutoenablesItems(false) };
             let mut any = false;
             downloads::with_items(|items| {
-                for (i, item) in items.iter().enumerate() {
+                for item in items {
                     any = true;
+                    // Tagged with the item's key, never its index: a download
+                    // that starts while the menu is open would shift every
+                    // index and the click would hit another file.
+                    let i = item.key() as isize;
                     let mark = match item.state {
                         downloads::State::Done => "✓".to_string(),
-                        downloads::State::Downloading => match downloads::progress(i) {
+                        downloads::State::Downloading => match downloads::progress(item.key()) {
                             Some(f) if f > 0.0 => format!("↓ {:.0}%", f * 100.0),
                             _ => "↓".into(),
                         },
                         downloads::State::Failed => "⚠︎".into(),
                     };
                     let note = item.note.as_deref().map(|n| format!(" — {n}")).unwrap_or_default();
-                    let open = add_item(&menu, &format!("{mark}  {}{note}", item.name), sel!(downloadItem:), "", i as isize);
+                    let open = add_item(&menu, &format!("{mark}  {}{note}", item.name), sel!(downloadItem:), "", i);
                     open.setEnabled(item.state == downloads::State::Done);
                     if item.state == downloads::State::Downloading {
-                        add_item(&menu, &format!("    Cancel “{}”", item.name), sel!(cancelDownload:), "", i as isize);
+                        add_item(&menu, &format!("    Cancel “{}”", item.name), sel!(cancelDownload:), "", i);
                     }
-                    if downloads::retry_url(i).is_some() {
-                        add_item(&menu, &format!("    Retry “{}”", item.name), sel!(retryDownload:), "", i as isize);
+                    if item.state == downloads::State::Failed && downloads::retry_url(item.key()).is_some() {
+                        add_item(&menu, &format!("    Retry “{}”", item.name), sel!(retryDownload:), "", i);
                     }
-                    let reveal = add_item(&menu, &format!("Show “{}” in Finder", item.name), sel!(revealDownload:), "", i as isize);
+                    let reveal = add_item(&menu, &format!("Show “{}” in Finder", item.name), sel!(revealDownload:), "", i);
                     reveal.setKeyEquivalentModifierMask(NSEventModifierFlags::Option);
                     reveal.setAlternate(true);
                     reveal.setEnabled(item.path.is_some() && item.state != downloads::State::Failed);
@@ -680,20 +684,20 @@ define_class!(
 
         #[unsafe(method(downloadItem:))]
         fn a_download_item(&self, s: Option<&NSMenuItem>) {
-            let Some(i) = s.map(|s| s.tag() as usize) else { return };
+            let Some(key) = s.map(|s| s.tag() as usize) else { return };
             // PDFs open as a tab here, never in Preview.
-            if downloads::show_pdf(i) {
+            if downloads::show_pdf(key) {
                 return;
             }
-            if let Some(path) = downloads::with_items(|v| v.get(i).and_then(|it| it.path.clone())) {
+            if let Some(path) = downloads::path_of(key) {
                 NSWorkspace::sharedWorkspace().openURL(&NSURL::fileURLWithPath(&util::ns(&path.to_string_lossy())));
             }
         }
 
         #[unsafe(method(revealDownload:))]
         fn a_reveal(&self, s: Option<&NSMenuItem>) {
-            let Some(i) = s.map(|s| s.tag() as usize) else { return };
-            if let Some(path) = downloads::with_items(|v| v.get(i).and_then(|it| it.path.clone())) {
+            let Some(key) = s.map(|s| s.tag() as usize) else { return };
+            if let Some(path) = downloads::path_of(key) {
                 let url = NSURL::fileURLWithPath(&util::ns(&path.to_string_lossy()));
                 NSWorkspace::sharedWorkspace().activateFileViewerSelectingURLs(&NSArray::from_retained_slice(&[url]));
             }
