@@ -1212,6 +1212,11 @@ struct Ui {
     find_status: Retained<NSTextField>,
     find_done: Retained<NSButton>,
     separator: Retained<NSView>,
+    /// The 2 pt accent line that grows while the page in front loads.
+    progress: Retained<NSView>,
+    /// How far along that line is (0..1), and whether it is showing.
+    progress_value: Cell<f64>,
+    progress_fading: Cell<bool>,
     content: Retained<NSView>,
     launcher: RefCell<Option<(Uuid, Retained<NSView>)>>,
     sidebar_visible: Cell<bool>,
@@ -1527,6 +1532,11 @@ pub fn build() {
 
     let content = NSView::initWithFrame(NSView::alloc(mtm), rect(0.0, 0.0, 800.0, 600.0));
     root.addSubview(&content);
+    let progress = NSView::initWithFrame(NSView::alloc(mtm), rect(0.0, 0.0, 0.0, theme::PROGRESS_H));
+    set_layer_color(&progress, &NSColor::controlAccentColor(), 1.0);
+    progress.setAlphaValue(0.0);
+    progress.setAccessibilityElement(false);
+    root.addSubview(&progress);
 
     let ui = Ui {
         window: window.clone(),
@@ -1560,6 +1570,9 @@ pub fn build() {
         find_status,
         find_done,
         separator,
+        progress,
+        progress_value: Cell::new(0.0),
+        progress_fading: Cell::new(false),
         content,
         launcher: RefCell::new(None),
         sidebar_visible: Cell::new(true),
@@ -1616,6 +1629,7 @@ fn layout(kind: u8, view: &FlexView) {
                 y += FIND_H;
             }
             u.separator.setFrame(rect(side_w, y, mw, 1.0));
+            u.progress.setFrame(rect(side_w, y - theme::PROGRESS_H + 1.0, mw * u.progress_value.get(), theme::PROGRESS_H));
             u.content.setFrame(rect(side_w, y + 1.0, mw, b.height - y - 1.0));
         }
         K_SIDEBAR => {
@@ -2022,6 +2036,7 @@ fn refresh_toolbar() {
             (None, Some(i)) => (false, false, false, i.6.clone().unwrap_or_default()),
             _ => (false, false, false, String::new()),
         };
+        show_progress(u, loading, page.as_ref().map_or(0.0, |p| p.progress));
         u.back.setEnabled(can_back);
         u.forward.setEnabled(can_fwd);
         if let Some(img) = symbol(if loading { "xmark" } else { "arrow.clockwise" }) {
@@ -2054,6 +2069,37 @@ fn refresh_toolbar() {
         }
         u.toolbar.setNeedsLayout(true);
     });
+}
+
+/// Grow the progress line while the page in front loads (never less than a
+/// sliver, so a slow first byte still shows something), then fill it and
+/// fade it out.
+fn show_progress(u: &Ui, loading: bool, fraction: f64) {
+    let showing = u.progress.alphaValue() > 0.0;
+    if loading {
+        u.progress_fading.set(false);
+        u.progress_value.set(fraction.clamp(0.08, 1.0));
+        u.progress.setAlphaValue(1.0);
+    } else if showing && !u.progress_fading.replace(true) {
+        u.progress_value.set(1.0);
+        let line = u.progress.clone();
+        // Seen full for a moment, then gone; reset once invisible.
+        util::after(0.25, move || {
+            let animator: Retained<NSView> = unsafe { msg_send![&*line, animator] };
+            animator.setAlphaValue(0.0);
+        });
+        util::after(0.6, || {
+            with_ui(|u| {
+                if u.progress_fading.get() {
+                    u.progress.setAlphaValue(0.0);
+                    u.progress_value.set(0.0);
+                    u.progress_fading.set(false);
+                    u.root.setNeedsLayout(true);
+                }
+            });
+        });
+    }
+    u.root.setNeedsLayout(true);
 }
 
 // ---------------------------------------------------------------------------

@@ -421,12 +421,8 @@ pub fn request_close_tab(client: Uuid, tab: Uuid) {
     if let Some((camera, _)) = web::call_state(tab) {
         let title = store(|s| s.find_tab(tab).map(|t| t.display_title())).unwrap_or_default();
         let what = if camera { "camera and microphone" } else { "microphone" };
-        let (choice, _) = web::run_alert(
-            &format!("Close “{title}” and end the call?"),
-            &format!("This tab is using the {what}. Closing it hangs up for you."),
-            &["Close Tab", "Cancel"],
-            None,
-        );
+        let (choice, _) =
+            web::run_alert(&format!("Close “{title}” and end the call?"), &format!("This tab is using the {what}. Closing it hangs up for you."), &["Close Tab", "Cancel"], None);
         if choice != 0 {
             return;
         }

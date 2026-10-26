@@ -62,7 +62,7 @@ pub fn recent_gesture(within: Duration) -> bool {
     LAST_INPUT.get().is_some_and(|t| t.elapsed() < within)
 }
 
-const KVO_KEYS: &[&str] = &["title", "URL", "canGoBack", "canGoForward", "loading", "cameraCaptureState", "microphoneCaptureState"];
+const KVO_KEYS: &[&str] = &["title", "URL", "canGoBack", "canGoForward", "loading", "estimatedProgress", "cameraCaptureState", "microphoneCaptureState"];
 
 /// What WebKit appends to its own standard user agent: exactly what Safari
 /// on this Mac appends ("Version/<installed Safari> Safari/605.1.15"), so
@@ -2232,6 +2232,8 @@ pub struct PageState {
     pub can_back: bool,
     pub can_forward: bool,
     pub loading: bool,
+    /// WebKit's estimate of how much of the page has loaded (0..1).
+    pub progress: f64,
 }
 
 pub fn page_state(id: Uuid) -> Option<PageState> {
@@ -2243,6 +2245,7 @@ pub fn page_state(id: Uuid) -> Option<PageState> {
             can_back: v.canGoBack(),
             can_forward: v.canGoForward(),
             loading: v.isLoading(),
+            progress: v.estimatedProgress(),
         })
     }
 }
