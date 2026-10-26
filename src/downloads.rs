@@ -346,6 +346,7 @@ define_class!(
                     // Asked on the next turn: never inside WebKit's callback.
                     util::later(move || {
                         let from = origin.clone().unwrap_or_else(|| "a page".into());
+                        let who = client.map(crate::web::profile_name).map(|p| format!("{p} — ")).unwrap_or_default();
                         let mut buttons = vec!["Download"];
                         // Archives (WorkDrive folders are zips) can be allowed
                         // for a whole site; programs and scripts always ask.
@@ -354,7 +355,7 @@ define_class!(
                         }
                         buttons.push("Cancel");
                         let (choice, _) = crate::web::run_alert(
-                            &format!("Download “{name}”?"),
+                            &format!("{who}Download “{name}”?"),
                             &format!("This file is {} from {from}. Only open it if you trust where it came from.", risk.describe()),
                             &buttons,
                             None,

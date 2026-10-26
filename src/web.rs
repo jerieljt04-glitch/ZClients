@@ -742,7 +742,7 @@ define_class!(
                 Decision::Allow => (true, "allowed"),
                 Decision::Prompt => {
                     let who = request.origin.as_ref().map(Origin::display).unwrap_or_default();
-                    (confirm(&format!("Allow {who} to share your screen?"), "macOS will then ask which screen or window to share.", "Choose What to Share"), "asked")
+                    (confirm(&format!("{} — allow {who} to share your screen?", profile_name(self.ivars().client_id)), "macOS will then ask which screen or window to share.", "Choose What to Share"), "asked")
                 }
                 Decision::Deny => (false, "denied"),
             };
@@ -997,7 +997,7 @@ fn apply_saved_zoom(web: &WKWebView, client: Uuid, url: &Url) {
 /// A page wants to download a file without (or outside) a recent click,
 /// or from a page the app does not show. Asks, honouring the per-site
 /// choice. `decision` comes from `policy::decide(Capability::Download, ..)`.
-fn download_consent(decision: Decision, origin: Option<&Origin>) -> bool {
+fn download_consent(client: Uuid, decision: Decision, origin: Option<&Origin>) -> bool {
     let key = origin.map(Origin::display).unwrap_or_default();
     match decision {
         Decision::Allow => true,
@@ -1011,7 +1011,7 @@ fn download_consent(decision: Decision, origin: Option<&Origin>) -> bool {
             settings::SitePermission::Ask => {
                 let who = if key.is_empty() { "A page".to_string() } else { key.clone() };
                 let (button, _) = run_alert(
-                    &format!("{who} wants to download a file"),
+                    &format!("{} — {who} wants to download a file", profile_name(client)),
                     "It started without a recent click in the page. Downloads are saved to your Downloads folder.",
                     &["Download", "Always Allow for This Site", "Cancel"],
                     None,
@@ -1276,7 +1276,7 @@ impl Coordinator {
 
         if unsafe { action.shouldPerformDownload() } && policy::is_safe_download(&url, iv.workspace) {
             let r = source_request();
-            return if download_consent(policy::decide(Capability::Download, &r), r.origin.as_ref()) {
+            return if download_consent(iv.client_id, policy::decide(Capability::Download, &r), r.origin.as_ref()) {
                 WKNavigationActionPolicy::Download
             } else {
                 WKNavigationActionPolicy::Cancel
@@ -1292,7 +1292,7 @@ impl Coordinator {
                 Decision::Allow => true,
                 Decision::Prompt => {
                     let who = r.origin.as_ref().map(Origin::display).unwrap_or_else(|| "A page".into());
-                    confirm(&format!("Open {}?", scheme_app_name(url.scheme())), &format!("{who} wants to open a {}: link.", url.scheme()), "Open")
+                    confirm(&format!("{} — open {}?", profile_name(iv.client_id), scheme_app_name(url.scheme())), &format!("{who} wants to open a {}: link.", url.scheme()), "Open")
                 }
                 Decision::Deny => false,
             };
@@ -1371,7 +1371,7 @@ impl Coordinator {
                 return WKNavigationResponsePolicy::Cancel;
             }
             let r = self.download_request(web, file_url.as_ref());
-            return if download_consent(policy::decide(Capability::Download, &r), r.origin.as_ref()) {
+            return if download_consent(iv.client_id, policy::decide(Capability::Download, &r), r.origin.as_ref()) {
                 WKNavigationResponsePolicy::Download
             } else {
                 WKNavigationResponsePolicy::Cancel
@@ -1385,7 +1385,7 @@ impl Coordinator {
 
         if is_file {
             let r = self.download_request(web, url.as_ref());
-            return if download_consent(policy::decide(Capability::Download, &r), r.origin.as_ref()) {
+            return if download_consent(iv.client_id, policy::decide(Capability::Download, &r), r.origin.as_ref()) {
                 WKNavigationResponsePolicy::Download
             } else {
                 WKNavigationResponsePolicy::Cancel
@@ -1412,7 +1412,7 @@ impl Coordinator {
         }
         if mime.starts_with("image/") || mime.starts_with("video/") || mime.starts_with("audio/") {
             let r = self.download_request(web, url.as_ref());
-            return if download_consent(policy::decide(Capability::Download, &r), r.origin.as_ref()) {
+            return if download_consent(iv.client_id, policy::decide(Capability::Download, &r), r.origin.as_ref()) {
                 WKNavigationResponsePolicy::Download
             } else {
                 WKNavigationResponsePolicy::Cancel
@@ -1453,7 +1453,7 @@ impl Coordinator {
                 Decision::Allow => true,
                 Decision::Prompt if source_trusted => {
                     let who = source_request.origin.as_ref().map(Origin::display).unwrap_or_default();
-                    confirm(&format!("{who} wants to open {what}"), "It was not opened by a click in the page.", "Allow")
+                    confirm(&format!("{} — {who} wants to open {what}", profile_name(iv.client_id)), "It was not opened by a click in the page.", "Allow")
                 }
                 _ => false,
             }
@@ -1461,7 +1461,7 @@ impl Coordinator {
 
         if let Some(u) = &url {
             if unsafe { action.shouldPerformDownload() } && source_trusted && policy::is_safe_download(u, iv.workspace) {
-                if !download_consent(policy::decide(Capability::Download, &source_request), source_request.origin.as_ref()) {
+                if !download_consent(iv.client_id, policy::decide(Capability::Download, &source_request), source_request.origin.as_ref()) {
                     return None;
                 }
                 // The page's own request, so a POSTed download keeps its body.
