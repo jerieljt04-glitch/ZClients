@@ -518,34 +518,41 @@ define_class!(
             let menu = NSMenu::new(mtm());
             unsafe { menu.setAutoenablesItems(false) };
             let mut any = false;
+            let now = std::time::SystemTime::now();
             downloads::with_items(|items| {
                 for item in items {
+                    if any {
+                        menu.addItem(&NSMenuItem::separatorItem(mtm()));
+                    }
                     any = true;
                     // Tagged with the item's key, never its index: a download
                     // that starts while the menu is open would shift every
                     // index and the click would hit another file.
                     let i = item.key() as isize;
                     let mark = match item.state {
-                        downloads::State::Done => "✓".to_string(),
-                        downloads::State::Downloading => match downloads::progress(item.key()) {
-                            Some(f) if f > 0.0 => format!("↓ {:.0}%", f * 100.0),
-                            _ => "↓".into(),
-                        },
-                        downloads::State::Failed => "⚠︎".into(),
+                        downloads::State::Done => "✓",
+                        downloads::State::Downloading => "↓",
+                        downloads::State::Failed => "⚠︎",
                     };
-                    let note = item.note.as_deref().map(|n| format!(" — {n}")).unwrap_or_default();
-                    let open = add_item(&menu, &format!("{mark}  {}{note}", item.name), sel!(downloadItem:), "", i);
+                    let open = add_item(&menu, &format!("{mark}  {}", item.name), sel!(downloadItem:), "", i);
                     open.setEnabled(item.state == downloads::State::Done);
+                    // Size, percentage and when it finished, on a quieter
+                    // line under the name.
+                    let detail = downloads::status_line(item, now);
+                    if !detail.is_empty() {
+                        let d = add_item(&menu, &format!("      {detail}"), sel!(noop:), "", 0);
+                        d.setEnabled(false);
+                        d.setAttributedTitle(Some(&attributed(&format!("      {detail}"), &theme::digits(theme::Text::Footnote), &theme::secondary_text())));
+                    }
                     if item.state == downloads::State::Downloading {
-                        add_item(&menu, &format!("    Cancel “{}”", item.name), sel!(cancelDownload:), "", i);
+                        add_item(&menu, "      Cancel", sel!(cancelDownload:), "", i);
                     }
                     if item.state == downloads::State::Failed && downloads::retry_url(item.key()).is_some() {
-                        add_item(&menu, &format!("    Retry “{}”", item.name), sel!(retryDownload:), "", i);
+                        add_item(&menu, "      Retry", sel!(retryDownload:), "", i);
                     }
-                    let reveal = add_item(&menu, &format!("Show “{}” in Finder", item.name), sel!(revealDownload:), "", i);
-                    reveal.setKeyEquivalentModifierMask(NSEventModifierFlags::Option);
-                    reveal.setAlternate(true);
-                    reveal.setEnabled(item.path.is_some() && item.state != downloads::State::Failed);
+                    if item.path.is_some() && item.state == downloads::State::Done {
+                        add_item(&menu, "      Show in Finder", sel!(revealDownload:), "", i);
+                    }
                 }
             });
             if !any {
@@ -1266,6 +1273,16 @@ pub(crate) fn set_ax_label(b: &NSButton, text: &str) {
     if let Some(cell) = b.cell() {
         cell.setAccessibilityLabel(Some(&label));
     }
+}
+
+/// Text in one font and colour, for menu items and labels that need more
+/// than the default look.
+fn attributed(text: &str, font: &NSFont, color: &NSColor) -> Retained<objc2_foundation::NSAttributedString> {
+    use objc2_foundation::{NSAttributedString, NSDictionary, NSString};
+    let keys: [&NSString; 2] = unsafe { [objc2_app_kit::NSFontAttributeName, objc2_app_kit::NSForegroundColorAttributeName] };
+    let values: [Retained<AnyObject>; 2] = [util::any(objc2::Message::retain(font)), util::any(objc2::Message::retain(color))];
+    let attrs = NSDictionary::from_retained_objects(&keys, &values);
+    unsafe { NSAttributedString::initWithString_attributes(<NSAttributedString as objc2::AllocAnyThread>::alloc(), &util::ns(text), Some(&attrs)) }
 }
 
 fn set_layer_color(view: &NSView, color: &NSColor, radius: f64) {
@@ -2024,7 +2041,11 @@ fn refresh_toolbar() {
             let shown = if url.starts_with("file:") { String::new() } else { url };
             u.address.setStringValue(&util::ns(&shown));
         }
+        // The Dock icon shows how many files are downloading, like Safari.
+        let dock = NSApplication::sharedApplication(mtm()).dockTile();
+        dock.setBadgeLabel((active_downloads > 0).then(|| util::ns(&active_downloads.to_string())).as_deref());
         if active_downloads > 0 {
+            u.downloads_button.setFont(Some(&theme::digits(theme::Text::Footnote)));
             u.downloads_button.setTitle(&util::ns(&active_downloads.to_string()));
             u.downloads_button.setImagePosition(objc2_app_kit::NSCellImagePosition::ImageLeading);
         } else {

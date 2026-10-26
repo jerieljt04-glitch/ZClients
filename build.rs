@@ -20,4 +20,7 @@ fn main() {
     let build = build.expect("[package.metadata.zclients] build = <number> in Cargo.toml");
     assert!(build.chars().all(|c| c.is_ascii_digit()), "build number must be digits");
     println!("cargo:rustc-env=ZCLIENTS_BUILD={build}");
+    // "Download finished" notifications (UNUserNotificationCenter), called
+    // through the Objective-C runtime rather than another binding crate.
+    println!("cargo:rustc-link-lib=framework=UserNotifications");
 }

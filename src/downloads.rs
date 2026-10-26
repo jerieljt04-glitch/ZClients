@@ -38,6 +38,8 @@ pub struct Item {
     source_url: Option<String>,
     /// The tab showing this PDF, so picking it again goes back there.
     tab: Option<Uuid>,
+    /// When it finished (or failed), for the list.
+    pub finished_at: Option<std::time::SystemTime>,
 }
 
 impl Item {
@@ -48,7 +50,8 @@ impl Item {
     }
 
     fn new(key: usize, name: String, path: Option<PathBuf>, state: State, client: Option<Uuid>) -> Self {
-        Item { key, name, path, state, note: None, mime: None, client, source_url: None, tab: None }
+        let finished_at = (state != State::Downloading).then(std::time::SystemTime::now);
+        Item { key, name, path, state, note: None, mime: None, client, source_url: None, tab: None, finished_at }
     }
 }
 
@@ -122,6 +125,55 @@ pub fn progress(key: usize) -> Option<f64> {
     LIVE.with_borrow(|m| m.get(&key).map(|d| d.progress().fractionCompleted()))
 }
 
+/// Bytes received and expected so far (expected unknown: None).
+pub fn bytes(key: usize) -> Option<(i64, Option<i64>)> {
+    LIVE.with_borrow(|m| {
+        let p = m.get(&key)?.progress();
+        let total = p.totalUnitCount();
+        Some((p.completedUnitCount().max(0), (total > 0).then_some(total)))
+    })
+}
+
+/// One line describing an item for the Downloads menu: progress with sizes
+/// while it runs, size and when it finished afterwards.
+pub fn status_line(item: &Item, now: std::time::SystemTime) -> String {
+    match item.state {
+        State::Downloading => match bytes(item.key) {
+            Some((done, Some(total))) => format!("{:.0}% — {} of {}", done as f64 * 100.0 / total as f64, format_size(done), format_size(total)),
+            Some((done, None)) if done > 0 => format!("{} so far", format_size(done)),
+            _ => "Starting…".into(),
+        },
+        State::Done => {
+            let size = item.path.as_deref().and_then(|p| std::fs::metadata(p).ok()).map(|m| format_size(m.len() as i64));
+            let when = item.finished_at.map(|t| finished_label(now.duration_since(t).unwrap_or_default().as_secs()));
+            [size, when].into_iter().flatten().collect::<Vec<_>>().join(", ")
+        }
+        State::Failed => item.note.clone().unwrap_or_else(|| "Failed".into()),
+    }
+}
+
+/// "812 KB", "12.3 MB", "1.2 GB" (decimal units, as Finder shows them).
+pub fn format_size(bytes: i64) -> String {
+    let b = bytes.max(0) as f64;
+    match b {
+        b if b < 1000.0 => format!("{b:.0} bytes"),
+        b if b < 1e6 => format!("{:.0} KB", b / 1e3),
+        b if b < 1e9 => format!("{:.1} MB", b / 1e6),
+        b => format!("{:.2} GB", b / 1e9),
+    }
+}
+
+/// "just now", "5 min ago", "3 h ago", "2 days ago".
+pub fn finished_label(secs_ago: u64) -> String {
+    match secs_ago {
+        s if s < 60 => "just now".into(),
+        s if s < 3600 => format!("{} min ago", s / 60),
+        s if s < 86_400 => format!("{} h ago", s / 3600),
+        s if s < 2 * 86_400 => "yesterday".into(),
+        s => format!("{} days ago", s / 86_400),
+    }
+}
+
 /// Stop a running download and delete what it wrote so far: WebKit writes
 /// to the final name, so a partial file would look complete.
 pub fn cancel(key: usize) -> Option<PathBuf> {
@@ -138,6 +190,7 @@ pub fn cancel(key: usize) -> Option<PathBuf> {
     update(key, |i| {
         i.state = State::Failed;
         i.note = Some("Cancelled".into());
+        i.finished_at = Some(std::time::SystemTime::now());
     });
     partial
 }
@@ -401,10 +454,14 @@ define_class!(
             let quarantined = path.as_deref().is_some_and(ensure_quarantined);
             update(key, |i| {
                 i.state = State::Done;
+                i.finished_at = Some(std::time::SystemTime::now());
                 if !quarantined {
                     i.note = Some("Could not be marked as downloaded from the internet; not opened automatically".into());
                 }
             });
+            if let Some(name) = find(key, |i| i.name.clone()) {
+                notify_finished(&name);
+            }
             if quarantined {
                 util::later(move || {
                     show_pdf_where(|i| i.key == key);
@@ -435,6 +492,7 @@ define_class!(
             update(key, |i| {
                 if i.state == State::Downloading {
                     i.state = State::Failed;
+                    i.finished_at = Some(std::time::SystemTime::now());
                     i.note = Some(reason.clone());
                 }
             });
@@ -599,6 +657,41 @@ fn write_new_file(path: &Path, data: &[u8]) -> std::io::Result<()> {
     f.sync_all()
 }
 
+/// A download finished while ZClients is in the background: say so in
+/// Notification Center. The first time, macOS asks whether ZClients may
+/// show notifications; if not allowed, nothing is shown.
+fn notify_finished(name: &str) {
+    use objc2::runtime::{AnyClass, AnyObject, Bool};
+    let Some(mtm) = MainThreadMarker::new() else { return };
+    if objc2_app_kit::NSApplication::sharedApplication(mtm).isActive() || cfg!(test) {
+        return;
+    }
+    // Only a bundled app has a notification center (not `cargo run`).
+    if objc2_foundation::NSBundle::mainBundle().bundleIdentifier().is_none() {
+        return;
+    }
+    let (Some(center_class), Some(content_class), Some(request_class)) =
+        (AnyClass::get(c"UNUserNotificationCenter"), AnyClass::get(c"UNMutableNotificationContent"), AnyClass::get(c"UNNotificationRequest"))
+    else {
+        return;
+    };
+    unsafe {
+        let center: *mut AnyObject = msg_send![center_class, currentNotificationCenter];
+        let Some(center) = center.as_ref() else { return };
+        // UNAuthorizationOptionAlert
+        let asked = block2::RcBlock::new(|_ok: Bool, _e: *mut NSError| {});
+        let _: () = msg_send![center, requestAuthorizationWithOptions: 4usize, completionHandler: &*asked];
+        let content: Retained<AnyObject> = msg_send![content_class, new];
+        let _: () = msg_send![&*content, setTitle: &*util::ns("Download finished")];
+        let _: () = msg_send![&*content, setBody: &*util::ns(name)];
+        let id = util::ns(&Uuid::new_v4().to_string());
+        let request: *mut AnyObject = msg_send![request_class, requestWithIdentifier: &*id, content: &*content, trigger: std::ptr::null::<AnyObject>()];
+        if let Some(r) = request.as_ref() {
+            let _: () = msg_send![center, addNotificationRequest: r, withCompletionHandler: std::ptr::null::<AnyObject>()];
+        }
+    }
+}
+
 const QUARANTINE: &std::ffi::CStr = c"com.apple.quarantine";
 
 /// Mark a file as downloaded from the internet, so Gatekeeper and
@@ -645,6 +738,22 @@ mod tests {
         assert_eq!(safe_filename("a\u{2066}b\u{200F}.zip"), "ab.zip");
         assert_eq!(safe_filename("line\nbreak\t.pdf"), "linebreak.pdf");
         assert_eq!(safe_filename("Отчёт 2026.pdf"), "Отчёт 2026.pdf", "ordinary non-Latin names stay");
+    }
+
+    #[test]
+    fn sizes_and_times_read_like_finder() {
+        assert_eq!(format_size(512), "512 bytes");
+        assert_eq!(format_size(812_000), "812 KB");
+        assert_eq!(format_size(12_345_678), "12.3 MB");
+        assert_eq!(format_size(1_234_567_890), "1.23 GB");
+        assert_eq!(finished_label(5), "just now");
+        assert_eq!(finished_label(5 * 60 + 10), "5 min ago");
+        assert_eq!(finished_label(3 * 3600), "3 h ago");
+        assert_eq!(finished_label(30 * 3600), "yesterday");
+        assert_eq!(finished_label(3 * 86_400), "3 days ago");
+        let mut failed = Item::new(1, "a.zip".into(), None, State::Failed, None);
+        failed.note = Some("Cancelled".into());
+        assert_eq!(status_line(&failed, std::time::SystemTime::now()), "Cancelled");
     }
 
     #[test]
