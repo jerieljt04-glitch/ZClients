@@ -484,6 +484,15 @@ define_class!(
         #[unsafe(method(zcToggleSidebar:))] fn a_sidebar(&self, _s: Option<&AnyObject>) { toggle_sidebar(); }
         #[unsafe(method(search:))] fn a_search(&self, _s: Option<&AnyObject>) { app::open_search(""); }
         #[unsafe(method(meet:))] fn a_meet(&self, _s: Option<&AnyObject>) { app::open_meet(); }
+        #[unsafe(method(nextClient:))] fn a_next_client(&self, _s: Option<&AnyObject>) { app::cycle_client(1); }
+        #[unsafe(method(prevClient:))] fn a_prev_client(&self, _s: Option<&AnyObject>) { app::cycle_client(-1); }
+        #[unsafe(method(selectClientN:))] fn a_client_n(&self, s: Option<&NSMenuItem>) { if let Some(s) = s { app::select_client_number(s.tag() as usize); } }
+        #[unsafe(method(switchClient:))]
+        fn a_switch_client(&self, _s: Option<&AnyObject>) {
+            if let Some(w) = with_ui(|u| u.window.clone()) {
+                crate::switcher::show(&w);
+            }
+        }
         #[unsafe(method(addClient:))] fn a_add_client(&self, _s: Option<&AnyObject>) { show_client_sheet(None); }
         #[unsafe(method(customise:))] fn a_customise(&self, _s: Option<&AnyObject>) { customise_active(); }
         #[unsafe(method(printPage:))] fn a_print(&self, _s: Option<&AnyObject>) { web::print(); }
@@ -1327,7 +1336,7 @@ pub(crate) fn badge(hex: &str, symbol_name: Option<&str>, initials: &str, size: 
     v
 }
 
-fn client_row(c: &model::Client, width: f64) -> Retained<NSView> {
+pub(crate) fn client_row(c: &model::Client, width: f64) -> Retained<NSView> {
     let row = flex(K_PLAIN);
     row.setFrame(rect(0.0, 0.0, width, 44.0));
     let sym = if c.is_search() { Some("magnifyingglass") } else { c.symbol_name.as_deref() };
@@ -2796,6 +2805,20 @@ fn build_menu() {
     key(&go, "Google Search", sel!(search:), "k", cmd);
     alt_key(&go, "Google Search ", sel!(search:), "k", cmd | NSEventModifierFlags::Option);
     key(&go, "Google Meet", sel!(meet:), "m", cmd_shift);
+    // Switching clients is the app's main job: all of it from the keyboard.
+    go.addItem(&NSMenuItem::separatorItem(mtm));
+    key(&go, "Switch to Client…", sel!(switchClient:), "o", cmd_shift);
+    key(&go, "Next Client", sel!(nextClient:), "\u{F701}", cmd | ctrl);
+    key(&go, "Previous Client", sel!(prevClient:), "\u{F700}", cmd | ctrl);
+    let clients = NSMenuItem::new(mtm);
+    clients.setTitle(&util::ns("Client"));
+    let numbered = NSMenu::initWithTitle(NSMenu::alloc(mtm), &util::ns("Client"));
+    for n in 1..=9 {
+        let item = key(&numbered, &format!("Client {n}"), sel!(selectClientN:), &n.to_string(), cmd | NSEventModifierFlags::Option);
+        item.setTag((n - 1) as isize);
+    }
+    clients.setSubmenu(Some(&numbered));
+    go.addItem(&clients);
 
     let tabs = submenu(&bar, "Tabs");
     key(&tabs, "Next Tab", sel!(nextTab:), "\t", ctrl);

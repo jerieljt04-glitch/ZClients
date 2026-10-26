@@ -19,6 +19,7 @@ mod selftest;
 mod session;
 mod settings;
 mod suggest;
+mod switcher;
 mod tabstate;
 mod theme;
 mod ui;

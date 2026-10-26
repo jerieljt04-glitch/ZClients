@@ -277,7 +277,7 @@ pub fn initials(name: &str) -> String {
     if s.is_empty() { "?".into() } else { s.to_uppercase() }
 }
 
-fn fold(s: &str) -> String {
+pub(crate) fn fold(s: &str) -> String {
     // A small diacritic fold covering Latin accents; enough for sorting names.
     s.chars()
         .map(|c| match c {
@@ -728,6 +728,22 @@ impl Store {
         }
         self.active_client_id = Some(id);
         true
+    }
+
+    /// The real clients in sidebar order (the pinned Search row left out).
+    pub fn client_ids_in_order(&self) -> Vec<Uuid> {
+        self.ordered().iter().filter(|c| !c.is_search()).map(|c| c.id).collect()
+    }
+
+    /// The client `dir` places from the one in front, in sidebar order
+    /// (Search row included, wrapping round), for ⌃⌘↑ / ⌃⌘↓.
+    pub fn client_offset(&self, dir: isize) -> Option<Uuid> {
+        let ids: Vec<Uuid> = self.ordered().iter().map(|c| c.id).collect();
+        if ids.is_empty() {
+            return None;
+        }
+        let at = self.active_client_id.and_then(|a| ids.iter().position(|i| *i == a)).unwrap_or(0) as isize;
+        Some(ids[(at + dir).rem_euclid(ids.len() as isize) as usize])
     }
 
     /// Apply the customise sheet in one go.
@@ -1298,6 +1314,21 @@ mod tests {
         let names: Vec<_> = store.ordered().iter().map(|c| c.name.clone()).collect();
         assert_eq!(names, vec!["Google Search", "beta", "Álpha"]);
         assert!(!store.move_client_over(b, GOOGLE_SEARCH_ID), "search row is pinned");
+    }
+
+    #[test]
+    fn keyboard_switching_follows_the_sidebar() {
+        let mut store = Store::default();
+        store.ensure_search_client();
+        let b = store.add_client("beta", "#111", None);
+        let a = store.add_client("alpha", "#222", None);
+        store.set_sort_mode(SortMode::NameAscending);
+        assert_eq!(store.client_ids_in_order(), vec![a, b], "Search is not numbered");
+        store.select_client(a);
+        assert_eq!(store.client_offset(1), Some(b));
+        assert_eq!(store.client_offset(-1), Some(GOOGLE_SEARCH_ID));
+        store.select_client(b);
+        assert_eq!(store.client_offset(1), Some(GOOGLE_SEARCH_ID), "wraps round");
     }
 
     #[test]

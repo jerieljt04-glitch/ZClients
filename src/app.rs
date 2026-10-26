@@ -358,6 +358,20 @@ pub fn cleanup_finished(job: cleanup::Job) {
     }
 }
 
+/// ⌃⌘↓ / ⌃⌘↑: the next or previous client in the sidebar.
+pub fn cycle_client(dir: isize) {
+    if let Some(id) = store(|s| s.client_offset(dir)) {
+        select_client(id);
+    }
+}
+
+/// ⌥⌘1 … ⌥⌘9: the n-th client (from 0) in the sidebar, Search not counted.
+pub fn select_client_number(n: usize) {
+    if let Some(id) = store(|s| s.client_ids_in_order().get(n).copied()) {
+        select_client(id);
+    }
+}
+
 pub fn move_client(id: Uuid, offset: isize) {
     mutate(SIDEBAR, |s| s.move_client_by(id, offset));
 }
