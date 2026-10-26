@@ -607,6 +607,12 @@ define_class!(
         #[unsafe(method(webView:didCommitNavigation:))]
         fn did_commit(&self, web: &WKWebView, _nav: Option<&WKNavigation>) {
             self.ivars().external_probe.set(false);
+            // A new page starts outside any code editor; the editor hook
+            // reports again when the keyboard enters one. Otherwise ⌘A/⌘Z
+            // could stay routed as editor keys on the next page.
+            if let Some(z) = web.downcast_ref::<ZWebView>() {
+                z.ivars().code_editor.set(false);
+            }
             if let Some(tab) = self.ivars().tab_id {
                 ui::clear_load_error(tab);
             }
@@ -2010,6 +2016,20 @@ pub fn remove_data_store(id: Uuid, done: impl FnOnce(Result<(), String>) + 'stat
         unsafe { WKWebsiteDataStore::fetchAllDataStoreIdentifiers(&verify, MainThreadMarker::new().unwrap()) };
     });
     unsafe { WKWebsiteDataStore::removeDataStoreForIdentifier_completionHandler(&util::ns_uuid(id), &block, mtm) };
+}
+
+/// A tab is gone for good (or closed): drop what the pool remembers about
+/// it, so nothing stale is applied if the id is ever seen again.
+pub fn forget_tab(tab: Uuid) {
+    POOL.with_borrow_mut(|p| {
+        p.opened_by_page.remove(&tab);
+        p.crashes.remove(&tab);
+    });
+}
+
+/// A profile was deleted: its sign-in attempt history goes too.
+pub fn forget_client(client: Uuid) {
+    POOL.with_borrow_mut(|p| p.sign_in_attempts.remove(&client));
 }
 
 /// The tab was opened by a page, so if all it ever loads is a download it

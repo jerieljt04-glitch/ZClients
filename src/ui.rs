@@ -895,6 +895,11 @@ pub fn show_load_error(tab: Uuid, kind: web::LoadError, failing_url: Option<Stri
     }
 }
 
+/// A tab closed or went away: its error screen (if any) goes with it.
+pub fn forget_tab(tab: Uuid) {
+    LOAD_ERRORS.with_borrow_mut(|m| m.remove(&tab));
+}
+
 pub fn clear_load_error(tab: Uuid) {
     if LOAD_ERRORS.with_borrow_mut(|m| m.remove(&tab)).is_some() {
         refresh(app::CONTENT);

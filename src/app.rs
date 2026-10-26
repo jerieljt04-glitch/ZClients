@@ -196,10 +196,21 @@ pub fn apply(effects: Vec<Effect>) {
         match e {
             Effect::DropTab(id) => {
                 web::release(id);
+                web::forget_tab(id);
+                ui::forget_tab(id);
                 tabstate::delete(id);
             }
-            Effect::ResetTab(id) => web::sleep_tab(id),
+            Effect::ResetTab(id) => {
+                web::sleep_tab(id);
+                web::forget_tab(id);
+                ui::forget_tab(id);
+            }
             Effect::DeleteClient { client_id, tab_ids } => {
+                for t in &tab_ids {
+                    web::forget_tab(*t);
+                    ui::forget_tab(*t);
+                }
+                web::forget_client(client_id);
                 let stores = web::release_client(client_id, &tab_ids);
                 let name = DELETING_NAME.with_borrow_mut(|n| n.take()).unwrap_or_else(|| "Profile".into());
                 let previews = PENDING_PREVIEWS.with_borrow_mut(std::mem::take);
