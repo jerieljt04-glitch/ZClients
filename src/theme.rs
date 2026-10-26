@@ -175,6 +175,27 @@ pub fn client_tint_alpha(dark: bool) -> f64 {
     if dark { 0.10 } else { 0.07 }
 }
 
+/// Is this appearance a dark one?
+pub fn is_dark(appearance: &objc2_app_kit::NSAppearance) -> bool {
+    use objc2_app_kit::{NSAppearanceNameAqua, NSAppearanceNameDarkAqua};
+    let names = unsafe { objc2_foundation::NSArray::from_slice(&[NSAppearanceNameAqua, NSAppearanceNameDarkAqua]) };
+    appearance.bestMatchFromAppearancesWithNames(&names).is_some_and(|n| unsafe { &*n == NSAppearanceNameDarkAqua })
+}
+
+/// The active client's colour as a faint wash (7 % in light mode, 10 % in
+/// dark), resolved for whichever appearance it is drawn in, so the tab strip
+/// stays right after the Mac switches between light and dark.
+pub fn client_tint(hex: &str) -> Retained<NSColor> {
+    let base = crate::util::color(hex);
+    let light = base.colorWithAlphaComponent(client_tint_alpha(false));
+    let dark = base.colorWithAlphaComponent(client_tint_alpha(true));
+    let provider = block2::RcBlock::new(move |a: std::ptr::NonNull<objc2_app_kit::NSAppearance>| {
+        let chosen = if is_dark(unsafe { a.as_ref() }) { &dark } else { &light };
+        std::ptr::NonNull::from(&**chosen)
+    });
+    unsafe { NSColor::colorWithName_dynamicProvider(None, &provider) }
+}
+
 pub fn secondary_text() -> Retained<NSColor> {
     NSColor::secondaryLabelColor()
 }

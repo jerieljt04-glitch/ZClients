@@ -72,6 +72,17 @@ define_class!(
             layout(*self.ivars(), self);
         }
 
+        // Light/dark (or increased contrast) changed for the window.
+        #[unsafe(method(viewDidChangeEffectiveAppearance))]
+        fn appearance_changed(&self) {
+            unsafe {
+                let _: () = msg_send![super(self), viewDidChangeEffectiveAppearance];
+            }
+            if *self.ivars() == K_ROOT {
+                util::later(reapply_layer_colors);
+            }
+        }
+
         // The toolbar and tab strip sit in the title bar area, so empty
         // space there drags the window like a normal title bar.
         #[unsafe(method(mouseDownCanMoveWindow))]
@@ -1405,13 +1416,76 @@ fn attributed(text: &str, font: &NSFont, color: &NSColor) -> Retained<objc2_foun
     unsafe { NSAttributedString::initWithString_attributes(<NSAttributedString as objc2::AllocAnyThread>::alloc(), &util::ns(text), Some(&attrs)) }
 }
 
-fn set_layer_color(view: &NSView, color: &NSColor, radius: f64) {
+thread_local! {
+    /// Every layer whose colour was copied from an AppKit colour: a CGColor
+    /// is a snapshot, so these are re-resolved when the appearance or the
+    /// accent colour changes (see `reapply_layer_colors`).
+    static LAYER_COLORS: RefCell<Vec<(objc2::rc::Weak<NSView>, Retained<NSColor>, bool)>> = const { RefCell::new(Vec::new()) };
+}
+
+pub(crate) fn set_layer_color(view: &NSView, color: &NSColor, radius: f64) {
     view.setWantsLayer(true);
     if let Some(layer) = view.layer() {
-        let cg = color.CGColor();
-        layer.setBackgroundColor(Some(&cg));
         layer.setCornerRadius(radius);
     }
+    remember_paint(view, color, false);
+}
+
+/// A 1 pt (or `width`) border in `color`, kept right across appearance
+/// changes like the background.
+pub(crate) fn set_layer_border(view: &NSView, color: &NSColor, width: f64) {
+    view.setWantsLayer(true);
+    if let Some(layer) = view.layer() {
+        layer.setBorderWidth(width);
+    }
+    remember_paint(view, color, true);
+}
+
+fn remember_paint(view: &NSView, color: &NSColor, border: bool) {
+    paint_layer(view, color, border);
+    LAYER_COLORS.with_borrow_mut(|v| {
+        v.retain(|(w, _, b)| w.load().is_some_and(|live| *b != border || !std::ptr::eq(&*live, view)));
+        v.push((objc2::rc::Weak::from(view), objc2::Message::retain(color), border));
+    });
+}
+
+/// Resolve `color` the way it looks in the view's own appearance (light,
+/// dark, high contrast, current accent) and put it on the layer.
+fn paint_layer(view: &NSView, color: &NSColor, border: bool) {
+    let Some(layer) = view.layer() else { return };
+    let set = block2::RcBlock::new(|| {
+        let cg = color.CGColor();
+        if border { layer.setBorderColor(Some(&cg)) } else { layer.setBackgroundColor(Some(&cg)) }
+    });
+    objc2_app_kit::NSAppearanceCustomization::effectiveAppearance(view).performAsCurrentDrawingAppearance(&set);
+}
+
+/// The Mac switched light/dark (or contrast), or the accent colour changed:
+/// every layer colour is resolved again, and the chips that bake colours
+/// into their views are rebuilt.
+pub fn reapply_layer_colors() {
+    let live: Vec<(Retained<NSView>, Retained<NSColor>, bool)> = LAYER_COLORS.with_borrow_mut(|v| {
+        v.retain(|(w, _, _)| w.load().is_some());
+        v.iter().filter_map(|(w, c, b)| Some((w.load()?, c.clone(), *b))).collect()
+    });
+    for (view, color, border) in live {
+        paint_layer(&view, &color, border);
+    }
+    with_ui(|u| {
+        u.chip_key.replace(String::new());
+        for c in u.chips.borrow().iter() {
+            c.ivars().rendered.replace(String::new());
+        }
+    });
+    refresh(app::ALL);
+}
+
+/// Watch for accent colour and appearance changes.
+fn watch_appearance() {
+    let center = objc2_foundation::NSNotificationCenter::defaultCenter();
+    let block = block2::RcBlock::new(|_n: std::ptr::NonNull<NSNotification>| util::later(reapply_layer_colors));
+    let token = unsafe { center.addObserverForName_object_queue_usingBlock(Some(objc2_app_kit::NSSystemColorsDidChangeNotification), None, None, &block) };
+    std::mem::forget(token);
 }
 
 /// The coloured tile: an industry symbol when the profile has one, otherwise
@@ -1704,6 +1778,7 @@ pub fn build() {
     };
     UI.with_borrow_mut(|u| *u = Some(ui));
     build_menu();
+    watch_appearance();
     // Window first, page second: creating the first web view (and starting
     // its web content process) used to happen before anything was on screen.
     refresh(app::SIDEBAR | app::TABS | app::TOOLBAR);

@@ -17,7 +17,7 @@ use objc2_app_kit::{
 use objc2_foundation::{NSIndexSet, NSInteger, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize};
 
 use crate::apps::{self, ZOHO_APPS};
-use crate::{app, ui, util};
+use crate::{app, theme, ui, util};
 
 const HEADER_H: f64 = 26.0;
 const ROW_H: f64 = 40.0;
@@ -225,12 +225,10 @@ pub fn build(client_name: &str) -> Retained<NSView> {
     hint.setAlignment(objc2_app_kit::NSTextAlignment::Center);
 
     let panel = NSView::initWithFrame(NSView::alloc(mtm), rect(0.0, 0.0, 400.0, 300.0));
-    panel.setWantsLayer(true);
+    // Through ui's layer painter, so both colours follow light/dark.
+    ui::set_layer_color(&panel, &NSColor::controlBackgroundColor(), 12.0);
+    ui::set_layer_border(&panel, &theme::separator(), 1.0);
     if let Some(layer) = panel.layer() {
-        layer.setBackgroundColor(Some(&NSColor::controlBackgroundColor().CGColor()));
-        layer.setCornerRadius(12.0);
-        layer.setBorderWidth(1.0);
-        layer.setBorderColor(Some(&NSColor::separatorColor().CGColor()));
         layer.setMasksToBounds(true);
     }
 
