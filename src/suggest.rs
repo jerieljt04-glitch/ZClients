@@ -37,9 +37,10 @@ fn matching_app(input: &str) -> Option<&'static crate::model::ZohoApp> {
     })
 }
 
-/// Where Enter should go for typed words: a Zoho app's portal, Zoho's home
-/// for "zoho", or None (the caller falls back to a Google search).
-pub fn best_zoho_url(input: &str) -> Option<Url> {
+/// Where Enter should go for typed words: a Zoho app's portal (in the
+/// client's data centre `dc`, when known), Zoho's home for "zoho", or None
+/// (the caller falls back to a Google search).
+pub fn best_zoho_url(input: &str, dc: Option<&str>) -> Option<Url> {
     if input.contains("://") {
         return None;
     }
@@ -49,7 +50,7 @@ pub fn best_zoho_url(input: &str) -> Option<Url> {
     }
     let pricing = w.iter().any(|x| x == "pricing" || x == "price");
     let app = matching_app(input)?;
-    if pricing { Url::parse(&format!("https://www.zoho.com/{}/pricing/", app.slug)).ok() } else { Url::parse(app.url).ok() }
+    if pricing { Url::parse(&format!("https://www.zoho.com/{}/pricing/", app.slug)).ok() } else { Url::parse(&app.url_in(dc)).ok() }
 }
 
 #[cfg(test)]
@@ -58,11 +59,12 @@ mod tests {
 
     #[test]
     fn app_names_go_to_their_portal() {
-        assert_eq!(best_zoho_url("books").unwrap().as_str(), "https://books.zoho.com/");
-        assert_eq!(best_zoho_url("Zoho CRM").unwrap().as_str(), "https://crm.zoho.com/");
-        assert_eq!(best_zoho_url("books pricing").unwrap().as_str(), "https://www.zoho.com/books/pricing/");
-        assert_eq!(best_zoho_url("zoho").unwrap().as_str(), "https://www.zoho.com/");
-        assert!(best_zoho_url("weather tomorrow").is_none());
+        assert_eq!(best_zoho_url("books", None).unwrap().as_str(), "https://books.zoho.com/");
+        assert_eq!(best_zoho_url("Zoho CRM", None).unwrap().as_str(), "https://crm.zoho.com/");
+        assert_eq!(best_zoho_url("books pricing", None).unwrap().as_str(), "https://www.zoho.com/books/pricing/");
+        assert_eq!(best_zoho_url("zoho", None).unwrap().as_str(), "https://www.zoho.com/");
+        assert!(best_zoho_url("weather tomorrow", None).is_none());
+        assert_eq!(best_zoho_url("books", Some("zoho.in")).unwrap().as_str(), "https://books.zoho.in/");
     }
 
     #[test]

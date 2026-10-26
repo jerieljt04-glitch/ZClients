@@ -250,7 +250,7 @@ pub fn web_state_changed(tab: Uuid) {
         let mut any = false;
         for tab in tabs {
             let Some(ps) = web::page_state(tab) else { continue };
-            let changed_meta = STORE.with_borrow_mut(|s| s.update_tab_meta(tab, Some(&ps.url), Some(&ps.title)));
+            let changed_meta = STORE.with_borrow_mut(|s| s.update_tab_meta(tab, Some(&ps.url), Some(&ps.title)) | s.learn_data_centre(tab, &ps.url));
             any |= changed_meta;
             if Some(tab) == active {
                 changed(TOOLBAR);
@@ -636,7 +636,8 @@ pub fn address_entered(text: &str) {
         }
         return;
     }
-    if let Some(u) = suggest::best_zoho_url(text) {
+    let dc = store(|s| s.active_data_centre().map(str::to_string));
+    if let Some(u) = suggest::best_zoho_url(text, dc.as_deref()) {
         return load_destination(u);
     }
     open_search(text);

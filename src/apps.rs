@@ -22,6 +22,17 @@ impl ZohoApp {
         if self.name.starts_with("Zoho") { self.name.to_string() } else { format!("Zoho {}", self.name) }
     }
 
+    /// The app's address in a data centre (`zoho.eu`, `zohocloud.ca`...).
+    /// Apps at `https://<name>.zoho.com` (Catalyst's console included) and
+    /// OneAuth move with the data centre; Log360 keeps its own address.
+    pub fn url_in(&self, dc: Option<&str>) -> String {
+        let Some(dc) = dc.filter(|d| crate::policy::ZOHO_DATA_CENTRES.contains(d)) else { return self.url.to_string() };
+        match self.url.strip_suffix(".zoho.com") {
+            Some(base) => format!("{base}.{dc}"),
+            None => self.url.replacen("https://accounts.zoho.com/", &format!("https://accounts.{dc}/"), 1),
+        }
+    }
+
     pub fn initials(&self) -> String {
         let mut chars = self.name.chars().filter(|c| c.is_alphanumeric());
         let first = chars.next().map(|c| c.to_ascii_uppercase()).unwrap_or('Z');
@@ -124,11 +135,12 @@ pub const ZOHO_APPS: &[ZohoApp] = &[
 ];
 
 /// The app a page belongs to, from its host: crm.zoho.com, crm.zoho.eu,
-/// console.catalyst.zoho.com and log360cloud.manageengine.com all resolve.
+/// crm.zohocloud.ca, console.catalyst.zoho.com and
+/// log360cloud.manageengine.com all resolve.
 pub fn app_for_host(host: &str) -> Option<&'static ZohoApp> {
     let host = host.to_ascii_lowercase();
     let labels: Vec<&str> = host.split('.').collect();
-    let zoho_at = labels.iter().position(|l| *l == "zoho" || *l == "manageengine")?;
+    let zoho_at = labels.iter().position(|l| matches!(*l, "zoho" | "zohocloud" | "manageengine"))?;
     ZOHO_APPS.iter().find(|a| labels[..zoho_at].contains(&a.slug))
 }
 
@@ -297,6 +309,26 @@ mod tests {
     #[test]
     fn nonsense_finds_nothing() {
         assert!(search("qqqzzz").is_empty());
+    }
+
+    #[test]
+    fn launcher_addresses_follow_the_data_centre() {
+        let crm = &ZOHO_APPS[0];
+        assert_eq!(crm.url_in(None), "https://crm.zoho.com");
+        for dc in crate::policy::ZOHO_DATA_CENTRES {
+            assert_eq!(crm.url_in(Some(dc)), format!("https://crm.{dc}"));
+            for app in ZOHO_APPS {
+                let u = url::Url::parse(&app.url_in(Some(dc))).unwrap();
+                assert!(crate::policy::is_allowed_web(&u, crate::model::Workspace::Zoho), "{} in {dc}", app.name);
+            }
+        }
+        let oneauth = ZOHO_APPS.iter().find(|a| a.slug == "oneauth").unwrap();
+        assert_eq!(oneauth.url_in(Some("zoho.eu")), "https://accounts.zoho.eu/home");
+        let catalyst = ZOHO_APPS.iter().find(|a| a.slug == "catalyst").unwrap();
+        assert_eq!(catalyst.url_in(Some("zoho.eu")), "https://console.catalyst.zoho.eu");
+        let log360 = ZOHO_APPS.iter().find(|a| a.slug == "log360cloud").unwrap();
+        assert_eq!(log360.url_in(Some("zoho.eu")), "https://log360cloud.manageengine.com", "its own address");
+        assert_eq!(crm.url_in(Some("evil.net")), "https://crm.zoho.com", "only real data centres");
     }
 
     #[test]

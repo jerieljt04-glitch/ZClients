@@ -28,59 +28,69 @@ const ZOHO_CALL_PRODUCTS: &[&str] = &["meeting", "cliq"];
 /// and the Search workspace sign in through them).
 const SESSION_GOOGLE_DOMAINS: &[&str] = &["google.com", "google.ae"];
 
+/// The country part a data centre's other Zoho hosts end in: `eu` for
+/// zoho.eu, `com.au` for zoho.com.au, `ca` for Canada's zohocloud.ca.
+pub fn dc_suffix(dc: &str) -> &str {
+    dc.strip_prefix("zoho.").or_else(|| dc.strip_prefix("zohocloud.")).unwrap_or(dc)
+}
+
+/// `<base>.<suffix>` for every data centre, built once. Every host these
+/// lists produce was checked to be live on Zoho's servers with a valid
+/// certificate (2026-10-26), including the UK, UAE and Singapore ones the
+/// hand-written lists missed.
+fn per_dc(base: &str) -> Vec<String> {
+    ZOHO_DATA_CENTRES.iter().map(|dc| format!("{base}.{}", dc_suffix(dc))).collect()
+}
+
 /// Where Zoho serves CRM widgets, extensions and Sigma apps from. These run
 /// inside an iframe on crm.zoho.*, so they need the same trust as Zoho itself:
 /// without it a widget's `confirm()` silently answers "Cancel", its file
 /// upload never opens and "open in new tab" is cancelled.
-const ZOHO_WIDGET_DOMAINS: &[&str] = &[
-    "zappsusercontent.com",
-    "zappsusercontent.eu",
-    "zappsusercontent.in",
-    "zappsusercontent.com.au",
-    "zappsusercontent.jp",
-    "zappsusercontent.ca",
-    "zappsusercontent.sa",
-    "zappsusercontent.com.cn",
-    "zappsusercontent.uk",
-];
+fn widget_domains() -> &'static [String] {
+    static D: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    D.get_or_init(|| per_dc("zappsusercontent"))
+}
 
 /// Zoho-owned static, API and public-content hosts that widgets and embedded
 /// Zoho views load from.
-const ZOHO_CONTENT_DOMAINS: &[&str] = &[
-    "zohostatic.com",
-    "zohocdn.com",
-    "zohowebstatic.com",
-    "zohoexternal.com",
-    "zohopublic.com",
-    "zohopublic.eu",
-    "zohopublic.in",
-    "zohopublic.com.au",
-    "zohopublic.jp",
-    "zohopublic.ca",
-    "zohopublic.sa",
-    "zohopublic.com.cn",
-    "zohoapis.com",
-    "zohoapis.eu",
-    "zohoapis.in",
-    "zohoapis.com.au",
-    "zohoapis.jp",
-    "zohoapis.ca",
-    "zohoapis.sa",
-    "zohoapis.com.cn",
-];
+fn content_domains() -> &'static [String] {
+    static D: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    D.get_or_init(|| {
+        let mut v: Vec<String> = ["zohostatic.com", "zohocdn.com", "zohowebstatic.com", "zohoexternal.com"].iter().map(|s| s.to_string()).collect();
+        v.extend(per_dc("zohopublic"));
+        v.extend(per_dc("zohoapis"));
+        v
+    })
+}
+
+/// Data centres where Log360 Cloud does not answer (checked 2026-10-26:
+/// no HTTPS service at log360cloud.manageengine.<sa|sg|com.cn>). Not
+/// trusted until Zoho runs it there.
+const LOG360_UNAVAILABLE: &[&str] = &["sa", "sg", "com.cn"];
 
 /// Zoho's Log360 Cloud runs under ManageEngine (Zoho's IT brand), one host
 /// per data centre.
-const ZOHO_PARTNER_DOMAINS: &[&str] = &[
-    "log360cloud.manageengine.com",
-    "log360cloud.manageengine.eu",
-    "log360cloud.manageengine.in",
-    "log360cloud.manageengine.com.au",
-    "log360cloud.manageengine.jp",
-    "log360cloud.manageengine.ca",
-    "log360cloud.manageengine.uk",
-    "log360cloud.manageengine.ae",
-];
+fn partner_domains() -> &'static [String] {
+    static D: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    D.get_or_init(|| per_dc("log360cloud.manageengine").into_iter().filter(|h| !LOG360_UNAVAILABLE.iter().any(|x| h.ends_with(&format!(".{x}")))).collect())
+}
+
+/// The data centre (an entry of `ZOHO_DATA_CENTRES`) a Zoho app page is
+/// served from: crm.zoho.eu -> zoho.eu. Only a known app's own host counts;
+/// www.zoho.com and the shared sign-in page say nothing about where the
+/// user's account lives.
+pub fn data_centre_of(url: &Url) -> Option<&'static str> {
+    if !is_https(url) {
+        return None;
+    }
+    let host = host_lower(url)?;
+    crate::apps::app_for_host(&host)?;
+    let (label, _) = host.split_once('.')?;
+    if matches!(label, "www" | "accounts") {
+        return None;
+    }
+    ZOHO_DATA_CENTRES.iter().copied().find(|dc| host.ends_with(&format!(".{dc}")))
+}
 
 const GOOGLE_AUTH_HOSTS: &[&str] = &["accounts.google.com", "consent.google.com"];
 
@@ -307,8 +317,8 @@ fn host_lower(url: &Url) -> Option<String> {
     url.host_str().map(|h| h.trim_end_matches('.').to_ascii_lowercase())
 }
 
-fn host_in(host: &str, domains: &[&str]) -> bool {
-    domains.iter().any(|d| host == *d || (host.len() > d.len() && host.ends_with(d) && host.as_bytes()[host.len() - d.len() - 1] == b'.'))
+fn host_in<S: AsRef<str>>(host: &str, domains: &[S]) -> bool {
+    domains.iter().map(AsRef::as_ref).any(|d| host == d || (host.len() > d.len() && host.ends_with(d) && host.as_bytes()[host.len() - d.len() - 1] == b'.'))
 }
 
 /// Every host this app trusts serves TLS. Requiring it means a downgraded or
@@ -319,12 +329,11 @@ pub fn is_https(url: &Url) -> bool {
 
 /// Zoho plus every Zoho-owned host widgets are served from.
 pub fn is_zoho_family(url: &Url) -> bool {
-    is_https(url)
-        && host_lower(url).is_some_and(|h| host_in(&h, ZOHO_DOMAINS) || host_in(&h, ZOHO_WIDGET_DOMAINS) || host_in(&h, ZOHO_CONTENT_DOMAINS) || host_in(&h, ZOHO_PARTNER_DOMAINS))
+    is_https(url) && host_lower(url).is_some_and(|h| host_in(&h, ZOHO_DOMAINS) || host_in(&h, widget_domains()) || host_in(&h, content_domains()) || host_in(&h, partner_domains()))
 }
 
 pub fn is_zoho_widget(url: &Url) -> bool {
-    is_https(url) && host_lower(url).is_some_and(|h| host_in(&h, ZOHO_WIDGET_DOMAINS))
+    is_https(url) && host_lower(url).is_some_and(|h| host_in(&h, widget_domains()))
 }
 
 pub fn is_google_meet(url: &Url) -> bool {
@@ -629,6 +638,49 @@ mod tests {
         {
             assert!(is_allowed_web(&u(s), Workspace::Zoho), "{s}");
         }
+    }
+
+    #[test]
+    fn every_data_centre_is_a_first_class_citizen() {
+        assert_eq!(ZOHO_DATA_CENTRES.len(), 11);
+        for dc in ZOHO_DATA_CENTRES {
+            let sfx = dc_suffix(dc);
+            assert!(ZOHO_DOMAINS.contains(dc), "{dc}");
+            for host in [
+                format!("https://crm.{dc}/"),
+                format!("https://accounts.{dc}/"),
+                format!("https://1-abc.zappsusercontent.{sfx}/w.html"),
+                format!("https://www.zohoapis.{sfx}/crm/v6"),
+                format!("https://forms.zohopublic.{sfx}/x"),
+            ] {
+                assert!(is_allowed_web(&u(&host), Workspace::Zoho), "{host}");
+            }
+            assert!(is_zoho_widget(&u(&format!("https://1-abc.zappsusercontent.{sfx}/"))), "{dc}");
+            let widget = Request {
+                origin: Origin::from_parts("https", &format!("1-abc.zappsusercontent.{sfx}"), 0),
+                top: None,
+                main_frame: false,
+                user_gesture: false,
+                workspace: Workspace::Zoho,
+            };
+            assert_eq!(decide(Capability::Display, &widget), Decision::Allow, "{dc} widgets may show dialogs");
+            assert_eq!(data_centre_of(&u(&format!("https://crm.{dc}/crm/org1"))), Some(*dc));
+        }
+        assert_eq!(dc_suffix("zohocloud.ca"), "ca");
+        assert_eq!(dc_suffix("zoho.com.au"), "com.au");
+        assert!(is_allowed_web(&u("https://log360cloud.manageengine.uk/"), Workspace::Zoho));
+        assert!(!is_allowed_web(&u("https://log360cloud.manageengine.sa/"), Workspace::Zoho), "not served there");
+        assert!(!is_allowed_web(&u("https://zappsusercontent.ae.evil.net/"), Workspace::Zoho));
+    }
+
+    #[test]
+    fn only_app_hosts_reveal_a_profiles_data_centre() {
+        assert_eq!(data_centre_of(&u("https://books.zoho.com.au/app")), Some("zoho.com.au"));
+        assert_eq!(data_centre_of(&u("https://crm.zohocloud.ca/")), Some("zohocloud.ca"));
+        assert_eq!(data_centre_of(&u("https://www.zoho.com/crm/")), None, "the marketing site");
+        assert_eq!(data_centre_of(&u("https://accounts.zoho.com/signin")), None, "everyone signs in through the US first");
+        assert_eq!(data_centre_of(&u("https://www.google.com/")), None);
+        assert_eq!(data_centre_of(&u("http://crm.zoho.eu/")), None);
     }
 
     #[test]

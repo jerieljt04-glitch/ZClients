@@ -185,6 +185,11 @@ pub struct Client {
     /// How long a kept session lasts without use, in days.
     #[serde(rename = "sessionRetentionDays", default, skip_serializing_if = "Option::is_none")]
     pub session_days: Option<u32>,
+    /// The Zoho data centre this client's account lives in ("zoho.eu"),
+    /// learned from the last Zoho app page it loaded, so the launcher and
+    /// the address bar open apps there instead of bouncing through the US.
+    #[serde(rename = "zohoDataCentre", default, skip_serializing_if = "Option::is_none")]
+    pub data_centre: Option<String>,
 }
 
 fn default_color() -> String {
@@ -205,6 +210,7 @@ impl Client {
             symbol_name: None,
             keep_signed_in: None,
             session_days: None,
+            data_centre: None,
         }
     }
 
@@ -519,6 +525,7 @@ impl Store {
                     symbol_name: None,
                     keep_signed_in: None,
                     session_days: None,
+                    data_centre: None,
                 },
             );
             if self.active_client_id.is_none() {
@@ -894,7 +901,25 @@ impl Store {
     }
 
     pub fn open_app(&mut self, tab_id: Uuid, app: &ZohoApp) -> Vec<Effect> {
-        self.navigate_tab(tab_id, Some(app.url.to_string()), None)
+        let dc = self.clients.iter().find(|c| c.tabs.iter().any(|t| t.id == tab_id)).and_then(|c| c.data_centre.clone());
+        self.navigate_tab(tab_id, Some(app.url_in(dc.as_deref())), None)
+    }
+
+    /// The tab showed a page of a Zoho app: remember its data centre for the
+    /// tab's client. True when that changed what is saved.
+    pub fn learn_data_centre(&mut self, tab_id: Uuid, url: &str) -> bool {
+        let Some(dc) = policy::parse(url).and_then(|u| policy::data_centre_of(&u)) else { return false };
+        let Some(c) = self.clients.iter_mut().find(|c| !c.is_search() && c.tabs.iter().any(|t| t.id == tab_id)) else { return false };
+        if c.data_centre.as_deref() == Some(dc) {
+            return false;
+        }
+        c.data_centre = Some(dc.to_string());
+        true
+    }
+
+    /// The data centre of the client in front, if known.
+    pub fn active_data_centre(&self) -> Option<&str> {
+        self.active_client().and_then(|c| c.data_centre.as_deref())
     }
 
     pub fn go_home(&mut self) -> Vec<Effect> {
@@ -1356,6 +1381,35 @@ mod tests {
         store.clients[1].session_days = Some(30);
         let again = Store::from_json(&store.to_json()).unwrap();
         assert_eq!(again.clients[1].retention(), crate::session::Retention { keep: false, days: 30 });
+    }
+
+    #[test]
+    fn data_centre_is_learned_saved_and_optional() {
+        let mut store = Store::from_json(SWIFT_SAMPLE.as_bytes()).unwrap();
+        assert!(!String::from_utf8(store.to_json()).unwrap().contains("zohoDataCentre"), "absent until learned");
+        let tab = store.clients[1].tabs[0].id;
+        assert!(!store.learn_data_centre(tab, "https://www.zoho.com/crm/"), "the marketing site says nothing");
+        assert!(store.learn_data_centre(tab, "https://crm.zoho.eu/crm/org1/tab/Leads"));
+        assert!(!store.learn_data_centre(tab, "https://books.zoho.eu/app"), "unchanged");
+        let json = store.to_json();
+        assert!(String::from_utf8(json.clone()).unwrap().contains(r#""zohoDataCentre":"zoho.eu""#));
+        let again = Store::from_json(&json).unwrap();
+        assert_eq!(again.clients[1].data_centre.as_deref(), Some("zoho.eu"));
+        // 1.5.0 has no such field: unknown keys are ignored when it reads
+        // the file (same serde rules as here), and every other field is
+        // unchanged.
+        let v: serde_json::Value = serde_json::from_slice(&json).unwrap();
+        let mut without = v.clone();
+        without["clients"][1].as_object_mut().unwrap().remove("zohoDataCentre");
+        let old = Store::from_json(&serde_json::to_vec(&without).unwrap()).unwrap();
+        assert_eq!(old.clients[1].data_centre, None);
+        assert_eq!(old.clients[1].tabs, again.clients[1].tabs);
+        let mut extra = v;
+        extra["clients"][1]["someFutureField"] = serde_json::json!(true);
+        assert!(Store::from_json(&serde_json::to_vec(&extra).unwrap()).is_ok(), "unknown keys never fail a load");
+        let launcher_tab = store.clients[1].tabs[1].id;
+        store.open_app(launcher_tab, &ZOHO_APPS[0]);
+        assert_eq!(store.find_tab(launcher_tab).unwrap().url.as_deref(), Some("https://crm.zoho.eu"));
     }
 
     #[test]
