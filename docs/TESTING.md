@@ -23,7 +23,7 @@ HOME=$H ZCLIENTS_SELFTEST=stability ZCLIENTS_ALERTS=accept ZCLIENTS_MOCK_MEDIA=1
 ```
 
 Since 2.0.0, logs also go to the unified log:
-`log show --last 10m --predicate 'subsystem == "com.zport.swift"'` (redacted),
+`/usr/bin/log show --last 10m --predicate 'subsystem == "com.zport.swift"'` (redacted; in zsh plain `log` is a shell builtin),
 and the last 300 lines are in Help › Export Diagnostics.
 
 `ZCLIENTS_ALERTS=accept|decline` (test builds only) answers every app
