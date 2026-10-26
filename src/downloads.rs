@@ -229,11 +229,34 @@ pub fn safe_filename(name: &str) -> String {
     while f.starts_with('.') {
         f.remove(0);
     }
-    let mut f = f.trim().to_string();
-    while f.len() > 200 {
-        f.pop();
-    }
+    let f = shorten_keeping_extension(f.trim(), MAX_NAME_BYTES);
     if f.is_empty() { "Download".into() } else { f }
+}
+
+/// Longest file name handed to the file system (APFS allows 255 bytes).
+const MAX_NAME_BYTES: usize = 200;
+
+/// Shorten a long name from the end of its stem, never its extension:
+/// cutting the end turned "…quarterly report.xlsx" into "…quarterly rep",
+/// a file nothing would open (and whose type the risk check could not see).
+fn shorten_keeping_extension(name: &str, max: usize) -> String {
+    if name.len() <= max {
+        return name.to_string();
+    }
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() && !ext.is_empty() && ext.len() <= 16 && ext.chars().all(|c| c.is_alphanumeric()) => (stem, Some(ext)),
+        _ => (name, None),
+    };
+    let room = max - ext.map_or(0, |e| e.len() + 1);
+    let mut stem = stem.to_string();
+    while stem.len() > room {
+        stem.pop();
+    }
+    let stem = stem.trim_end();
+    match ext {
+        Some(e) => format!("{stem}.{e}"),
+        None => stem.to_string(),
+    }
 }
 
 /// A free name in `dir`. Files still downloading count as taken: WebKit only
@@ -621,6 +644,22 @@ mod tests {
         assert_eq!(safe_filename("a\u{2066}b\u{200F}.zip"), "ab.zip");
         assert_eq!(safe_filename("line\nbreak\t.pdf"), "linebreak.pdf");
         assert_eq!(safe_filename("Отчёт 2026.pdf"), "Отчёт 2026.pdf", "ordinary non-Latin names stay");
+    }
+
+    #[test]
+    fn long_names_keep_their_extension_and_their_risk() {
+        let long = format!("{} report.xlsx", "Quarterly ".repeat(30));
+        let short = safe_filename(&long);
+        assert!(short.len() <= MAX_NAME_BYTES, "{}", short.len());
+        assert!(short.ends_with(".xlsx"), "{short}");
+        let exe = format!("{}.exe", "a".repeat(400));
+        assert_eq!(risk_of(&safe_filename(&exe)), Some(Risk::App), "still recognised after shortening");
+        let multibyte = format!("{}.pdf", "é".repeat(300));
+        let m = safe_filename(&multibyte);
+        assert!(m.len() <= MAX_NAME_BYTES && m.ends_with(".pdf"), "never splits a character");
+        assert_eq!(safe_filename("short.pdf"), "short.pdf");
+        let no_ext = "x".repeat(300);
+        assert_eq!(safe_filename(&no_ext).len(), MAX_NAME_BYTES);
     }
 
     #[test]
