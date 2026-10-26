@@ -935,6 +935,10 @@ pub fn recent_media_uses() -> Vec<MediaUse> {
 pub enum LoadError {
     /// The page's web content process ended twice in a short time.
     Crashed,
+    /// A PDF tab whose preview copy is missing or no longer a valid PDF.
+    PdfMissing,
+    /// The tab's saved address is not one this app shows any more.
+    NotAllowed,
     Offline,
     Certificate,
     Authentication,
@@ -1675,10 +1679,18 @@ fn load_tab(view: &ZWebView, tab: &Tab) {
                 unsafe { view.loadFileURL_allowingReadAccessToURL(&file, &dir) };
                 return;
             }
-            (result, _) => util::log(format!("PDF tab not shown: {}", result.err().map(|e| e.to_string()).unwrap_or_else(|| "not in a preview folder".into()))),
+            (result, _) => {
+                util::log(format!("PDF tab not shown: {}", result.err().map(|e| e.to_string()).unwrap_or_else(|| "not in a preview folder".into())));
+                return explain_blank(tab.id, LoadError::PdfMissing, tab.pdf_source_url.clone());
+            }
         }
     }
     let Some(url) = tab.url.as_deref() else { return };
+    // A PDF tab whose preview was cleaned up while the app was closed
+    // keeps only its file:// address.
+    if url.starts_with("file:") {
+        return explain_blank(tab.id, LoadError::PdfMissing, tab.pdf_source_url.clone());
+    }
     // Exact place: replay WebKit's own snapshot (history + scroll position)
     // when it was taken on the page the tab remembers.
     if let Some(state) = tabstate::load(tab.id, url) {
@@ -1687,10 +1699,20 @@ fn load_tab(view: &ZWebView, tab: &Tab) {
         return;
     }
     let allowed = policy::parse(url).is_some_and(|u| policy::is_allowed_web(&u, ws));
-    if let (true, Some(nsurl)) = (allowed, util::ns_url(url)) {
-        let req = NSURLRequest::requestWithURL(&nsurl);
-        unsafe { view.loadRequest(&req) };
+    match (allowed, util::ns_url(url)) {
+        (true, Some(nsurl)) => {
+            let req = NSURLRequest::requestWithURL(&nsurl);
+            unsafe { view.loadRequest(&req) };
+        }
+        _ => explain_blank(tab.id, LoadError::NotAllowed, Some(url.to_string())),
     }
+}
+
+/// A tab that has nothing it may show says why, instead of staying blank.
+/// Shown on the next turn: `load_tab` can run inside a content refresh.
+fn explain_blank(tab: Uuid, kind: LoadError, url: Option<String>) {
+    util::log(format!("tab left blank: {kind:?}"));
+    util::later(move || ui::show_load_error(tab, kind, url));
 }
 
 fn touch(p: &mut Pool, id: Uuid) {

@@ -645,6 +645,32 @@ define_class!(
             }
         }
 
+        #[unsafe(method(errorOpenInBrowser:))]
+        fn a_error_browser(&self, _s: Option<&AnyObject>) {
+            let Some(tab) = app::store(|s| s.active_tab().map(|(_, t)| t.id)) else { return };
+            let url = LOAD_ERRORS.with_borrow(|m| m.get(&tab).and_then(|(_, u)| u.clone()));
+            if let Some(u) = url.as_deref().and_then(crate::policy::parse).filter(crate::policy::is_https).and_then(|u| util::ns_url(u.as_str())) {
+                NSWorkspace::sharedWorkspace().openURL(&u);
+            }
+        }
+
+        /// A PDF tab whose preview is gone: fetch the document again (it
+        /// opens as a new tab when it arrives) and close the empty one.
+        #[unsafe(method(errorRedownload:))]
+        fn a_error_redownload(&self, _s: Option<&AnyObject>) {
+            let Some((client, tab)) = app::store(|s| s.active_tab().map(|(c, t)| (c.id, t.id))) else { return };
+            let url = LOAD_ERRORS.with_borrow(|m| m.get(&tab).and_then(|(_, u)| u.clone()));
+            if let Some(u) = url {
+                web::download_url(Some(client), &u);
+            }
+            util::later(move || app::close_tab(client, tab));
+        }
+
+        #[unsafe(method(errorCloseTab:))]
+        fn a_error_close(&self, _s: Option<&AnyObject>) {
+            app::close_active_tab();
+        }
+
         #[unsafe(method(showDownloads:))]
         fn a_show_downloads(&self, _s: Option<&AnyObject>) {
             if let Some(b) = with_ui(|u| u.downloads_button.clone()) {
@@ -912,6 +938,17 @@ fn load_error_text(kind: web::LoadError, url: Option<&str>) -> (String, String) 
         web::LoadError::Crashed => {
             ("This page stopped working".into(), format!("{host} closed unexpectedly more than once, so ZClients stopped reloading it. Try Again to load it once more."))
         }
+        web::LoadError::PdfMissing => (
+            "This PDF is no longer available".into(),
+            if url.is_some_and(|u| u.starts_with("https:")) {
+                format!("Its preview copy was removed or is damaged. Re-download fetches it again from {host}.")
+            } else {
+                "Its preview copy was removed or is damaged. Download it again from where you found it.".into()
+            },
+        ),
+        web::LoadError::NotAllowed => {
+            ("This address can't be opened in ZClients".into(), format!("ZClients only shows Zoho and Google Meet pages. {host} can open in your default browser instead."))
+        }
         web::LoadError::Offline => ("You're offline".into(), format!("ZClients can't reach {host}. Check your internet connection, then try again.")),
         web::LoadError::Certificate => {
             ("This connection isn't private".into(), format!("{host}'s certificate couldn't be verified, so the page was not opened and nothing was sent to it."))
@@ -922,29 +959,129 @@ fn load_error_text(kind: web::LoadError, url: Option<&str>) -> (String, String) 
     }
 }
 
-fn error_overlay(kind: web::LoadError, url: Option<&str>, frame: NSRect) -> Retained<NSView> {
+/// What the error screen's buttons do.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ErrorAction {
+    TryAgain,
+    OpenInBrowser,
+    Redownload,
+    CloseTab,
+}
+
+impl ErrorAction {
+    fn title(self) -> &'static str {
+        match self {
+            ErrorAction::TryAgain => "Try Again",
+            ErrorAction::OpenInBrowser => "Open in Browser",
+            ErrorAction::Redownload => "Re-download",
+            ErrorAction::CloseTab => "Close Tab",
+        }
+    }
+
+    fn selector(self) -> Sel {
+        match self {
+            ErrorAction::TryAgain => sel!(retryLoad:),
+            ErrorAction::OpenInBrowser => sel!(errorOpenInBrowser:),
+            ErrorAction::Redownload => sel!(errorRedownload:),
+            ErrorAction::CloseTab => sel!(errorCloseTab:),
+        }
+    }
+}
+
+/// The primary and (optional) secondary button for an error. Opening in
+/// the browser is offered only for an https address.
+pub fn error_actions(kind: web::LoadError, url: Option<&str>) -> (ErrorAction, Option<ErrorAction>) {
+    use web::LoadError as E;
+    let https = url.is_some_and(|u| crate::policy::parse(u).is_some_and(|u| crate::policy::is_https(&u)));
+    let browser = https.then_some(ErrorAction::OpenInBrowser);
+    match kind {
+        E::PdfMissing if https => (ErrorAction::Redownload, Some(ErrorAction::CloseTab)),
+        E::PdfMissing => (ErrorAction::CloseTab, None),
+        E::NotAllowed if https => (ErrorAction::OpenInBrowser, Some(ErrorAction::CloseTab)),
+        E::NotAllowed => (ErrorAction::CloseTab, None),
+        E::Crashed | E::Unsupported | E::Other => (ErrorAction::TryAgain, browser),
+        E::Offline | E::Certificate | E::Authentication => (ErrorAction::TryAgain, None),
+    }
+}
+
+fn error_symbol(kind: web::LoadError) -> &'static str {
+    match kind {
+        web::LoadError::Offline => "wifi.slash",
+        web::LoadError::Certificate | web::LoadError::Authentication => "lock.slash",
+        _ => "exclamationmark.triangle",
+    }
+}
+
+/// A centred message screen: an SF Symbol, a heading, at most 460 pt of
+/// secondary text and up to two buttons (the first is the default). Used
+/// for load errors and the first-run empty state.
+fn message_screen(frame: NSRect, symbol_name: &str, title: &str, body: &str, buttons: &[(&str, Sel)]) -> Retained<FlexView> {
     let v = flex(K_PLAIN);
     v.setFrame(frame);
-    set_layer_color(&v, &NSColor::windowBackgroundColor(), 0.0);
-    v.setIdentifier(Some(&util::ns("zcLoadError")));
-    let (title, body) = load_error_text(kind, url);
+    set_layer_color(&v, &theme::window_background(), 0.0);
     let w = frame.size.width;
-    let t = label(&title, 20.0, true);
+    let top = (frame.size.height * 0.28).round();
+    let mut y = top;
+    if let Some(img) = theme::symbol(symbol_name, theme::Icon::Hero) {
+        let iv = NSImageView::imageViewWithImage(&img, mtm());
+        iv.setContentTintColor(Some(&theme::secondary_text()));
+        iv.setFrame(rect((w - 56.0) / 2.0, y, 56.0, 48.0));
+        iv.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinXMargin | NSAutoresizingMaskOptions::ViewMaxXMargin);
+        v.addSubview(&iv);
+        y += 48.0 + theme::GRID * 3.0;
+    }
+    let t = label(title, 0.0, false);
+    t.setFont(Some(&theme::font(theme::Text::Title2)));
     t.setAlignment(objc2_app_kit::NSTextAlignment::Center);
-    t.setFrame(rect(20.0, frame.size.height * 0.3, w - 40.0, 28.0));
+    t.setFrame(rect(theme::SHEET_MARGIN, y, w - theme::SHEET_MARGIN * 2.0, 30.0));
     t.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
     v.addSubview(&t);
-    let b = NSTextField::wrappingLabelWithString(&util::ns(&body), mtm());
+    y += 30.0 + theme::GRID * 2.0;
+    let text_w = theme::MESSAGE_MAX_W.min(w - theme::SHEET_MARGIN * 2.0);
+    let b = NSTextField::wrappingLabelWithString(&util::ns(body), mtm());
+    b.setFont(Some(&theme::font(theme::Text::Body)));
     b.setAlignment(objc2_app_kit::NSTextAlignment::Center);
-    b.setTextColor(Some(&NSColor::secondaryLabelColor()));
-    b.setFrame(rect((w - 460.0).max(20.0) / 2.0, frame.size.height * 0.3 + 36.0, 460.0_f64.min(w - 40.0), 48.0));
+    b.setTextColor(Some(&theme::secondary_text()));
+    let text_h = b.sizeThatFits(NSSize::new(text_w, 400.0)).height.ceil().max(20.0);
+    b.setFrame(rect((w - text_w) / 2.0, y, text_w, text_h));
     b.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinXMargin | NSAutoresizingMaskOptions::ViewMaxXMargin);
     v.addSubview(&b);
-    let retry = unsafe { NSButton::buttonWithTitle_target_action(&util::ns("Try Again"), Some(&target()), Some(sel!(retryLoad:)), mtm()) };
-    retry.setFrame(rect((w - 110.0) / 2.0, frame.size.height * 0.3 + 92.0, 110.0, 30.0));
-    retry.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinXMargin | NSAutoresizingMaskOptions::ViewMaxXMargin);
-    v.addSubview(&retry);
+    y += text_h + theme::GRID * 5.0;
+    let made: Vec<Retained<NSButton>> = buttons
+        .iter()
+        .enumerate()
+        .map(|(i, (title, action))| {
+            let button = unsafe { NSButton::buttonWithTitle_target_action(&util::ns(title), Some(&target()), Some(*action), mtm()) };
+            if i == 0 {
+                button.setKeyEquivalent(&util::ns("\r"));
+            }
+            button.sizeToFit();
+            button
+        })
+        .collect();
+    let widths: Vec<f64> = made.iter().map(|b| b.frame().size.width.max(theme::BUTTON_W + 22.0)).collect();
+    let total: f64 = widths.iter().sum::<f64>() + theme::GRID * 3.0 * (made.len().saturating_sub(1)) as f64;
+    let mut x = (w - total) / 2.0;
+    // The default button sits on the right, as in a Mac alert.
+    for (button, bw) in made.iter().zip(widths.iter()).rev() {
+        button.setFrame(rect(x, y, *bw, theme::BUTTON_H));
+        button.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinXMargin | NSAutoresizingMaskOptions::ViewMaxXMargin);
+        v.addSubview(button);
+        x += bw + theme::GRID * 3.0;
+    }
     v.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable);
+    v
+}
+
+fn error_overlay(kind: web::LoadError, url: Option<&str>, frame: NSRect) -> Retained<NSView> {
+    let (title, body) = load_error_text(kind, url);
+    let (primary, secondary) = error_actions(kind, url);
+    let mut buttons = vec![(primary.title(), primary.selector())];
+    if let Some(s) = secondary {
+        buttons.push((s.title(), s.selector()));
+    }
+    let v = message_screen(frame, error_symbol(kind), &title, &body, &buttons);
+    v.setIdentifier(Some(&util::ns("zcLoadError")));
     Retained::into_super(v)
 }
 
@@ -2526,4 +2663,25 @@ fn build_menu() {
     app.setHelpMenu(Some(&help));
 
     app.setMainMenu(Some(&bar));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::web::LoadError as E;
+
+    #[test]
+    fn every_error_screen_offers_a_way_forward() {
+        let pdf = Some("https://crm.zoho.com/crm/org1/attachment/1.pdf");
+        assert_eq!(error_actions(E::PdfMissing, pdf), (ErrorAction::Redownload, Some(ErrorAction::CloseTab)));
+        assert_eq!(error_actions(E::PdfMissing, None), (ErrorAction::CloseTab, None), "nothing to fetch again");
+        assert_eq!(error_actions(E::NotAllowed, Some("https://example.com/")), (ErrorAction::OpenInBrowser, Some(ErrorAction::CloseTab)));
+        assert_eq!(error_actions(E::NotAllowed, Some("file:///etc/passwd")), (ErrorAction::CloseTab, None), "never hands a file: address to the browser");
+        assert_eq!(error_actions(E::Crashed, Some("https://crm.zoho.com/")), (ErrorAction::TryAgain, Some(ErrorAction::OpenInBrowser)));
+        assert_eq!(error_actions(E::Offline, Some("https://crm.zoho.com/")), (ErrorAction::TryAgain, None));
+        for kind in [E::Crashed, E::PdfMissing, E::NotAllowed, E::Offline, E::Certificate, E::Authentication, E::Unsupported, E::Other] {
+            let (title, body) = load_error_text(kind, Some("https://crm.zoho.com/x"));
+            assert!(!title.is_empty() && !body.is_empty(), "{kind:?}");
+        }
+    }
 }
