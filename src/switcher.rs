@@ -116,7 +116,7 @@ define_class!(
         fn view_for(&self, table: &NSTableView, _col: Option<&NSTableColumn>, row: NSInteger) -> Option<Retained<NSView>> {
             let id = SWITCHER.with_borrow(|s| s.as_ref().and_then(|s| s.rows.borrow().get(row as usize).copied()));
             let width = table.bounds().size.width;
-            id.and_then(|id| app::store(|s| s.client(id).map(|c| ui::client_row(c, width))))
+            id.and_then(|id| app::store(|s| s.client(id).map(|c| ui::client_row(c, width, false))))
         }
     }
 

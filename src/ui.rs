@@ -1303,7 +1303,7 @@ fn drag_writer(row: NSInteger) -> Option<Retained<ProtocolObject<dyn NSPasteboar
 fn row_view(table: &NSTableView, row: NSInteger) -> Option<Retained<NSView>> {
     let id = row_client(row)?;
     let width = table.bounds().size.width;
-    app::store(|s| s.client(id).map(|c| client_row(c, width)))
+    app::store(|s| s.client(id).map(|c| client_row(c, width, s.active_client_id == Some(id))))
 }
 
 fn actions() -> Retained<Actions> {
@@ -1366,6 +1366,8 @@ struct Ui {
     tabs: Retained<FlexView>,
     /// Where a dragged tab will land (see `show_drop_marker`).
     drop_marker: Retained<NSView>,
+    /// The colour the tab strip is washed with now.
+    tab_tint: RefCell<Option<String>>,
     chips: RefCell<Vec<Retained<TabChip>>>,
     tab_plus: Retained<NSButton>,
     tab_overflow: Retained<NSButton>,
@@ -1579,22 +1581,34 @@ pub(crate) fn badge(hex: &str, symbol_name: Option<&str>, initials: &str, size: 
     v
 }
 
-pub(crate) fn client_row(c: &model::Client, width: f64) -> Retained<NSView> {
+/// One sidebar (and switcher) row: badge, name, tab count. The selected
+/// client also gets a 3 pt bar in its own colour on the leading edge, so
+/// which client is in front never depends on the system highlight alone.
+pub(crate) fn client_row(c: &model::Client, width: f64, selected: bool) -> Retained<NSView> {
+    use theme::{BADGE_TEXT_GAP as GAP, SIDEBAR_BADGE as BADGE, SIDEBAR_ROW_H as H, SIDEBAR_ROW_PAD as PAD};
     let row = flex(K_PLAIN);
-    row.setFrame(rect(0.0, 0.0, width, 44.0));
+    row.setFrame(rect(0.0, 0.0, width, H));
+    if selected {
+        let bar = NSView::initWithFrame(NSView::alloc(mtm()), rect(0.0, theme::GRID * 2.0, theme::SELECTION_BAR_W, H - theme::GRID * 4.0));
+        let hex = if c.is_search() { theme::SEARCH_BLUE } else { c.color_hex.as_str() };
+        set_layer_color(&bar, &util::color(hex), theme::SELECTION_BAR_W / 2.0);
+        bar.setAccessibilityElement(false);
+        row.addSubview(&bar);
+    }
     let sym = if c.is_search() { Some("magnifyingglass") } else { c.symbol_name.as_deref() };
-    let b = badge(&c.color_hex, sym, &c.initials(), 28.0);
-    b.setFrame(rect(8.0, 8.0, 28.0, 28.0));
+    let b = badge(&c.color_hex, sym, &c.initials(), BADGE);
+    b.setFrame(rect(PAD, (H - BADGE) / 2.0, BADGE, BADGE));
     row.addSubview(&b);
+    let x = PAD + BADGE + GAP;
     let name = text(&c.name, theme::Text::Headline, theme::Weight::Semibold);
-    name.setFrame(rect(46.0, 5.0, width - 54.0, 18.0));
+    name.setFrame(rect(x, theme::GRID + 1.0, width - x - theme::GRID * 2.0, 18.0));
     name.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
     row.addSubview(&name);
     let n = c.tabs.len();
     let sub_text = if c.is_search() { "Independent search".to_string() } else { format!("{n} tab{}", if n == 1 { "" } else { "s" }) };
     let sub = text(&sub_text, theme::Text::Footnote, theme::Weight::Regular);
-    sub.setTextColor(Some(&NSColor::secondaryLabelColor()));
-    sub.setFrame(rect(46.0, 23.0, width - 54.0, 16.0));
+    sub.setTextColor(Some(&theme::secondary_text()));
+    sub.setFrame(rect(x, theme::GRID * 6.0 - 1.0, width - x - theme::GRID * 2.0, 16.0));
     sub.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
     row.addSubview(&sub);
     // One element for VoiceOver: "Acme, 3 tabs" rather than three pieces.
@@ -1820,6 +1834,7 @@ pub fn build() {
         downloads_button,
         tabs,
         drop_marker,
+        tab_tint: RefCell::new(None),
         chips: RefCell::new(vec![]),
         tab_plus,
         tab_overflow,
@@ -2117,6 +2132,16 @@ fn refresh_tabs() {
             let tabs: Vec<(model::Tab, bool)> = c.tabs.iter().map(|t| (t.clone(), s.can_close_tab(c.id, t.id))).collect();
             (c.id, c.active_tab_id, tabs)
         })
+    });
+    // The strip carries a faint wash of the client's colour (the Search
+    // workspace stays neutral blue): acting in the wrong client is this
+    // app's costliest mistake.
+    let tint = app::store(|s| s.active_client().map(|c| if c.is_search() { theme::SEARCH_BLUE.to_string() } else { c.color_hex.clone() }));
+    with_ui(|u| {
+        if u.tab_tint.replace(tint.clone()) != tint {
+            let wash = tint.as_deref().map(theme::client_tint).unwrap_or_else(NSColor::clearColor);
+            set_layer_color(&u.tabs, &wash, 0.0);
+        }
     });
     let live = web::live_tabs();
     let mtm = mtm();
@@ -2423,7 +2448,9 @@ fn refresh_toolbar() {
             l.sizeToFit();
             let text_w = l.frame().size.width.ceil().clamp(20.0, 150.0);
             let chip = tile(T_CHIP, 0, rect(0.0, 9.0, text_w + 38.0, 28.0));
-            set_layer_color(&chip, &NSColor::quaternaryLabelColor().colorWithAlphaComponent(0.4), 14.0);
+            set_layer_color(&chip, &theme::chip_fill(), 14.0);
+            // Outlined in the client's colour, next to its badge.
+            set_layer_border(&chip, &util::color(if *search { theme::SEARCH_BLUE } else { hex.as_str() }), 1.0);
             let b = badge(hex, if *search { Some("magnifyingglass") } else { sym.as_deref() }, initials, 18.0);
             b.setFrame(rect(6.0, 5.0, 18.0, 18.0));
             chip.addSubview(&b);
