@@ -9,14 +9,14 @@ use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSAccessibility, NSBackingStoreType, NSButton, NSColor, NSControlStateValueOff, NSControlStateValueOn, NSFont, NSPopUpButton, NSScrollView, NSTextField, NSView, NSWindow,
+    NSAccessibility, NSBackingStoreType, NSButton, NSColor, NSControlStateValueOff, NSControlStateValueOn, NSPopUpButton, NSScrollView, NSTextField, NSView, NSWindow,
     NSWindowStyleMask,
 };
 use objc2_foundation::{NSObject, NSPoint, NSRect, NSSize};
 use uuid::Uuid;
 
 use crate::model::Workspace;
-use crate::{app, cleanup, keychain, session, settings, util, web};
+use crate::{app, cleanup, keychain, session, settings, theme, util, web};
 
 const W: f64 = 620.0;
 
@@ -196,7 +196,7 @@ struct Builder {
 impl Builder {
     fn heading(&mut self, text: &str) {
         self.y += 14.0;
-        let l = crate::ui::label(text, 15.0, true);
+        let l = crate::ui::text(text, theme::Text::Title3, theme::Weight::Bold);
         l.setFrame(rect(20.0, self.y, W - 40.0, 22.0));
         l.setAccessibilityRole(Some(&util::ns("AXHeading")));
         self.page.addSubview(&l);
@@ -205,7 +205,7 @@ impl Builder {
 
     fn text(&mut self, text: &str, secondary: bool) {
         let l = NSTextField::wrappingLabelWithString(&util::ns(text), mtm());
-        l.setFont(Some(&NSFont::systemFontOfSize(if secondary { 11.5 } else { 13.0 })));
+        l.setFont(Some(&theme::font(if secondary { theme::Text::Footnote } else { theme::Text::Body })));
         if secondary {
             l.setTextColor(Some(&NSColor::secondaryLabelColor()));
         }
@@ -227,7 +227,7 @@ impl Builder {
     }
 
     fn row_with_button(&mut self, text: &str, title: &str, action: objc2::runtime::Sel, tag: isize) {
-        let l = crate::ui::label(text, 12.5, false);
+        let l = crate::ui::text(text, theme::Text::Body, theme::Weight::Regular);
         l.setFrame(rect(24.0, self.y + 5.0, W - 200.0, 18.0));
         self.page.addSubview(&l);
         let b = self.button(title, action, tag, W - 170.0);

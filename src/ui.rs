@@ -1178,8 +1178,7 @@ fn message_screen(frame: NSRect, symbol_name: &str, title: &str, body: &str, but
         v.addSubview(&iv);
         y += 48.0 + theme::GRID * 3.0;
     }
-    let t = label(title, 0.0, false);
-    t.setFont(Some(&theme::font(theme::Text::Title2)));
+    let t = text(title, theme::Text::Title2, theme::Weight::Regular);
     t.setAlignment(objc2_app_kit::NSTextAlignment::Center);
     t.setFrame(rect(theme::SHEET_MARGIN, y, w - theme::SHEET_MARGIN * 2.0, 30.0));
     t.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
@@ -1368,6 +1367,29 @@ fn is_filtering() -> bool {
     with_ui(|u| !u.filter.borrow().is_empty()).unwrap_or(false)
 }
 
+/// A one-line label in one of the app's text styles (see `theme.rs`).
+pub(crate) fn text(s: &str, style: theme::Text, weight: theme::Weight) -> Retained<NSTextField> {
+    let l = NSTextField::labelWithString(&util::ns(s), mtm());
+    l.setFont(Some(&theme::font_weight(style, weight)));
+    l.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
+    l
+}
+
+/// A small-caps section label (CLIENTS, CRM…) with a little tracking.
+pub(crate) fn section_label(s: &str) -> Retained<NSTextField> {
+    use objc2_foundation::{NSAttributedString, NSDictionary, NSNumber, NSString};
+    let l = text(s, theme::Text::Caption, theme::Weight::Semibold);
+    let keys: [&NSString; 3] = unsafe { [objc2_app_kit::NSFontAttributeName, objc2_app_kit::NSForegroundColorAttributeName, objc2_app_kit::NSKernAttributeName] };
+    let values: [Retained<AnyObject>; 3] =
+        [util::any(theme::font_weight(theme::Text::Caption, theme::Weight::Semibold)), util::any(theme::secondary_text()), util::any(NSNumber::new_f64(theme::CAPTION_TRACKING))];
+    let attrs = NSDictionary::from_retained_objects(&keys, &values);
+    let attributed = unsafe { NSAttributedString::initWithString_attributes(<NSAttributedString as objc2::AllocAnyThread>::alloc(), &util::ns(s), Some(&attrs)) };
+    l.setAttributedStringValue(&attributed);
+    l
+}
+
+/// A label at an exact point size: only for initials drawn on a badge,
+/// whose size follows the badge, not the text styles.
 pub(crate) fn label(text: &str, size: f64, bold: bool) -> Retained<NSTextField> {
     let l = NSTextField::labelWithString(&util::ns(text), mtm());
     let font = if bold { NSFont::boldSystemFontOfSize(size) } else { NSFont::systemFontOfSize(size) };
@@ -1378,15 +1400,18 @@ pub(crate) fn label(text: &str, size: f64, bold: bool) -> Retained<NSTextField> 
 
 /// SF Symbols images, made once each: every tab chip's close button and the
 /// toolbar's reload/stop icon used to build a fresh image on each refresh.
+/// Toolbar-size symbols; every icon goes through `theme::symbol`, so one
+/// weight and scale is used everywhere.
 pub(crate) fn symbol(name: &str) -> Option<Retained<NSImage>> {
-    thread_local! {
-        static CACHE: RefCell<std::collections::HashMap<String, Option<Retained<NSImage>>>> = RefCell::new(std::collections::HashMap::new());
-    }
-    CACHE.with_borrow_mut(|c| c.entry(name.to_string()).or_insert_with(|| NSImage::imageWithSystemSymbolName_accessibilityDescription(&util::ns(name), None)).clone())
+    theme::symbol(name, theme::Icon::Toolbar)
 }
 
 pub(crate) fn sym_button(name: &str, tip: &str, action: Sel) -> Retained<NSButton> {
-    let image = symbol(name).unwrap_or_default();
+    sym_button_sized(name, tip, action, theme::Icon::Toolbar)
+}
+
+pub(crate) fn sym_button_sized(name: &str, tip: &str, action: Sel, icon: theme::Icon) -> Retained<NSButton> {
+    let image = theme::symbol(name, icon).unwrap_or_default();
     let b = unsafe { NSButton::buttonWithImage_target_action(&image, Some(&target()), Some(action), mtm()) };
     b.setBordered(false);
     b.setToolTip(Some(&util::ns(tip)));
@@ -1523,13 +1548,13 @@ pub(crate) fn client_row(c: &model::Client, width: f64) -> Retained<NSView> {
     let b = badge(&c.color_hex, sym, &c.initials(), 28.0);
     b.setFrame(rect(8.0, 8.0, 28.0, 28.0));
     row.addSubview(&b);
-    let name = label(&c.name, 13.0, true);
+    let name = text(&c.name, theme::Text::Headline, theme::Weight::Semibold);
     name.setFrame(rect(46.0, 5.0, width - 54.0, 18.0));
     name.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
     row.addSubview(&name);
     let n = c.tabs.len();
     let sub_text = if c.is_search() { "Independent search".to_string() } else { format!("{n} tab{}", if n == 1 { "" } else { "s" }) };
-    let sub = label(&sub_text, 11.0, false);
+    let sub = text(&sub_text, theme::Text::Footnote, theme::Weight::Regular);
     sub.setTextColor(Some(&NSColor::secondaryLabelColor()));
     sub.setFrame(rect(46.0, 23.0, width - 54.0, 16.0));
     sub.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
@@ -1576,7 +1601,7 @@ pub fn build() {
     side.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable);
     sidebar.addSubview(&side);
 
-    let side_title = label("CLIENTS", 10.5, true);
+    let side_title = section_label("CLIENTS");
     side_title.setTextColor(Some(&NSColor::secondaryLabelColor()));
     side.addSubview(&side_title);
     let sort_button = sym_button("arrow.up.arrow.down", "Sort clients", sel!(sortMenu:));
@@ -1620,7 +1645,8 @@ pub fn build() {
     table_scroll.setDrawsBackground(false);
     side.addSubview(&table_scroll);
 
-    let count_label = label("", 11.0, false);
+    let count_label = text("", theme::Text::Footnote, theme::Weight::Regular);
+    count_label.setFont(Some(&theme::digits(theme::Text::Footnote)));
     count_label.setTextColor(Some(&NSColor::secondaryLabelColor()));
     side.addSubview(&count_label);
     let add_button = unsafe { NSButton::buttonWithTitle_target_action(&util::ns("Add Client"), Some(&target()), Some(sel!(addClient:)), mtm) };
@@ -1660,7 +1686,7 @@ pub fn build() {
     if let Some(cell) = address.cell() {
         cell.setAccessibilityLabel(Some(&util::ns("Address and search")));
     }
-    address.setFont(Some(&NSFont::systemFontOfSize(13.0)));
+    address.setFont(Some(&theme::font(theme::Text::Body)));
     address.setBezelStyle(objc2_app_kit::NSTextFieldBezelStyle::RoundedBezel);
     unsafe { address.setDelegate(Some(ProtocolObject::from_ref(&*actions()))) };
     let search = sym_button("magnifyingglass", "Google Search workspace", sel!(search:));
@@ -1711,7 +1737,7 @@ pub fn build() {
         find_field.setAction(Some(sel!(findEntered:)));
         find_field.setDelegate(Some(ProtocolObject::from_ref(&*actions())));
     }
-    let find_status = label("", 11.0, false);
+    let find_status = text("", theme::Text::Footnote, theme::Weight::Regular);
     find_status.setTextColor(Some(&NSColor::secondaryLabelColor()));
     let find_done = unsafe { NSButton::buttonWithTitle_target_action(&util::ns("Done"), Some(&target()), Some(sel!(findDone:)), mtm) };
     find.addSubview(&find_field);
@@ -2086,7 +2112,7 @@ fn refresh_tabs() {
         // A tab in a call shows a red camera (or microphone) instead of its
         // colour dot, so the call is easy to find among the tabs.
         if let Some((camera, _)) = call {
-            let icon = NSImageView::imageViewWithImage(&symbol(if camera { "video.fill" } else { "mic.fill" }).unwrap_or_default(), mtm);
+            let icon = NSImageView::imageViewWithImage(&theme::symbol(if camera { "video.fill" } else { "mic.fill" }, theme::Icon::Tab).unwrap_or_default(), mtm);
             icon.setContentTintColor(Some(&NSColor::systemRedColor()));
             chip.addSubview(&icon);
         } else {
@@ -2094,10 +2120,13 @@ fn refresh_tabs() {
             set_layer_color(&dot, &util::color(&color), 4.0);
             chip.addSubview(&dot);
         }
-        chip.addSubview(&label(&title, 12.0, is_active));
+        // Every tab title has the same weight: bold on the selected one
+        // changed its width and where it was cut off. Selection shows in
+        // the background only.
+        chip.addSubview(&text(&title, theme::Text::Callout, theme::Weight::Medium));
         chip.setToolTip(Some(&util::ns(&if call.is_some() { format!("{title} — in a call") } else { title.clone() })));
         if *closable {
-            let close = sym_button("xmark", "Close tab (⌘W)", sel!(tabClose:));
+            let close = sym_button_sized("xmark", "Close tab (⌘W)", sel!(tabClose:), theme::Icon::Tab);
             close.setTag(i as isize);
             set_ax_label(&close, &format!("Close {title}"));
             chip.addSubview(&close);
@@ -2282,7 +2311,7 @@ fn refresh_toolbar() {
             u.chip_key.replace(key);
         }
         if let (true, Some((hex, sym, initials, name, search, _, _))) = (rebuild, &info) {
-            let l = label(name, 13.0, true);
+            let l = text(name, theme::Text::Callout, theme::Weight::Semibold);
             l.sizeToFit();
             let text_w = l.frame().size.width.ceil().clamp(20.0, 150.0);
             let chip = tile(T_CHIP, 0, rect(0.0, 9.0, text_w + 38.0, 28.0));
@@ -2685,12 +2714,12 @@ pub fn show_client_sheet(client: Option<Uuid>) {
     body.setFrame(rect(0.0, 0.0, w, h));
     window.setContentView(Some(&body));
 
-    let heading = label(if existing.is_some() { "Customise Client" } else { "Add Client" }, 16.0, true);
+    let heading = text(if existing.is_some() { "Customise Client" } else { "Add Client" }, theme::Text::Title3, theme::Weight::Bold);
     heading.setFrame(rect(20.0, 18.0, w - 40.0, 22.0));
     body.addSubview(&heading);
 
     let caption = |text: &str, y: f64| {
-        let l = label(text, 12.0, false);
+        let l = self::text(text, theme::Text::Body, theme::Weight::Regular);
         l.setAlignment(objc2_app_kit::NSTextAlignment::Right);
         l.setFrame(rect(16.0, y + 3.0, 82.0, 18.0));
         body.addSubview(&l);
@@ -2746,7 +2775,7 @@ pub fn show_client_sheet(client: Option<Uuid>) {
     symbol_popup.selectItemAtIndex(selected as isize);
     body.addSubview(&symbol_popup);
 
-    let section = label("Sign-in", 13.0, true);
+    let section = text("Sign-in", theme::Text::Headline, theme::Weight::Semibold);
     section.setFrame(rect(20.0, 190.0, w - 40.0, 18.0));
     body.addSubview(&section);
 
@@ -2777,7 +2806,7 @@ pub fn show_client_sheet(client: Option<Uuid>) {
         (Some(_), Some(e)) => format!("Saved for {e}"),
         (Some(_), None) => "Not saved".to_string(),
     };
-    let login_status = label(&status_text, 12.0, false);
+    let login_status = text(&status_text, theme::Text::Callout, theme::Weight::Regular);
     login_status.setFrame(rect(108.0, 251.0, w - 290.0, 18.0));
     body.addSubview(&login_status);
     let change_button = unsafe {
@@ -2813,7 +2842,7 @@ pub fn show_client_sheet(client: Option<Uuid>) {
         ),
         mtm,
     );
-    note.setFont(Some(&NSFont::systemFontOfSize(11.0)));
+    note.setFont(Some(&theme::font(theme::Text::Footnote)));
     note.setTextColor(Some(&NSColor::secondaryLabelColor()));
     note.setFrame(rect(108.0, 364.0, w - 128.0, 72.0));
     body.addSubview(&note);
@@ -2905,8 +2934,7 @@ fn sheet_pick_swatch(index: usize) {
 
 /// A small red line under a field, empty until there is something to say.
 fn error_label(frame: NSRect) -> Retained<NSTextField> {
-    let l = label("", 0.0, false);
-    l.setFont(Some(&theme::font(theme::Text::Footnote)));
+    let l = text("", theme::Text::Footnote, theme::Weight::Regular);
     l.setTextColor(Some(&theme::destructive()));
     l.setFrame(frame);
     l

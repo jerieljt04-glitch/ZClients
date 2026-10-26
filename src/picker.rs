@@ -11,7 +11,7 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject, Sel};
 use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSButton, NSColor, NSControl, NSControlTextEditingDelegate, NSEvent, NSFont, NSResponder, NSScrollView, NSSearchField, NSSearchFieldDelegate, NSTableColumn, NSTableView,
+    NSButton, NSColor, NSControl, NSControlTextEditingDelegate, NSEvent, NSResponder, NSScrollView, NSSearchField, NSSearchFieldDelegate, NSTableColumn, NSTableView,
     NSTableViewDataSource, NSTableViewDelegate, NSTableViewStyle, NSTextField, NSTextFieldDelegate, NSTextView, NSView,
 };
 use objc2_foundation::{NSIndexSet, NSInteger, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize};
@@ -202,9 +202,9 @@ pub fn build(client_name: &str) -> Retained<NSView> {
         unsafe { msg_send![super(this), initWithFrame: rect(0.0, 0.0, 800.0, 600.0)] }
     };
 
-    let title = ui::label("Open a Zoho app", 24.0, true);
+    let title = ui::text("Open a Zoho app", theme::Text::LargeTitle, theme::Weight::Bold);
     title.setAlignment(objc2_app_kit::NSTextAlignment::Center);
-    let subtitle = ui::label(&format!("Opens signed in as “{client_name}”."), 13.0, false);
+    let subtitle = ui::text(&format!("Opens signed in as “{client_name}”."), theme::Text::Body, theme::Weight::Regular);
     subtitle.setTextColor(Some(&NSColor::secondaryLabelColor()));
     subtitle.setAlignment(objc2_app_kit::NSTextAlignment::Center);
 
@@ -213,14 +213,14 @@ pub fn build(client_name: &str) -> Retained<NSView> {
         unsafe { msg_send![super(this), initWithFrame: rect(0.0, 0.0, 400.0, 32.0)] }
     };
     field.setPlaceholderString(Some(&util::ns("Choose or type a Zoho app — CRM, Books, invoice, chat…")));
-    field.setFont(Some(&NSFont::systemFontOfSize(15.0)));
+    field.setFont(Some(&theme::font(theme::Text::Title3)));
     field.setSendsSearchStringImmediately(true);
     unsafe { field.setDelegate(Some(ProtocolObject::from_ref(&*ctl))) };
 
     let chevron = ui::sym_button("chevron.down", "Show all Zoho apps", sel!(toggle:));
     unsafe { chevron.setTarget(Some(target)) };
 
-    let hint = ui::label(&format!("{} Zoho apps  ·  ↑ ↓ to choose  ·  ↩ to open  ·  Esc to close", ZOHO_APPS.len()), 11.5, false);
+    let hint = ui::text(&format!("{} Zoho apps  ·  ↑ ↓ to choose  ·  ↩ to open  ·  Esc to close", ZOHO_APPS.len()), theme::Text::Footnote, theme::Weight::Regular);
     hint.setTextColor(Some(&NSColor::tertiaryLabelColor()));
     hint.setAlignment(objc2_app_kit::NSTextAlignment::Center);
 
@@ -409,7 +409,7 @@ fn row_view(table: &NSTableView, row: NSInteger) -> Option<Retained<NSView>> {
     let v = NSView::initWithFrame(NSView::alloc(mtm), rect(0.0, 0.0, width, ROW_H));
     match r {
         Row::Header(name) => {
-            let l = ui::label(&name.to_uppercase(), 10.5, true);
+            let l = ui::section_label(&name.to_uppercase());
             l.setTextColor(Some(&NSColor::secondaryLabelColor()));
             l.setFrame(rect(10.0, 4.0, width - 20.0, 16.0));
             v.addSubview(&l);
@@ -419,17 +419,17 @@ fn row_view(table: &NSTableView, row: NSInteger) -> Option<Retained<NSView>> {
             let b = ui::badge(a.color, None, &a.initials(), 26.0);
             b.setFrame(rect(8.0, 7.0, 26.0, 26.0));
             v.addSubview(&b);
-            let name = ui::label(&a.full_name(), 13.5, true);
+            let name = ui::text(&a.full_name(), theme::Text::Headline, theme::Weight::Semibold);
             name.setFrame(rect(44.0, 11.0, width * 0.5, 18.0));
             v.addSubview(&name);
-            let cat = ui::label(a.category, 11.5, false);
+            let cat = ui::text(a.category, theme::Text::Footnote, theme::Weight::Regular);
             cat.setTextColor(Some(&NSColor::secondaryLabelColor()));
             cat.setAlignment(objc2_app_kit::NSTextAlignment::Right);
             cat.setFrame(rect(width * 0.5, 12.0, width * 0.5 - 14.0, 16.0));
             v.addSubview(&cat);
         }
         Row::Nothing => {
-            let l = ui::label("No Zoho app matches — press ↩ to search or open it as an address", 12.5, false);
+            let l = ui::text("No Zoho app matches — press ↩ to search or open it as an address", theme::Text::Callout, theme::Weight::Regular);
             l.setTextColor(Some(&NSColor::secondaryLabelColor()));
             l.setFrame(rect(12.0, 11.0, width - 24.0, 18.0));
             v.addSubview(&l);

@@ -119,12 +119,6 @@ fn find<R>(key: usize, f: impl FnOnce(&Item) -> R) -> Option<R> {
     ITEMS.with_borrow(|v| v.iter().find(|i| i.key == key).map(f))
 }
 
-/// Fraction done (0..1) of a download still running, when known.
-pub fn progress(key: usize) -> Option<f64> {
-    find(key, |i| i.state == State::Downloading).filter(|d| *d)?;
-    LIVE.with_borrow(|m| m.get(&key).map(|d| d.progress().fractionCompleted()))
-}
-
 /// Bytes received and expected so far (expected unknown: None).
 pub fn bytes(key: usize) -> Option<(i64, Option<i64>)> {
     LIVE.with_borrow(|m| {
