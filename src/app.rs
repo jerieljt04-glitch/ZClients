@@ -415,9 +415,28 @@ pub fn close_tab(client: Uuid, tab: Uuid) {
     mutate_apply(ALL, |s| s.close_tab(client, tab));
 }
 
+/// The user closes a tab (⌘W, the tab's ×, middle-click, its menu). A tab
+/// in a call asks first: closing it hangs up.
+pub fn request_close_tab(client: Uuid, tab: Uuid) {
+    if let Some((camera, _)) = web::call_state(tab) {
+        let title = store(|s| s.find_tab(tab).map(|t| t.display_title())).unwrap_or_default();
+        let what = if camera { "camera and microphone" } else { "microphone" };
+        let (choice, _) = web::run_alert(
+            &format!("Close “{title}” and end the call?"),
+            &format!("This tab is using the {what}. Closing it hangs up for you."),
+            &["Close Tab", "Cancel"],
+            None,
+        );
+        if choice != 0 {
+            return;
+        }
+    }
+    close_tab(client, tab);
+}
+
 pub fn close_active_tab() {
     if let Some((c, t)) = store(|s| s.active_tab().map(|(c, t)| (c.id, t.id))) {
-        close_tab(c, t);
+        request_close_tab(c, t);
     }
 }
 

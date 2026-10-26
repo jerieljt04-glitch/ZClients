@@ -186,7 +186,7 @@ define_class!(
 
         #[unsafe(method(otherMouseUp:))]
         fn other_mouse_up(&self, _event: &NSEvent) {
-            app::close_tab(self.ivars().client, self.ivars().tab);
+            app::request_close_tab(self.ivars().client, self.ivars().tab);
         }
 
         #[unsafe(method(rightMouseDown:))]
@@ -244,7 +244,7 @@ define_class!(
                 "\u{F702}" => focus_chip_offset(tab, -1),
                 "\u{F703}" => focus_chip_offset(tab, 1),
                 " " | "\r" => app::select_tab(client, tab),
-                "\u{7f}" | "\u{F728}" => app::close_tab(client, tab),
+                "\u{7f}" | "\u{F728}" => app::request_close_tab(client, tab),
                 _ => unsafe {
                     let _: () = msg_send![super(self), keyDown: event];
                 },
@@ -740,13 +740,13 @@ define_class!(
         fn a_tab_close(&self, s: Option<&NSButton>) {
             let Some(i) = s.map(|s| s.tag() as usize) else { return };
             if let Some((c, t)) = app::store(|st| st.active_client().and_then(|c| c.tabs.get(i).map(|t| (c.id, t.id)))) {
-                app::close_tab(c, t);
+                app::request_close_tab(c, t);
             }
         }
 
         #[unsafe(method(tabMenuLeft:))] fn a_tm_left(&self, _s: Option<&AnyObject>) { if let Some((c, t)) = MENU_TAB.get() { app::move_tab(c, t, -1); } }
         #[unsafe(method(tabMenuRight:))] fn a_tm_right(&self, _s: Option<&AnyObject>) { if let Some((c, t)) = MENU_TAB.get() { app::move_tab(c, t, 1); } }
-        #[unsafe(method(tabMenuClose:))] fn a_tm_close(&self, _s: Option<&AnyObject>) { if let Some((c, t)) = MENU_TAB.get() { app::close_tab(c, t); } }
+        #[unsafe(method(tabMenuClose:))] fn a_tm_close(&self, _s: Option<&AnyObject>) { if let Some((c, t)) = MENU_TAB.get() { app::request_close_tab(c, t); } }
         #[unsafe(method(tabMenuDuplicate:))]
         fn a_tm_dup(&self, _s: Option<&AnyObject>) {
             if let Some((c, t)) = MENU_TAB.get() {
