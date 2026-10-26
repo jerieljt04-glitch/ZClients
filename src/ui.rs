@@ -1389,7 +1389,10 @@ pub fn build() {
     // its web content process) used to happen before anything was on screen.
     refresh(app::SIDEBAR | app::TABS | app::TOOLBAR);
     window.makeKeyAndOrderFront(None);
-    util::later(|| refresh(app::CONTENT | app::TABS));
+    util::later(|| {
+        web::prewarm_active_profile();
+        refresh(app::CONTENT | app::TABS);
+    });
     if std::env::var_os("ZCLIENTS_DEBUG").is_some() {
         let f = window.frame();
         let close = window.standardWindowButton(objc2_app_kit::NSWindowButton::CloseButton);

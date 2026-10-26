@@ -43,7 +43,12 @@ define_class!(
             let app = NSApplication::sharedApplication(self.mtm());
             app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
             app::load();
-            web::prewarm_active_profile();
+            // The window goes up first: restoring the session reads the
+            // vault key, and after an update macOS asks for Keychain access
+            // right then. Asked before the window existed, the prompt sat
+            // over an empty screen. `ui::build` starts the restore on the
+            // next turn, before the first page is created, and that page
+            // still waits for it.
             ui::build();
             app::start_background_work();
             selftest::start();
