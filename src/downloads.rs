@@ -376,6 +376,8 @@ define_class!(
             let finish = std::rc::Rc::new(completion.copy());
             let cancel = finish.clone();
             let place = move |name: String| {
+                // WebKit cancels a download whose folder does not exist.
+                let _ = std::fs::create_dir_all(util::downloads_dir());
                 let path = unique_path(&util::downloads_dir(), &name);
                 let url = NSURL::fileURLWithPath(&util::ns(&path.to_string_lossy()));
                 let mut item = Item::new(key, path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(), Some(path), State::Downloading, client);

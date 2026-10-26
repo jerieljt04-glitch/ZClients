@@ -1019,13 +1019,19 @@ fn walk_ax(el: &objc2::runtime::AnyObject, depth: usize, out: &mut Vec<String>, 
 /// running when the test quits.
 const SLOW_DOWNLOAD: &str = "https://proof.ovh.net/files/1Gb.dat";
 
+/// Crash a tab's page the way a real crash looks to WebKit: SIGKILL its
+/// WebContent process (pid from the private `_webProcessIdentifier`).
 fn kill_web_content(tab: uuid::Uuid) -> bool {
+    unsafe extern "C" {
+        fn kill(pid: i32, sig: i32) -> i32;
+    }
     web::live_view(tab).is_some_and(|v| unsafe {
-        let responds: bool = objc2::msg_send![&*v, respondsToSelector: objc2::sel!(_killWebContentProcess)];
-        if responds {
-            let _: () = objc2::msg_send![&*v, _killWebContentProcess];
+        let responds: bool = objc2::msg_send![&*v, respondsToSelector: objc2::sel!(_webProcessIdentifier)];
+        if !responds {
+            return false;
         }
-        responds
+        let pid: i32 = objc2::msg_send![&*v, _webProcessIdentifier];
+        pid > 0 && kill(pid, 9) == 0
     })
 }
 

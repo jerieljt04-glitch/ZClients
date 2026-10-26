@@ -677,6 +677,8 @@ define_class!(
 
         #[unsafe(method(webViewWebContentProcessDidTerminate:))]
         fn process_died(&self, web: &WKWebView) {
+            let front = self.ivars().tab_id.is_some_and(|t| POOL.with_borrow(|p| p.active) == Some(t));
+            util::log(format!("web content process ended ({})", if front { "tab in front" } else if self.ivars().tab_id.is_some() { "background tab" } else { "popup" }));
             // macOS ends background pages' processes to free memory. Reloading
             // them on the spot looked like pages refreshing by themselves and
             // spent the memory again; a background tab goes to sleep instead
