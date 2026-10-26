@@ -619,6 +619,13 @@ define_class!(
             if ns_str_url(unsafe { web.URL() }).is_some_and(|u| u != "about:blank") {
                 self.ivars().fresh.set(false);
             }
+            // The saved zoom goes on as soon as the new page commits, before
+            // it first paints; applied only on finish, pages showed at 100 %
+            // and then jumped.
+            let iv = self.ivars();
+            if let Some(url) = ns_str_url(unsafe { web.URL() }).and_then(|s| policy::parse(&s)).filter(|u| policy::is_allowed_web(u, iv.workspace)) {
+                apply_saved_zoom(web, iv.client_id, &url);
+            }
             self.state_changed(web);
         }
 
