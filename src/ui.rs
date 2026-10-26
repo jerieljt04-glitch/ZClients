@@ -107,6 +107,11 @@ pub struct ChipIvars {
     /// What VoiceOver reads: the title plus any state (selected is separate).
     ax_label: RefCell<String>,
     ax_selected: Cell<bool>,
+    /// The pointer is over the chip (subtle fill, close button shown).
+    hover: Cell<bool>,
+    closable: Cell<bool>,
+    /// Draw the 1 pt divider on the right (both neighbours unselected).
+    divider: Cell<bool>,
 }
 
 define_class!(
@@ -199,6 +204,39 @@ define_class!(
                 }
             }
             self.ivars().down.set(None);
+        }
+
+        // Hover: a subtle fill and the close button, as in Safari.
+        #[unsafe(method(updateTrackingAreas))]
+        fn update_tracking_areas(&self) {
+            unsafe {
+                let _: () = msg_send![super(self), updateTrackingAreas];
+            }
+            if self.trackingAreas().is_empty() {
+                use objc2_app_kit::NSTrackingAreaOptions as O;
+                let area = unsafe {
+                    objc2_app_kit::NSTrackingArea::initWithRect_options_owner_userInfo(
+                        <objc2_app_kit::NSTrackingArea as objc2::AllocAnyThread>::alloc(),
+                        self.bounds(),
+                        O::MouseEnteredAndExited | O::ActiveInKeyWindow | O::InVisibleRect,
+                        Some(self),
+                        None,
+                    )
+                };
+                self.addTrackingArea(&area);
+            }
+        }
+
+        #[unsafe(method(mouseEntered:))]
+        fn mouse_entered(&self, _e: &NSEvent) {
+            self.ivars().hover.set(true);
+            style_chip(self);
+        }
+
+        #[unsafe(method(mouseExited:))]
+        fn mouse_exited(&self, _e: &NSEvent) {
+            self.ivars().hover.set(false);
+            style_chip(self);
         }
 
         #[unsafe(method(otherMouseUp:))]
@@ -1932,24 +1970,63 @@ pub fn tab_window(n: usize, active: usize, width: f64) -> (usize, usize, f64) {
     (start, count, avail / count as f64)
 }
 
+/// A chip's parts are found by identifier: "lead" (colour dot or call
+/// icon), "moon" (asleep), "title", "close", "divider".
+fn chip_part(chip: &TabChip, id: &str) -> Option<Retained<NSView>> {
+    chip.subviews().iter().find(|v| v.identifier().is_some_and(|i| i.to_string() == id))
+}
+
 fn layout_chip(chip: &TabChip) {
     let b = chip.bounds().size;
-    let subs = chip.subviews();
-    // [dot, title, close?]
-    if let Some(dot) = subs.iter().next() {
-        if dot.isKindOfClass(<NSImageView as objc2::ClassType>::class()) {
-            dot.setFrame(rect(7.0, (b.height - 14.0) / 2.0, 14.0, 14.0));
+    let mut x = 10.0;
+    if let Some(lead) = chip_part(chip, "lead") {
+        if lead.isKindOfClass(<NSImageView as objc2::ClassType>::class()) {
+            lead.setFrame(rect(7.0, (b.height - 14.0) / 2.0, 14.0, 14.0));
         } else {
-            dot.setFrame(rect(10.0, (b.height - 8.0) / 2.0, 8.0, 8.0));
+            lead.setFrame(rect(10.0, (b.height - 8.0) / 2.0, 8.0, 8.0));
         }
+        x = 24.0;
     }
-    let close_w = if subs.len() > 2 { 22.0 } else { 6.0 };
-    if let Some(title) = subs.iter().nth(1) {
-        title.setFrame(rect(24.0, (b.height - 16.0) / 2.0, (b.width - 24.0 - close_w).max(10.0), 16.0));
+    if let Some(moon) = chip_part(chip, "moon") {
+        moon.setFrame(rect(x, (b.height - 14.0) / 2.0, 14.0, 14.0));
+        x += 16.0;
     }
-    if let Some(close) = subs.iter().nth(2) {
-        close.setFrame(rect(b.width - 21.0, (b.height - 16.0) / 2.0, 16.0, 16.0));
+    let close_shown = chip_part(chip, "close").is_some_and(|c| !c.isHidden());
+    let right = if close_shown { 24.0 } else { 8.0 };
+    if let Some(title) = chip_part(chip, "title") {
+        let h = title.fittingSize().height.ceil().max(14.0);
+        title.setFrame(rect(x, (b.height - h) / 2.0, (b.width - x - right).max(10.0), h));
     }
+    if let Some(close) = chip_part(chip, "close") {
+        close.setFrame(rect(b.width - 22.0, (b.height - 18.0) / 2.0, 18.0, 18.0));
+    }
+    if let Some(d) = chip_part(chip, "divider") {
+        d.setFrame(rect(b.width + 1.5, 7.0, 1.0, b.height - 14.0));
+    }
+}
+
+/// Fill, close button and divider for the chip's current state (selected,
+/// under the pointer, or neither); no rebuild.
+fn style_chip(chip: &TabChip) {
+    let iv = chip.ivars();
+    let (active, hover) = (iv.ax_selected.get(), iv.hover.get());
+    let fill = if active {
+        theme::selected_tab_fill()
+    } else if hover {
+        theme::hover_fill()
+    } else {
+        NSColor::clearColor()
+    };
+    set_layer_color(chip, &fill, theme::CHIP_RADIUS);
+    if let Some(close) = chip_part(chip, "close") {
+        // Safari: × only on the selected tab and under the pointer.
+        // Keyboard Delete and the tab menu (VoiceOver too) still close.
+        close.setHidden(!(iv.closable.get() && (active || hover)));
+    }
+    if let Some(d) = chip_part(chip, "divider") {
+        d.setHidden(!iv.divider.get() || hover);
+    }
+    layout_chip(chip);
 }
 
 /// The tab a dragged tab would land on if released at window point `p`,
@@ -2063,6 +2140,9 @@ fn refresh_tabs() {
                     rendered: RefCell::new(String::new()),
                     ax_label: RefCell::new(String::new()),
                     ax_selected: Cell::new(false),
+                    hover: Cell::new(false),
+                    closable: Cell::new(false),
+                    divider: Cell::new(false),
                 });
                 let chip: Retained<TabChip> = unsafe { msg_send![super(this), initWithFrame: rect(0.0, 0.0, 150.0, 28.0)] };
                 chip
@@ -2072,11 +2152,11 @@ fn refresh_tabs() {
 
     for (i, ((t, closable), chip)) in tabs.iter().zip(chips.iter()).enumerate() {
         let is_active = Some(t.id) == active;
-        // A sleeping tab is dimmed; it wakes, signed in and at its place,
-        // when selected.
+        // A sleeping tab wakes, signed in and at its place, when selected;
+        // until then its title is dimmed and a small moon says why.
         let asleep = t.url.is_some() && !live.contains(&t.id) && !is_active;
         if !chip.ivars().dragged.get() {
-            chip.setAlphaValue(if asleep { 0.55 } else { 1.0 });
+            chip.setAlphaValue(1.0);
         }
         // Pages retitle themselves constantly (unread counts, loading);
         // rebuilding every chip each time was the tab strip's main cost.
@@ -2100,39 +2180,67 @@ fn refresh_tabs() {
         }
         chip.ivars().ax_label.replace(ax);
         chip.ivars().ax_selected.set(is_active);
-        let key = format!("{i}|{is_active}|{closable}|{color}|{title}|{call:?}");
+        chip.ivars().closable.set(*closable);
+        // A divider between two unselected tabs only.
+        let next_active = tabs.get(i + 1).is_some_and(|(n, _)| Some(n.id) == active);
+        chip.ivars().divider.set(!is_active && !next_active && i + 1 < tabs.len());
+        let key = format!("{i}|{closable}|{color}|{title}|{call:?}|{asleep}");
         if *chip.ivars().rendered.borrow() == key {
+            style_chip(chip);
             continue;
         }
         for v in chip.subviews().iter() {
             v.removeFromSuperview();
         }
-        let bg = if is_active { NSColor::controlAccentColor().colorWithAlphaComponent(0.16) } else { NSColor::clearColor() };
-        set_layer_color(chip, &bg, 7.0);
+        let part = |v: &NSView, id: &str| {
+            v.setIdentifier(Some(&util::ns(id)));
+            chip.addSubview(v);
+        };
         // A tab in a call shows a red camera (or microphone) instead of its
         // colour dot, so the call is easy to find among the tabs.
         if let Some((camera, _)) = call {
             let icon = NSImageView::imageViewWithImage(&theme::symbol(if camera { "video.fill" } else { "mic.fill" }, theme::Icon::Tab).unwrap_or_default(), mtm);
             icon.setContentTintColor(Some(&NSColor::systemRedColor()));
-            chip.addSubview(&icon);
+            part(&icon, "lead");
         } else {
             let dot = NSView::initWithFrame(NSView::alloc(mtm), rect(0.0, 0.0, 8.0, 8.0));
             set_layer_color(&dot, &util::color(&color), 4.0);
-            chip.addSubview(&dot);
+            part(&dot, "lead");
+        }
+        if asleep {
+            let moon = NSImageView::imageViewWithImage(&theme::symbol("moon.zzz", theme::Icon::Tab).unwrap_or_default(), mtm);
+            moon.setContentTintColor(Some(&theme::secondary_text()));
+            part(&moon, "moon");
         }
         // Every tab title has the same weight: bold on the selected one
         // changed its width and where it was cut off. Selection shows in
         // the background only.
-        chip.addSubview(&text(&title, theme::Text::Callout, theme::Weight::Medium));
-        chip.setToolTip(Some(&util::ns(&if call.is_some() { format!("{title} — in a call") } else { title.clone() })));
+        let label = text(&title, theme::Text::Callout, theme::Weight::Medium);
+        if asleep {
+            label.setTextColor(Some(&theme::secondary_text()));
+        }
+        part(&label, "title");
+        let host = t.parsed_url().filter(|u| u.scheme() != "file").and_then(|u| u.host_str().map(str::to_string));
+        let mut tip = title.clone();
+        if let Some(h) = host {
+            tip.push('\n');
+            tip.push_str(&h);
+        }
+        if call.is_some() {
+            tip.push_str("\nIn a call");
+        }
+        chip.setToolTip(Some(&util::ns(&tip)));
         if *closable {
             let close = sym_button_sized("xmark", "Close tab (⌘W)", sel!(tabClose:), theme::Icon::Tab);
             close.setTag(i as isize);
             set_ax_label(&close, &format!("Close {title}"));
-            chip.addSubview(&close);
+            part(&close, "close");
         }
-        layout_chip(chip);
+        let divider = NSView::initWithFrame(NSView::alloc(mtm), rect(0.0, 0.0, 1.0, 10.0));
+        set_layer_color(&divider, &theme::separator(), 0.0);
+        part(&divider, "divider");
         chip.ivars().rendered.replace(key);
+        style_chip(chip);
     }
 
     if existing != wanted {
