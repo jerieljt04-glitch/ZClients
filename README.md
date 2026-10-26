@@ -12,7 +12,7 @@ scripts/check.sh        # every CI gate: fmt, clippy -D warnings, tests, propert
 ./build.sh --test       # "ZClients Test": separate bundle id and data, ad-hoc signed
 ./build.sh              # test, build universal, sign (local identity), ask, install
 ./build.sh --no-install # build and sign into .build/
-cargo test              # 133 unit, migration, failure-injection and property tests
+cargo test              # 136 unit, migration, failure-injection and property tests
 ```
 
 The version lives only in `Cargo.toml` (`version` + `[package.metadata.zclients]
@@ -50,6 +50,8 @@ Run the test app with its own home so nothing real is touched:
 - `security`, `a11y`, `address2`: the 1.5 hardening, accessibility tree and
   address-bar rules (see `docs/TESTING.md`). `ZCLIENTS_ALERTS=accept|decline`
   answers the app's questions unattended.
+- `search` (2.1): the Google Search workspace opens Zoho pages in place,
+  blocks every other website, and sends Meet to a client.
 - `stability` (2.0): quit/close confirmations, partial-download cleanup, the
   crash-loop guard and download-menu keys (see `docs/TESTING.md`).
 - `memory`: with `ZCLIENTS_IDLE_SECS=6`, four tabs are shown once and Memory
@@ -63,7 +65,7 @@ Run the test app with its own home so nothing real is touched:
 | `main.rs` | App delegate: launch, background, quit (asks first during a download or call) |
 | `app.rs` | The hub: profile store, saving, every user command |
 | `model.rs` | Clients, tabs, sorting, each client's data centre; reads/writes the Swift-compatible `clients.json` |
-| `policy.rs` | Which URLs load; one `decide(Capability, Request)` for camera, mic, screen, autofill, bridge, downloads, file chooser, deep links, popups — by exact origin; per-data-centre host lists; SSO identity-provider steps |
+| `policy.rs` | Which URLs load (the Google Search workspace: Google Search and Zoho in place, Meet to a client, nothing else — `search_route`); one `decide(Capability, Request)` for camera, mic, screen, autofill, bridge, downloads, file chooser, deep links, popups — by exact origin; per-data-centre host lists; SSO identity-provider steps |
 | `settings.rs` | settings.json: per-site download permission, zoom, keyboard choices, developer mode |
 | `pdf.rs` | PDF validation (magic, size, no links) and private per-preview folders |
 | `cleanup.rs` | Profile deletion as a persisted, verified, retryable job |

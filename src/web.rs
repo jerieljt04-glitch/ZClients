@@ -954,6 +954,8 @@ pub enum LoadError {
     PdfMissing,
     /// The tab's saved address is not one this app shows any more.
     NotAllowed,
+    /// The Google Search workspace opens only Google Search and Zoho pages.
+    BlockedInSearch,
     Offline,
     Certificate,
     Authentication,
@@ -1211,6 +1213,19 @@ impl Coordinator {
         }
     }
 
+    /// The Search workspace refused to open `url`: say so over the tab (its
+    /// page stays underneath), or close a pop-up that never showed anything.
+    fn blocked_in_search(&self, url: &Url) {
+        util::log("the Google Search workspace blocked a page that is not Google Search or Zoho");
+        match self.ivars().tab_id {
+            Some(tab) => {
+                let url = url.to_string();
+                util::later(move || ui::show_load_error(tab, LoadError::BlockedInSearch, Some(url)));
+            }
+            None => self.close_if_blank(),
+        }
+    }
+
     /// A download started from a tab or popup that never showed anything:
     /// close it. WebKit keeps the download going without its web view.
     fn close_if_blank(&self) {
@@ -1247,12 +1262,23 @@ impl Coordinator {
         let source_trusted = self.trusted_opt(unsafe { action.sourceFrame() });
         let user_link = unsafe { action.navigationType() } == WKNavigationType::LinkActivated;
 
-        // Search has its own cookie store: Zoho/Meet results become normal
-        // tabs of this client, signed in with its profile.
-        if iv.workspace == Workspace::GoogleSearch && iv.tab_id.is_some() && policy::should_open_in_client_workspace(&url) {
-            let client = iv.client_id;
-            util::later(move || app::open_in_client_workspace(client, url));
-            return WKNavigationActionPolicy::Cancel;
+        // The Search workspace roams Google Search and opens Zoho pages in
+        // place, in its own cookie store; Meet becomes a tab of a real
+        // client; any other website is blocked (never handed to the
+        // default browser), with an explanation over the page.
+        if iv.workspace == Workspace::GoogleSearch && policy::is_web_address(&url) {
+            match policy::search_route(&url) {
+                policy::SearchRoute::Here => {}
+                policy::SearchRoute::Client if iv.tab_id.is_some() => {
+                    let client = iv.client_id;
+                    util::later(move || app::open_in_client_workspace(client, url));
+                    return WKNavigationActionPolicy::Cancel;
+                }
+                _ => {
+                    self.blocked_in_search(&url);
+                    return WKNavigationActionPolicy::Cancel;
+                }
+            }
         }
 
         // ⌘-click on a link: a new tab in the background, the user stays on
@@ -1462,6 +1488,12 @@ impl Coordinator {
         };
 
         if let Some(u) = &url {
+            // Search workspace: a new window or tab for any other website
+            // is refused like a link (no pop-up, no default browser).
+            if iv.workspace == Workspace::GoogleSearch && policy::is_web_address(u) && policy::search_route(u) == policy::SearchRoute::Blocked {
+                self.blocked_in_search(u);
+                return None;
+            }
             if unsafe { action.shouldPerformDownload() } && source_trusted && policy::is_safe_download(u, iv.workspace) {
                 if !download_consent(iv.client_id, policy::decide(Capability::Download, &source_request), source_request.origin.as_ref()) {
                     return None;
@@ -1827,6 +1859,7 @@ fn load_tab(view: &ZWebView, tab: &Tab) {
             let req = NSURLRequest::requestWithURL(&nsurl);
             unsafe { view.loadRequest(&req) };
         }
+        _ if ws == Workspace::GoogleSearch => explain_blank(tab.id, LoadError::BlockedInSearch, Some(url.to_string())),
         _ => explain_blank(tab.id, LoadError::NotAllowed, Some(url.to_string())),
     }
 }

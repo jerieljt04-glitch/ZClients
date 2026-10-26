@@ -546,7 +546,10 @@ impl Store {
             if policy::is_google_search(&u) {
                 t.workspace = Some(Workspace::GoogleSearch);
                 t.title = normalized_page_title(Some(&t.title)).unwrap_or_else(|| "Google Search".into());
-            } else if policy::should_open_in_client_workspace(&u) {
+            } else if t.workspace.is_none() && policy::should_open_in_client_workspace(&u) {
+                // Only tabs saved without a workspace (the Swift build). A
+                // Search tab now showing a Zoho page keeps the Search
+                // workspace and its own sign-in.
                 t.workspace = Some(Workspace::Zoho);
             }
             let key = format!("{:?}|{}|{}", t.effective_workspace(), policy::page_key(&u), t.pdf_path.clone().unwrap_or_default());
@@ -956,7 +959,11 @@ impl Store {
             return;
         }
         let title = title.unwrap_or_else(|| fallback_title(Some(url.as_str())));
-        self.add_tab(client_id, Some(url.to_string()), Some(title), Some(Workspace::Zoho), true);
+        // The client comes to the front with its new tab; before, the tab
+        // was added out of sight and the link seemed to do nothing.
+        if self.add_tab(client_id, Some(url.to_string()), Some(title), Some(Workspace::Zoho), true).is_some() {
+            self.active_client_id = Some(client_id);
+        }
     }
 
     /// Meet in the active client's own store, reusing an open Meet tab.
@@ -1314,6 +1321,37 @@ mod tests {
         let names: Vec<_> = store.ordered().iter().map(|c| c.name.clone()).collect();
         assert_eq!(names, vec!["Google Search", "beta", "Álpha"]);
         assert!(!store.move_client_over(b, GOOGLE_SEARCH_ID), "search row is pinned");
+    }
+
+    #[test]
+    fn a_meet_link_from_search_brings_its_client_to_the_front() {
+        let mut store = Store::default();
+        store.ensure_search_client();
+        let client = store.add_client("Acme", "#111", None);
+        store.select_client(GOOGLE_SEARCH_ID);
+        store.open_in_client_workspace(client, &url::Url::parse("https://meet.google.com/abc-defg-hij").unwrap(), None);
+        assert_eq!(store.active_client_id, Some(client));
+        assert_eq!(store.active_tab().and_then(|(_, t)| t.url.clone()).as_deref(), Some("https://meet.google.com/abc-defg-hij"));
+    }
+
+    #[test]
+    fn a_search_tab_on_a_zoho_page_stays_in_the_search_workspace() {
+        let mut store = Store::default();
+        store.ensure_search_client();
+        let tab = store.add_tab(GOOGLE_SEARCH_ID, Some("https://crm.zoho.com/crm/org1".into()), None, Some(Workspace::GoogleSearch), true).unwrap();
+        let again = Store::from_json(&store.to_json()).unwrap();
+        let mut again = again;
+        again.repair();
+        assert_eq!(again.find_tab(tab).map(|t| t.effective_workspace()), Some(Workspace::GoogleSearch), "same store after a relaunch");
+        // A tab the Swift build saved without a workspace is still repaired.
+        let mut legacy = Store::default();
+        legacy.ensure_search_client();
+        let old = legacy.add_tab(GOOGLE_SEARCH_ID, Some("https://crm.zoho.com/".into()), None, None, true).unwrap();
+        if let Some(t) = legacy.find_tab_mut(old) {
+            t.workspace = None;
+        }
+        legacy.ensure_search_client();
+        assert_eq!(legacy.find_tab(old).and_then(|t| t.workspace), Some(Workspace::Zoho));
     }
 
     #[test]

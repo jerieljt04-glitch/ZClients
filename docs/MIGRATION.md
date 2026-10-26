@@ -1,5 +1,15 @@
 # Data migration and rollback
 
+## 2.0.0 → 2.1.0
+
+No data format change. Behaviour: the Google Search workspace now opens
+Zoho pages in its own tab (with its own, separate sign-in) instead of
+sending them to a client, and blocks every website other than Google
+Search and Zoho (they no longer open in the default browser). Google Meet
+links still open in a client. A Search tab left on a Zoho page reopens in
+the Search workspace; Search tabs saved by the Swift build without a
+workspace are repaired as before.
+
 ## 1.5.0 → 2.0.0
 
 2.0.0 changes no data format. The only addition:

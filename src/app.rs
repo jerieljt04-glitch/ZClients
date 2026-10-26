@@ -549,7 +549,7 @@ thread_local! {
 pub fn open_new_tab_from_page(client: Uuid, ws: Workspace, url: Url, opener: Option<Uuid>, background: bool) {
     let ws = if policy::is_google_search(&url) {
         Workspace::GoogleSearch
-    } else if ws == Workspace::GoogleSearch && policy::should_open_in_client_workspace(&url) {
+    } else if ws == Workspace::GoogleSearch && policy::search_route(&url) == policy::SearchRoute::Client {
         Workspace::Zoho
     } else {
         ws
@@ -659,7 +659,15 @@ pub fn address_entered(text: &str) {
         if policy::is_allowed_web(&u, Workspace::GoogleSearch) || policy::is_zoho_family(&u) {
             return load_destination(u);
         }
-        // Any other website: the Mac's default browser, rather than nowhere.
+        // The Search workspace opens nothing else, not even elsewhere.
+        if ws == Workspace::GoogleSearch {
+            if let Some(tab) = store(|s| s.active_tab().map(|(_, t)| t.id)) {
+                ui::show_load_error(tab, web::LoadError::BlockedInSearch, Some(u.to_string()));
+            }
+            return;
+        }
+        // Any other website from a client: the Mac's default browser,
+        // rather than nowhere.
         if let Some(ns) = util::ns_url(u.as_str()) {
             objc2_app_kit::NSWorkspace::sharedWorkspace().openURL(&ns);
         }
@@ -676,7 +684,8 @@ fn load_destination(url: Url) {
     let Some((_client, tab, ws, launcher)) = store(|s| s.active_tab().map(|(c, t)| (c.id, t.id, t.effective_workspace(), t.url.is_none() || t.pdf_path.is_some()))) else {
         return;
     };
-    if ws == Workspace::GoogleSearch && policy::should_open_in_client_workspace(&url) {
+    // From Search, Meet goes to a client; Google and Zoho pages load here.
+    if ws == Workspace::GoogleSearch && policy::search_route(&url) == policy::SearchRoute::Client {
         return open_from_search(Some(tab), url);
     }
     if launcher || web::live_view(tab).is_none() {

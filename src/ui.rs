@@ -764,6 +764,13 @@ define_class!(
             util::later(move || app::close_tab(client, tab));
         }
 
+        #[unsafe(method(errorDismiss:))]
+        fn a_error_dismiss(&self, _s: Option<&AnyObject>) {
+            if let Some(tab) = app::store(|s| s.active_tab().map(|(_, t)| t.id)) {
+                clear_load_error(tab);
+            }
+        }
+
         #[unsafe(method(errorCloseTab:))]
         fn a_error_close(&self, _s: Option<&AnyObject>) {
             app::close_active_tab();
@@ -1140,6 +1147,10 @@ fn load_error_text(kind: web::LoadError, url: Option<&str>) -> (String, String) 
         web::LoadError::NotAllowed => {
             ("This address can't be opened in ZClients".into(), format!("ZClients only shows Zoho and Google Meet pages. {host} can open in your default browser instead."))
         }
+        web::LoadError::BlockedInSearch => (
+            "This page can't be opened here".into(),
+            format!("The Google Search workspace opens only Google Search and Zoho pages, so {host} was blocked. To visit it, use a browser."),
+        ),
         web::LoadError::Offline => ("You're offline".into(), format!("ZClients can't reach {host}. Check your internet connection, then try again.")),
         web::LoadError::Certificate => {
             ("This connection isn't private".into(), format!("{host}'s certificate couldn't be verified, so the page was not opened and nothing was sent to it."))
@@ -1157,6 +1168,8 @@ pub enum ErrorAction {
     OpenInBrowser,
     Redownload,
     CloseTab,
+    /// Close the error screen; the page underneath is still there.
+    Dismiss,
 }
 
 impl ErrorAction {
@@ -1166,6 +1179,7 @@ impl ErrorAction {
             ErrorAction::OpenInBrowser => "Open in Browser",
             ErrorAction::Redownload => "Re-download",
             ErrorAction::CloseTab => "Close Tab",
+            ErrorAction::Dismiss => "Back to Search",
         }
     }
 
@@ -1175,6 +1189,7 @@ impl ErrorAction {
             ErrorAction::OpenInBrowser => sel!(errorOpenInBrowser:),
             ErrorAction::Redownload => sel!(errorRedownload:),
             ErrorAction::CloseTab => sel!(errorCloseTab:),
+            ErrorAction::Dismiss => sel!(errorDismiss:),
         }
     }
 }
@@ -1190,6 +1205,9 @@ pub fn error_actions(kind: web::LoadError, url: Option<&str>) -> (ErrorAction, O
         E::PdfMissing => (ErrorAction::CloseTab, None),
         E::NotAllowed if https => (ErrorAction::OpenInBrowser, Some(ErrorAction::CloseTab)),
         E::NotAllowed => (ErrorAction::CloseTab, None),
+        // Deliberately no Open in Browser: the Search workspace sends
+        // nothing elsewhere.
+        E::BlockedInSearch => (ErrorAction::Dismiss, None),
         E::Crashed | E::Unsupported | E::Other => (ErrorAction::TryAgain, browser),
         E::Offline | E::Certificate | E::Authentication => (ErrorAction::TryAgain, None),
     }
@@ -1199,6 +1217,7 @@ fn error_symbol(kind: web::LoadError) -> &'static str {
     match kind {
         web::LoadError::Offline => "wifi.slash",
         web::LoadError::Certificate | web::LoadError::Authentication => "lock.slash",
+        web::LoadError::BlockedInSearch => "hand.raised",
         _ => "exclamationmark.triangle",
     }
 }
@@ -3413,7 +3432,8 @@ mod tests {
         assert_eq!(error_actions(E::NotAllowed, Some("file:///etc/passwd")), (ErrorAction::CloseTab, None), "never hands a file: address to the browser");
         assert_eq!(error_actions(E::Crashed, Some("https://crm.zoho.com/")), (ErrorAction::TryAgain, Some(ErrorAction::OpenInBrowser)));
         assert_eq!(error_actions(E::Offline, Some("https://crm.zoho.com/")), (ErrorAction::TryAgain, None));
-        for kind in [E::Crashed, E::PdfMissing, E::NotAllowed, E::Offline, E::Certificate, E::Authentication, E::Unsupported, E::Other] {
+        assert_eq!(error_actions(E::BlockedInSearch, Some("https://example.com/")), (ErrorAction::Dismiss, None), "never offers the browser");
+        for kind in [E::Crashed, E::PdfMissing, E::NotAllowed, E::BlockedInSearch, E::Offline, E::Certificate, E::Authentication, E::Unsupported, E::Other] {
             let (title, body) = load_error_text(kind, Some("https://crm.zoho.com/x"));
             assert!(!title.is_empty() && !body.is_empty(), "{kind:?}");
         }

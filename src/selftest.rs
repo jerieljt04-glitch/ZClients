@@ -1107,6 +1107,50 @@ fn stability_test() {
     });
 }
 
+fn front() -> String {
+    app::store(|s| s.active_tab().map(|(c, t)| format!("client={:?} workspace={:?} url={:?}", c.name, t.effective_workspace(), t.url))).unwrap_or_default()
+}
+
+/// `ZCLIENTS_SELFTEST=search`: the Google Search workspace keeps a Zoho
+/// page in place, blocks an outside site (by script and typed), and sends
+/// Meet to a client.
+fn search_workspace_test() {
+    util::after(1.0, || {
+        app::add_client("Search Test", "#2470dd", None, app::LoginChange::Keep, Default::default());
+        app::open_search("zoho crm");
+    });
+    util::after(9.0, || {
+        util::log(format!("SELFTEST SEARCH on results: {}", front()));
+        app::address_entered("https://www.zoho.com/crm/");
+    });
+    util::after(18.0, || {
+        util::log(format!("SELFTEST SEARCH Zoho page stays in Search (expected client \"Google Search\", GoogleSearch): {}", front()));
+        web::eval_active("(() => { location.href = 'https://example.com/'; return 'navigating'; })()", |r| util::log(format!("SELFTEST SEARCH script to example.com: {r}")));
+    });
+    util::after(22.0, || {
+        let tab = app::store(|s| s.active_tab().map(|(_, t)| t.id));
+        let page = tab.and_then(web::page_state).map(|p| p.url);
+        util::log(format!("SELFTEST SEARCH after script: error={:?} (expected BlockedInSearch) page still {page:?}", tab.and_then(ui::load_error_of)));
+        if let Some(t) = tab {
+            ui::clear_load_error(t);
+        }
+        app::address_entered("example.com");
+    });
+    util::after(24.0, || {
+        let tab = app::store(|s| s.active_tab().map(|(_, t)| t.id));
+        util::log(format!("SELFTEST SEARCH typed example.com: error={:?} {}", tab.and_then(ui::load_error_of), front()));
+        if let Some(t) = tab {
+            ui::clear_load_error(t);
+        }
+        web::eval_active("(() => { location.href = 'https://meet.google.com/'; return 'to meet'; })()", |r| util::log(format!("SELFTEST SEARCH script to Meet: {r}")));
+    });
+    util::after(30.0, || {
+        util::log(format!("SELFTEST SEARCH Meet went to a client (expected \"Search Test\", Zoho): {}", front()));
+        util::log("SELFTEST done");
+        app::quit_without_asking();
+    });
+}
+
 pub fn start() {
     if !util::is_test_build() {
         return;
@@ -1125,6 +1169,7 @@ pub fn start() {
         Ok("editor") => return editor_test(),
         Ok("a11y") => return a11y_test(),
         Ok("stability") => return stability_test(),
+        Ok("search") => return search_workspace_test(),
         Ok(_) => {}
         Err(_) => return,
     }

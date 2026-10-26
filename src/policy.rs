@@ -421,10 +421,44 @@ pub fn is_frame_download_allowed(url: &Url, workspace: Workspace) -> bool {
     is_zoho_family(url) || is_allowed_blob(url, workspace) || url.scheme() == "data"
 }
 
-/// Zoho and Meet results found in Google Search open as normal client tabs, so
-/// they use that client's signed-in profile instead of the Search store.
+/// Zoho and Meet pages that belong to a client rather than the Search
+/// store. Only used to repair Search tabs saved by older builds; live
+/// routing from the Search workspace is `search_route`.
 pub fn should_open_in_client_workspace(url: &Url) -> bool {
     is_zoho_family(url) || is_google_meet(url)
+}
+
+/// What the Google Search workspace does with a web address it is asked to
+/// open as a page.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SearchRoute {
+    /// Shown right there, in the Search workspace's own sign-in: Google
+    /// Search and Google's sign-in pages, and Zoho pages.
+    Here,
+    /// Google Meet: a call belongs to a real client, so it opens in one.
+    Client,
+    /// Any other website: not opened at all (not in the default browser
+    /// either).
+    Blocked,
+}
+
+/// The Search workspace roams Google Search and may open Zoho pages in
+/// place; Meet goes to a client; nothing else is opened. Only web
+/// addresses are routed: the tab's own PDF (file:), mailto: and similar
+/// links and downloads keep their own rules.
+pub fn search_route(url: &Url) -> SearchRoute {
+    if is_https(url) && is_google_meet(url) {
+        SearchRoute::Client
+    } else if is_allowed_main_frame(url, Workspace::GoogleSearch) {
+        SearchRoute::Here
+    } else {
+        SearchRoute::Blocked
+    }
+}
+
+/// An http(s) address, the only kind `search_route` blocks.
+pub fn is_web_address(url: &Url) -> bool {
+    matches!(url.scheme(), "http" | "https")
 }
 
 /// Sign-in pages. A tab that lands here (because a session ended) must not
@@ -706,6 +740,40 @@ mod tests {
         assert_eq!(data_centre_of(&u("https://accounts.zoho.com/signin")), None, "everyone signs in through the US first");
         assert_eq!(data_centre_of(&u("https://www.google.com/")), None);
         assert_eq!(data_centre_of(&u("http://crm.zoho.eu/")), None);
+    }
+
+    #[test]
+    fn search_workspace_opens_google_and_zoho_sends_meet_to_a_client_and_blocks_the_rest() {
+        for here in [
+            "https://www.google.com/search?q=zoho+crm",
+            "https://www.google.com/url?q=https://example.com",
+            "https://accounts.google.com/signin",
+            "https://crm.zoho.com/crm/org1/tab/Leads",
+            "https://books.zoho.eu/app",
+            "https://www.zoho.com/crm/pricing/",
+            "https://forms.zohopublic.in/x",
+            "https://123-abc.zappsusercontent.com/w.html",
+            "about:blank",
+        ] {
+            assert_eq!(search_route(&u(here)), SearchRoute::Here, "{here}");
+        }
+        for meet in ["https://meet.google.com/abc-defg-hij", "https://workspace.google.com/products/meet/"] {
+            assert_eq!(search_route(&u(meet)), SearchRoute::Client, "{meet}");
+        }
+        for blocked in [
+            "https://example.com/",
+            "https://www.youtube.com/watch?v=1",
+            "https://mail.google.com/",
+            "https://zoho.com.evil.net/",
+            "http://crm.zoho.com/",
+            "http://meet.google.com/",
+            "https://login.microsoftonline.com/",
+        ] {
+            assert_eq!(search_route(&u(blocked)), SearchRoute::Blocked, "{blocked}");
+            assert!(is_web_address(&u(blocked)));
+        }
+        assert!(!is_web_address(&u("mailto:a@b.com")), "mailto keeps its own confirmation");
+        assert!(!is_web_address(&u("file:///tmp/a.pdf")), "the tab's own PDF keeps its own check");
     }
 
     #[test]

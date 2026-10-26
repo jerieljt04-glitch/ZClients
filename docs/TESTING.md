@@ -5,7 +5,7 @@
 ```sh
 scripts/check.sh          # every CI gate (fmt, clippy, tests, property tests,
                           # audit, deny, universal build, Miri)
-cargo test                # 133 unit / migration / failure-injection / property tests
+cargo test                # 136 unit / migration / failure-injection / property tests
 ./build.sh --test         # "ZClients Test": own bundle id + data, ad-hoc signed
 ```
 
@@ -18,6 +18,7 @@ HOME=$H ZCLIENTS_SELFTEST=security ZCLIENTS_ALERTS=decline ZCLIENTS_MOCK_MEDIA=1
 HOME=$H ZCLIENTS_SELFTEST=a11y ZCLIENTS_ALERTS=decline "$APP"
 HOME=$H ZCLIENTS_SELFTEST=address2 "$APP"
 HOME=$H ZCLIENTS_SELFTEST=downloads ZCLIENTS_ALERTS=accept "$APP"
+HOME=$H ZCLIENTS_SELFTEST=search "$APP"
 HOME=$H ZCLIENTS_SELFTEST=stability ZCLIENTS_ALERTS=decline ZCLIENTS_MOCK_MEDIA=1 "$APP"
 HOME=$H ZCLIENTS_SELFTEST=stability ZCLIENTS_ALERTS=accept ZCLIENTS_MOCK_MEDIA=1 "$APP"   # then: the logged partial file must not exist
 ```
@@ -36,6 +37,7 @@ question with its first / last button and logs it.
 | `address2` | Typed address text is dropped on tab switch and never navigates on page click; Esc restores; a Return for a tab no longer in front is dropped; Return on the same tab navigates |
 | `editor` | ⌘A, ⌘Z, ⇧⌘Z and Control-A reach a code editor's own key handler (CodeMirror/Ace/Monaco/hidden-textarea editors such as Zoho's Deluge editor); ⌘A in a plain text box still selects all |
 | `downloads` | PDF popups become tabs with viewer controls; hidden-frame and popup zips download; PDF attachments open as tabs; the PDF viewer's download button saves; every file is quarantined |
+| `search` (2.1) | Google Search workspace: a Zoho page stays in the Search tab; example.com is blocked both by script and when typed (page kept, "can't be opened here" shown); a Meet link opens in a client, which comes to the front |
 | `stability` (2.0) | U6 closing a tab in a call asks; U1 a newer download leaves an item's key on the same file; S1 quitting with a download and a call asks (decline: both continue; accept: real quit path, partial file deleted); S2 a page whose WebContent process is killed twice shows "This page stopped working" instead of reloading |
 | `meet`, `input`, `find`, `memory`, `perf`, `address`, `prep` | Unchanged from 1.4.0 (see README); `address`, `input`, `find` need System Events keystrokes |
 
@@ -70,7 +72,8 @@ Run on the test app first; on the real app only after installing 2.0.0.
 
 **Multiple profiles**
 - [ ] Two profiles signed in to different Zoho accounts; each tab shows its own account; switching profiles never mixes them.
-- [ ] Search from profile B (⌘K, query, click a crm.zoho.com result) → opens in **B**. Delete B, click another Zoho result in the same Search tab → asked which profile.
+- [ ] Google Search workspace (2.1): click a crm.zoho.com result → it opens **in the Search tab** (its own sign-in, separate from every client). Click any other site's result, or type example.com → "This page can't be opened here" over the page, nothing opens in another browser; Back to Search returns to the results.
+- [ ] Search from client B (⌘K), click a Google Meet link → Meet opens in **B**, which comes to the front. Delete B and try again → asked which client.
 - [ ] Meet button while the Search workspace is in front → asked which profile.
 
 **Media**
