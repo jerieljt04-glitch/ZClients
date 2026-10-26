@@ -518,6 +518,12 @@ pub fn diagnostics_text() -> String {
         out.push_str(&format!("media request: {} {} {}\n", u.origin, u.what, u.decision));
     }
     out.push_str(&format!("user agent suffix: {}\n", web::user_agent_suffix_in_use()));
+    // Already redacted when logged; redacted again below with the rest.
+    let lines = util::recent_logs();
+    out.push_str(&format!("recent log ({} line(s)):\n", lines.len()));
+    for l in lines {
+        out.push_str(&format!("  {l}\n"));
+    }
     redact(&out)
 }
 

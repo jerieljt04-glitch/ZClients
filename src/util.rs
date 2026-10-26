@@ -267,8 +267,81 @@ pub fn ms_since_start() -> f64 {
     START.get_or_init(std::time::Instant::now).elapsed().as_secs_f64() * 1000.0
 }
 
+/// How many recent log lines Export Diagnostics can include.
+const LOG_LINES: usize = 300;
+
+static RECENT: std::sync::Mutex<std::collections::VecDeque<String>> = std::sync::Mutex::new(std::collections::VecDeque::new());
+
+/// Log a line. A Finder-launched app's stderr goes nowhere, so each line
+/// is also kept (redacted, timestamped, last 300 only) for Export
+/// Diagnostics and sent to the unified log (`log show --predicate
+/// 'subsystem == "com.zport.swift"'`). Only the redacted text leaves the
+/// process; stderr keeps the full line for self-test runs in a terminal.
 pub fn log(msg: impl AsRef<str>) {
-    eprintln!("ZClients: {}", msg.as_ref());
+    let msg = msg.as_ref();
+    eprintln!("ZClients: {msg}");
+    let redacted = crate::privacy::redact(msg);
+    oslog::write(&redacted);
+    let line = format!("[{:>9.3}s] {redacted}", ms_since_start() / 1000.0);
+    let mut recent = RECENT.lock().unwrap_or_else(|e| e.into_inner());
+    if recent.len() == LOG_LINES {
+        recent.pop_front();
+    }
+    recent.push_back(line);
+}
+
+/// The last log lines, oldest first, already redacted.
+pub fn recent_logs() -> Vec<String> {
+    RECENT.lock().unwrap_or_else(|e| e.into_inner()).iter().cloned().collect()
+}
+
+/// The unified log, through the C entry point the `os_log` macro expands to
+/// (there is no function form). The format lives in `__oslogstring`, as the
+/// compiler puts it, so `log show` can render it.
+mod oslog {
+    use std::ffi::{c_char, c_void};
+
+    #[repr(C)]
+    struct OsLog {
+        _private: [u8; 0],
+    }
+
+    unsafe extern "C" {
+        static __dso_handle: c_void;
+        fn os_log_create(subsystem: *const c_char, category: *const c_char) -> *mut OsLog;
+        fn _os_log_impl(dso: *const c_void, log: *mut OsLog, kind: u8, format: *const c_char, buf: *mut u8, size: u32);
+    }
+
+    #[unsafe(link_section = "__TEXT,__oslogstring,cstring_literals")]
+    static FORMAT: [u8; 11] = *b"%{public}s\0";
+
+    struct Handle(*mut OsLog);
+    // SAFETY: os_log_t objects are immutable and documented as thread-safe.
+    unsafe impl Send for Handle {}
+    unsafe impl Sync for Handle {}
+
+    fn handle() -> *mut OsLog {
+        static LOG: std::sync::OnceLock<Handle> = std::sync::OnceLock::new();
+        LOG.get_or_init(|| Handle(unsafe { os_log_create(c"com.zport.swift".as_ptr(), c"app".as_ptr()) })).0
+    }
+
+    pub fn write(text: &str) {
+        if cfg!(test) {
+            return;
+        }
+        let log = handle();
+        let Ok(c) = std::ffi::CString::new(text.replace('\0', " ")) else { return };
+        // One public string argument: summary (has non-scalar), count 1,
+        // then descriptor (string, public), size 8, the pointer.
+        let mut buf = [0u8; 12];
+        buf[0] = 0x02;
+        buf[1] = 1;
+        buf[2] = 0x22;
+        buf[3] = 8;
+        buf[4..12].copy_from_slice(&(c.as_ptr() as usize as u64).to_ne_bytes());
+        // OS_LOG_TYPE_DEFAULT
+        unsafe { _os_log_impl(&raw const __dso_handle, log, 0, FORMAT.as_ptr().cast(), buf.as_mut_ptr(), buf.len() as u32) };
+    }
 }
 
 #[cfg(test)]
@@ -279,6 +352,23 @@ mod tests {
         let d = std::env::temp_dir().join(format!("zc-util-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn log_lines_are_kept_redacted_and_bounded() {
+        log("signed in as jane@acme.com at https://crm.zoho.com/crm/org1/tab/Leads?x=1 token abcdefghij0123456789XYZ");
+        // Other tests log from their own threads: find this line by its text.
+        let last = recent_logs().into_iter().rev().find(|l| l.contains("signed in as")).unwrap();
+        assert!(!last.contains("jane@acme.com"), "{last}");
+        assert!(!last.contains("org1"), "{last}");
+        assert!(!last.contains("abcdefghij0123456789XYZ"), "{last}");
+        assert!(last.contains("[email]") && last.contains("https://crm.zoho.com/[…]") && last.contains("[token]"), "{last}");
+        for i in 0..LOG_LINES + 20 {
+            log(format!("line {i}"));
+        }
+        let all = recent_logs();
+        assert_eq!(all.len(), LOG_LINES);
+        assert!(all.iter().any(|l| l.ends_with(&format!("line {}", LOG_LINES + 19))));
     }
 
     #[test]
