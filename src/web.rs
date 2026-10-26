@@ -583,6 +583,11 @@ pub struct CoordIvars {
     pending_pdf: RefCell<Option<Option<String>>>,
     /// 0 for a tab, 1 for a popup a tab opened, 2 for a popup of a popup.
     depth: u8,
+    /// When this page last showed alert/confirm/prompt dialogs.
+    dialogs: RefCell<Vec<Instant>>,
+    /// The user chose "Don't allow more dialogs from this page"; cleared
+    /// when the tab goes to another page.
+    dialogs_blocked: Cell<bool>,
 }
 
 define_class!(
@@ -607,6 +612,9 @@ define_class!(
         #[unsafe(method(webView:didCommitNavigation:))]
         fn did_commit(&self, web: &WKWebView, _nav: Option<&WKNavigation>) {
             self.ivars().external_probe.set(false);
+            // Suppressed dialogs last until the page changes, as in Safari.
+            self.ivars().dialogs_blocked.set(false);
+            self.ivars().dialogs.borrow_mut().clear();
             // A new page starts outside any code editor; the editor hook
             // reports again when the keyboard enters one. Otherwise ⌘A/⌘Z
             // could stay routed as editor keys on the next page.
@@ -772,32 +780,30 @@ define_class!(
         }
 
         #[unsafe(method(webView:runJavaScriptAlertPanelWithMessage:initiatedByFrame:completionHandler:))]
-        fn js_alert(&self, _web: &WKWebView, message: &NSString, frame: &WKFrameInfo, done: &block2::DynBlock<dyn Fn()>) {
-            if self.trusted(frame) {
-                run_alert(&origin_title(frame), &message.to_string(), &["OK"], None);
-            }
-            done.call(());
+        fn js_alert(&self, web: &WKWebView, message: &NSString, frame: &WKFrameInfo, done: &block2::DynBlock<dyn Fn()>) {
+            let done = done.copy();
+            self.page_dialog(web, frame, message.to_string(), &["OK"], None, move |_| done.call(()));
         }
 
         #[unsafe(method(webView:runJavaScriptConfirmPanelWithMessage:initiatedByFrame:completionHandler:))]
-        fn js_confirm(&self, _web: &WKWebView, message: &NSString, frame: &WKFrameInfo, done: &block2::DynBlock<dyn Fn(Bool)>) {
-            let ok = self.trusted(frame) && run_alert(&origin_title(frame), &message.to_string(), &["OK", "Cancel"], None).0 == 0;
-            done.call((Bool::new(ok),));
+        fn js_confirm(&self, web: &WKWebView, message: &NSString, frame: &WKFrameInfo, done: &block2::DynBlock<dyn Fn(Bool)>) {
+            let done = done.copy();
+            self.page_dialog(web, frame, message.to_string(), &["OK", "Cancel"], None, move |answer| {
+                done.call((Bool::new(matches!(answer, Some((0, _)))),));
+            });
         }
 
         #[unsafe(method(webView:runJavaScriptTextInputPanelWithPrompt:defaultText:initiatedByFrame:completionHandler:))]
-        fn js_prompt(&self, _web: &WKWebView, prompt: &NSString, default: Option<&NSString>, frame: &WKFrameInfo, done: &block2::DynBlock<dyn Fn(*mut NSString)>) {
-            if !self.trusted(frame) {
-                return done.call((std::ptr::null_mut(),));
-            }
-            let (button, text) = run_alert(&origin_title(frame), &prompt.to_string(), &["OK", "Cancel"], Some(default.map(|d| d.to_string()).unwrap_or_default()));
-            match (button, text) {
-                (0, Some(t)) => {
+        fn js_prompt(&self, web: &WKWebView, prompt: &NSString, default: Option<&NSString>, frame: &WKFrameInfo, done: &block2::DynBlock<dyn Fn(*mut NSString)>) {
+            let done = done.copy();
+            let default = default.map(|d| d.to_string()).unwrap_or_default();
+            self.page_dialog(web, frame, prompt.to_string(), &["OK", "Cancel"], Some(default), move |answer| match answer {
+                Some((0, Some(t))) => {
                     let s = util::ns(&t);
                     done.call((Retained::as_ptr(&s) as *mut NSString,));
                 }
                 _ => done.call((std::ptr::null_mut(),)),
-            }
+            });
         }
 
         #[unsafe(method(webView:requestMediaCapturePermissionForOrigin:initiatedByFrame:type:decisionHandler:))]
@@ -1039,6 +1045,23 @@ fn origin_title(frame: &WKFrameInfo) -> String {
     if host.is_empty() { "Untrusted page".into() } else { host }
 }
 
+/// How close together page dialogs must come before the user is offered
+/// to stop them.
+const DIALOG_BURST: Duration = Duration::from_secs(10);
+
+/// Note a page dialog at `now`; true when it is at least the second from
+/// this page within 10 s, so the "Don't allow more dialogs" box is shown.
+fn dialog_offers_suppression(recent: &mut Vec<Instant>, now: Instant) -> bool {
+    recent.retain(|t| now.saturating_duration_since(*t) < DIALOG_BURST);
+    recent.push(now);
+    recent.len() >= 2
+}
+
+/// A profile's name for dialog titles ("Acme — crm.zoho.com").
+pub fn profile_name(client: Uuid) -> String {
+    app::store(|s| s.client(client).map(|c| if c.is_search() { "Google Search".to_string() } else { c.name.clone() })).unwrap_or_else(|| "ZClients".into())
+}
+
 /// Modal alert. Returns the index of the button pressed and, for prompts, the
 /// text entered.
 pub fn run_alert(title: &str, message: &str, buttons: &[&str], input: Option<String>) -> (usize, Option<String>) {
@@ -1087,6 +1110,8 @@ impl Coordinator {
             fresh: Cell::new(fresh),
             pending_pdf: RefCell::new(None),
             depth,
+            dialogs: RefCell::new(vec![]),
+            dialogs_blocked: Cell::new(false),
         });
         unsafe { msg_send![super(this), init] }
     }
@@ -1102,6 +1127,78 @@ impl Coordinator {
 
     fn trusted_opt(&self, frame: Option<Retained<WKFrameInfo>>) -> bool {
         frame.is_some_and(|f| self.trusted(&f))
+    }
+
+    /// A page's alert(), confirm() or prompt(): a sheet on the window
+    /// showing the page (never an app-modal alert, so a page that loops
+    /// alert() cannot lock every other client), titled "<client> — <host>",
+    /// with its tab brought to the front first. From the second dialog in
+    /// 10 s the user may stop this page's dialogs until it navigates.
+    /// `done` gets the button index and any typed text, or None when the
+    /// dialog was not shown.
+    fn page_dialog(
+        &self,
+        web: &WKWebView,
+        frame: &WKFrameInfo,
+        message: String,
+        buttons: &'static [&'static str],
+        input: Option<String>,
+        done: impl FnOnce(Option<(usize, Option<String>)>) + 'static,
+    ) {
+        let iv = self.ivars();
+        if !self.trusted(frame) || iv.dialogs_blocked.get() {
+            return done(None);
+        }
+        if let Some(tab) = iv.tab_id
+            && POOL.with_borrow(|p| p.active) != Some(tab)
+        {
+            let client = iv.client_id;
+            util::later(move || {
+                app::show_tab(client, tab);
+            });
+        }
+        let offer_stop = dialog_offers_suppression(&mut iv.dialogs.borrow_mut(), Instant::now());
+        let title = format!("{} — {}", profile_name(iv.client_id), origin_title(frame));
+        let window = web.window().or_else(app_window);
+        if (util::is_test_build() && std::env::var_os("ZCLIENTS_ALERTS").is_some()) || window.is_none() {
+            let (i, text) = run_alert(&title, &message, buttons, input);
+            return done(Some((i, text)));
+        }
+        let mtm = self.mtm();
+        let alert = NSAlert::new(mtm);
+        alert.setMessageText(&util::ns(&title));
+        alert.setInformativeText(&util::ns(&message));
+        for b in buttons {
+            alert.addButtonWithTitle(&util::ns(b));
+        }
+        let field = input.map(|text| {
+            let f = NSTextField::textFieldWithString(&util::ns(&text), mtm);
+            f.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(300.0, 24.0)));
+            alert.setAccessoryView(Some(&f));
+            f
+        });
+        if offer_stop {
+            alert.setShowsSuppressionButton(true);
+            if let Some(b) = alert.suppressionButton() {
+                b.setTitle(&util::ns("Don't allow more dialogs from this page"));
+            }
+        }
+        let me = objc2::Message::retain(self);
+        let alert2 = alert.clone();
+        let done = Cell::new(Some(done));
+        let handler = RcBlock::new(move |response: isize| {
+            let stop = alert2.suppressionButton().is_some_and(|b| b.state() == objc2_app_kit::NSControlStateValueOn) && alert2.showsSuppressionButton();
+            if stop {
+                me.ivars().dialogs_blocked.set(true);
+            }
+            let index = (response - objc2_app_kit::NSAlertFirstButtonReturn).max(0) as usize;
+            if let Some(d) = done.take() {
+                d(Some((index, field.as_ref().map(|f| f.stringValue().to_string()))));
+            }
+        });
+        if let Some(w) = window {
+            alert.beginSheetModalForWindow_completionHandler(&w, Some(&handler));
+        }
     }
 
     /// A download started from a tab or popup that never showed anything:
@@ -2320,7 +2417,6 @@ pub fn download_current() {
     }
 }
 
-#[allow(dead_code)]
 fn app_window() -> Option<Retained<NSWindow>> {
     NSApplication::sharedApplication(MainThreadMarker::new()?).mainWindow()
 }
@@ -2362,6 +2458,16 @@ mod tests {
         assert_eq!(load_error_kind("NSURLErrorDomain", -1012), Some(LoadError::Authentication));
         assert_eq!(load_error_kind("NSURLErrorDomain", -1002), Some(LoadError::Unsupported));
         assert_eq!(load_error_kind("Other", 5), Some(LoadError::Other));
+    }
+
+    #[test]
+    fn a_second_dialog_within_ten_seconds_offers_to_stop_them() {
+        let t0 = Instant::now();
+        let mut recent = vec![];
+        assert!(!dialog_offers_suppression(&mut recent, t0));
+        assert!(dialog_offers_suppression(&mut recent, t0 + Duration::from_secs(3)));
+        let mut old = vec![t0];
+        assert!(!dialog_offers_suppression(&mut old, t0 + Duration::from_secs(11)), "dialogs far apart are left alone");
     }
 
     #[test]
