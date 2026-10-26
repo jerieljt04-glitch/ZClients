@@ -191,16 +191,38 @@ pub fn show() {
 struct Builder {
     page: Retained<Page>,
     y: f64,
+    /// Where the open section's card starts.
+    card_top: Option<f64>,
 }
 
 impl Builder {
+    /// A section: its heading, then its rows on a rounded card (NSBox draws
+    /// itself, so it follows light/dark without help).
     fn heading(&mut self, text: &str) {
-        self.y += 14.0;
+        self.end_card();
+        self.y += theme::SECTION_GAP - theme::GRID;
         let l = crate::ui::text(text, theme::Text::Title3, theme::Weight::Bold);
-        l.setFrame(rect(20.0, self.y, W - 40.0, 22.0));
+        l.setFrame(rect(theme::SHEET_MARGIN, self.y, W - theme::SHEET_MARGIN * 2.0, 22.0));
         l.setAccessibilityRole(Some(&util::ns("AXHeading")));
         self.page.addSubview(&l);
-        self.y += 28.0;
+        self.y += 22.0 + theme::GRID * 2.0;
+        self.card_top = Some(self.y);
+        self.y += theme::GRID * 3.0;
+    }
+
+    fn end_card(&mut self) {
+        let Some(top) = self.card_top.take() else { return };
+        self.y += theme::GRID;
+        let card =
+            objc2_app_kit::NSBox::initWithFrame(objc2_app_kit::NSBox::alloc(mtm()), rect(theme::SHEET_MARGIN - 4.0, top, W - (theme::SHEET_MARGIN - 4.0) * 2.0, self.y - top));
+        card.setBoxType(objc2_app_kit::NSBoxType::Custom);
+        card.setTitlePosition(objc2_app_kit::NSTitlePosition::NoTitle);
+        card.setCornerRadius(10.0);
+        card.setBorderWidth(1.0);
+        card.setBorderColor(&theme::separator());
+        card.setFillColor(&NSColor::controlBackgroundColor());
+        card.setAccessibilityElement(false);
+        self.page.addSubview_positioned_relativeTo(&card, objc2_app_kit::NSWindowOrderingMode::Below, None);
     }
 
     fn text(&mut self, text: &str, secondary: bool) {
@@ -226,13 +248,21 @@ impl Builder {
         b
     }
 
-    fn row_with_button(&mut self, text: &str, title: &str, action: objc2::runtime::Sel, tag: isize) {
+    fn row_with_button(&mut self, text: &str, title: &str, action: objc2::runtime::Sel, tag: isize) -> Retained<NSButton> {
         let l = crate::ui::text(text, theme::Text::Body, theme::Weight::Regular);
         l.setFrame(rect(24.0, self.y + 5.0, W - 200.0, 18.0));
         self.page.addSubview(&l);
         let b = self.button(title, action, tag, W - 170.0);
         b.setAccessibilityLabel(Some(&util::ns(&format!("{title}: {text}"))));
         self.y += 32.0;
+        b
+    }
+
+    /// A row whose button removes something: red text, marked destructive.
+    fn destructive_row(&mut self, text: &str, title: &str, action: objc2::runtime::Sel, tag: isize) {
+        let b = self.row_with_button(text, title, action, tag);
+        b.setHasDestructiveAction(true);
+        b.setContentTintColor(Some(&theme::destructive()));
     }
 
     fn checkbox(&mut self, title: &str, on: bool, action: objc2::runtime::Sel, tag: isize) -> Retained<NSButton> {
@@ -261,7 +291,7 @@ fn rebuild() {
         let this = Page::alloc(mtm()).set_ivars(());
         unsafe { msg_send![super(this), initWithFrame: rect(0.0, 0.0, W, 100.0)] }
     };
-    let mut b = Builder { page: page.clone(), y: 6.0 };
+    let mut b = Builder { page: page.clone(), y: 6.0, card_top: None };
     let profiles = profiles();
     let selected = SELECTED.get();
 
@@ -308,11 +338,11 @@ fn rebuild() {
             true,
         );
         match keychain::saved_login_email(id) {
-            Some(email) => b.row_with_button(&format!("Saved login: {email}"), "Remove…", sel!(removeLogin:), 0),
+            Some(email) => b.destructive_row(&format!("Saved login: {email}"), "Remove…", sel!(removeLogin:), 0),
             None => b.text("Saved login: none. (Add one from the client's Customise sheet.)", true),
         }
-        b.row_with_button("Cookies (signs this client out of every site)", "Clear Cookies…", sel!(clearCookies:), 0);
-        b.row_with_button("All website data: cookies, storage, cache, offline data", "Clear All…", sel!(clearAllData:), 0);
+        b.destructive_row("Cookies (signs this client out of every site)", "Clear Cookies…", sel!(clearCookies:), 0);
+        b.destructive_row("All website data: cookies, storage, cache, offline data", "Clear All…", sel!(clearAllData:), 0);
     }
 
     // ---- deletions -------------------------------------------------------------
@@ -363,7 +393,7 @@ fn rebuild() {
         };
         b.row_with_button(&format!("{site}: {what}"), "Reset", sel!(resetDownloadSite:), i as isize);
     }
-    b.row_with_button("PDF previews no tab is showing, and the downloads list", "Clear…", sel!(clearPreviews:), 0);
+    b.destructive_row("PDF previews no tab is showing, and the downloads list", "Clear…", sel!(clearPreviews:), 0);
     b.text("PDF previews are private copies kept only while their tab is open (or reopenable); the rest are removed at launch and at quit.", true);
 
     // ---- keyboard ---------------------------------------------------------
@@ -386,7 +416,9 @@ fn rebuild() {
         true,
     );
     b.button("Export Diagnostics…", sel!(exportDiagnostics:), 0, 24.0);
-    b.y += 44.0;
+    b.y += 32.0;
+    b.end_card();
+    b.y += theme::SECTION_GAP;
 
     page.setFrame(rect(0.0, 0.0, W, b.y));
     let scroll = NSScrollView::initWithFrame(NSScrollView::alloc(mtm()), rect(0.0, 0.0, W, 720.0));

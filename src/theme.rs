@@ -55,8 +55,7 @@ pub enum Text {
     Headline,
     /// Address bar, fields, ordinary text.
     Body,
-    /// Tab titles.
-    Subheadline,
+    /// Tab titles, the toolbar's client chip.
     Callout,
     /// Sidebar subtitles, hints, captions.
     Footnote,
@@ -74,7 +73,6 @@ fn style(t: Text) -> &'static objc2_app_kit::NSFontTextStyle {
             Text::Title3 => NSFontTextStyleTitle3,
             Text::Headline => NSFontTextStyleHeadline,
             Text::Body => NSFontTextStyleBody,
-            Text::Subheadline => NSFontTextStyleSubheadline,
             Text::Callout => NSFontTextStyleCallout,
             Text::Footnote => NSFontTextStyleFootnote,
             Text::Caption => NSFontTextStyleCaption1,

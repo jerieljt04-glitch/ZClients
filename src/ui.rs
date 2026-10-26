@@ -2471,8 +2471,9 @@ fn refresh_toolbar() {
             set_layer_color(&chip, &theme::chip_fill(), 14.0);
             // Outlined in the client's colour, next to its badge.
             set_layer_border(&chip, &util::color(if *search { theme::SEARCH_BLUE } else { hex.as_str() }), 1.0);
-            let b = badge(hex, if *search { Some("magnifyingglass") } else { sym.as_deref() }, initials, 18.0);
-            b.setFrame(rect(6.0, 5.0, 18.0, 18.0));
+            let size = theme::TOOLBAR_CHIP_BADGE;
+            let b = badge(hex, if *search { Some("magnifyingglass") } else { sym.as_deref() }, initials, size);
+            b.setFrame(rect(6.0, (theme::ICON_BUTTON - size) / 2.0, size, size));
             chip.addSubview(&b);
             l.setFrame(rect(30.0, 5.0, text_w, 18.0));
             chip.addSubview(&l);
@@ -2893,37 +2894,39 @@ pub fn show_client_sheet(client: Option<Uuid>) {
     heading.setFrame(rect(20.0, 18.0, w - 40.0, 22.0));
     body.addSubview(&heading);
 
+    let fx = theme::SHEET_MARGIN + theme::LABEL_COL_W + theme::GRID * 2.0;
     let caption = |text: &str, y: f64| {
         let l = self::text(text, theme::Text::Body, theme::Weight::Regular);
         l.setAlignment(objc2_app_kit::NSTextAlignment::Right);
-        l.setFrame(rect(16.0, y + 3.0, 82.0, 18.0));
+        // Labels right-aligned in one column; every field starts on one edge.
+        l.setFrame(rect(theme::SHEET_MARGIN, y + 3.0, theme::LABEL_COL_W, 18.0));
         body.addSubview(&l);
     };
 
     caption("Name", 56.0);
     let name = NSTextField::textFieldWithString(&util::ns(existing.as_ref().map(|c| c.name.as_str()).unwrap_or("")), mtm);
     name.setPlaceholderString(Some(&util::ns("Client name (e.g. Acme Corp)")));
-    name.setFrame(rect(108.0, 56.0, w - 128.0, 24.0));
+    name.setFrame(rect(fx, 56.0, w - fx - theme::SHEET_MARGIN, 24.0));
     body.addSubview(&name);
 
-    let name_error = error_label(rect(108.0, 81.0, w - 128.0, 14.0));
+    let name_error = error_label(rect(fx, 81.0, w - fx - theme::SHEET_MARGIN, 14.0));
     body.addSubview(&name_error);
 
     caption("Colour", 98.0);
-    let well = NSColorWell::initWithFrame(NSColorWell::alloc(mtm), rect(108.0, 98.0, 44.0, 44.0));
+    let well = NSColorWell::initWithFrame(NSColorWell::alloc(mtm), rect(fx, 98.0, 44.0, 44.0));
     let start_hex = existing.as_ref().map(|c| c.color_hex.clone()).unwrap_or_else(|| model::PROFILE_COLORS[0].1.to_string());
     well.setColor(&util::color(&start_hex));
     body.addSubview(&well);
     for (i, (cname, hex)) in model::PROFILE_COLORS.iter().enumerate() {
         let (r, c) = (i / 8, i % 8);
-        let t = tile(T_SWATCH, i, rect(164.0 + c as f64 * 26.0, 98.0 + r as f64 * 24.0, 20.0, 20.0));
+        let t = tile(T_SWATCH, i, rect(fx + 56.0 + c as f64 * 26.0, 98.0 + r as f64 * 24.0, 20.0, 20.0));
         set_layer_color(&t, &util::color(hex), 10.0);
         t.setToolTip(Some(&util::ns(cname)));
         body.addSubview(&t);
     }
 
     caption("Symbol", 150.0);
-    let symbol_popup = NSPopUpButton::initWithFrame_pullsDown(NSPopUpButton::alloc(mtm), rect(108.0, 148.0, w - 128.0, 26.0), false);
+    let symbol_popup = NSPopUpButton::initWithFrame_pullsDown(NSPopUpButton::alloc(mtm), rect(fx, 148.0, w - fx - theme::SHEET_MARGIN, 26.0), false);
     symbol_popup.setAutoenablesItems(false);
     let mut names: Vec<Option<String>> = vec![None];
     symbol_popup.addItemWithTitle(&util::ns("Initials (no symbol)"));
@@ -2957,10 +2960,10 @@ pub fn show_client_sheet(client: Option<Uuid>) {
     let retention = existing.as_ref().map(|c| c.retention()).unwrap_or_default();
     let keep = unsafe { NSButton::checkboxWithTitle_target_action(&util::ns("Keep me signed in"), Some(&target()), Some(sel!(sheetKeepToggled:)), mtm) };
     keep.setState(if retention.keep { NSControlStateValueOn } else { NSControlStateValueOff });
-    keep.setFrame(rect(108.0, 214.0, 160.0, 22.0));
+    keep.setFrame(rect(fx, 214.0, 160.0, 22.0));
     keep.setToolTip(Some(&util::ns("Stay signed in to Zoho across quits. Signing out, or Zoho ending the session, always signs you out here too.")));
     body.addSubview(&keep);
-    let retention_popup = NSPopUpButton::initWithFrame_pullsDown(NSPopUpButton::alloc(mtm), rect(272.0, 212.0, w - 292.0, 26.0), false);
+    let retention_popup = NSPopUpButton::initWithFrame_pullsDown(NSPopUpButton::alloc(mtm), rect(fx + 164.0, 212.0, w - fx - 164.0 - theme::SHEET_MARGIN, 26.0), false);
     for days in crate::session::RETENTION_CHOICES {
         let title = match days {
             7 => "for up to 1 week unused".to_string(),
@@ -2982,7 +2985,7 @@ pub fn show_client_sheet(client: Option<Uuid>) {
         (Some(_), None) => "Not saved".to_string(),
     };
     let login_status = text(&status_text, theme::Text::Callout, theme::Weight::Regular);
-    login_status.setFrame(rect(108.0, 251.0, w - 290.0, 18.0));
+    login_status.setFrame(rect(fx, 251.0, w - fx - 186.0, 18.0));
     body.addSubview(&login_status);
     let change_button = unsafe {
         NSButton::buttonWithTitle_target_action(&util::ns(if saved_email.is_some() { "Change…" } else { "Add…" }), Some(&target()), Some(sel!(sheetChangeLogin:)), mtm)
@@ -2992,6 +2995,8 @@ pub fn show_client_sheet(client: Option<Uuid>) {
     body.addSubview(&change_button);
     let remove_button = unsafe { NSButton::buttonWithTitle_target_action(&util::ns("Remove"), Some(&target()), Some(sel!(sheetRemoveLogin:)), mtm) };
     remove_button.setFrame(rect(w - 94.0, 245.0, 78.0, 28.0));
+    remove_button.setHasDestructiveAction(true);
+    remove_button.setContentTintColor(Some(&theme::destructive()));
     remove_button.setHidden(existing.is_none());
     remove_button.setEnabled(saved_email.is_some());
     remove_button.setAccessibilityLabel(Some(&util::ns("Remove saved login")));
@@ -3000,15 +3005,15 @@ pub fn show_client_sheet(client: Option<Uuid>) {
     caption("Email", 284.0);
     let email = NSTextField::textFieldWithString(&util::ns(""), mtm);
     email.setPlaceholderString(Some(&util::ns("you@company.com")));
-    email.setFrame(rect(108.0, 284.0, w - 128.0, 24.0));
+    email.setFrame(rect(fx, 284.0, w - fx - theme::SHEET_MARGIN, 24.0));
     body.addSubview(&email);
 
     caption("Password", 318.0);
-    let password = NSSecureTextField::initWithFrame(NSSecureTextField::alloc(mtm), rect(108.0, 318.0, w - 128.0, 24.0));
+    let password = NSSecureTextField::initWithFrame(NSSecureTextField::alloc(mtm), rect(fx, 318.0, w - fx - theme::SHEET_MARGIN, 24.0));
     password.setPlaceholderString(Some(&util::ns(if saved_email.is_some() { "New password" } else { "Password" })));
     body.addSubview(&password);
 
-    let login_error = error_label(rect(108.0, 344.0, w - 128.0, 14.0));
+    let login_error = error_label(rect(fx, 344.0, w - fx - theme::SHEET_MARGIN, 14.0));
     body.addSubview(&login_error);
 
     let note = NSTextField::wrappingLabelWithString(
@@ -3019,7 +3024,7 @@ pub fn show_client_sheet(client: Option<Uuid>) {
     );
     note.setFont(Some(&theme::font(theme::Text::Footnote)));
     note.setTextColor(Some(&NSColor::secondaryLabelColor()));
-    note.setFrame(rect(108.0, 364.0, w - 128.0, 72.0));
+    note.setFrame(rect(fx, 364.0, w - fx - theme::SHEET_MARGIN, 72.0));
     body.addSubview(&note);
 
     if existing.is_some() {
@@ -3159,6 +3164,12 @@ fn sheet_finish(save: bool) {
     }
     with_ui(|u| u.window.endSheet(&sheet.window));
     sheet.window.orderOut(None);
+    // The shared colour panel the colour well opened would otherwise float
+    // on, editing nothing.
+    if objc2_app_kit::NSColorPanel::sharedColorPanelExists(mtm()) {
+        objc2_app_kit::NSColorPanel::sharedColorPanel(mtm()).close();
+    }
+    sheet.well.deactivate();
 }
 
 // ---------------------------------------------------------------------------
