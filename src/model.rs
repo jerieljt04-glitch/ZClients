@@ -1085,7 +1085,9 @@ pub const PROFILE_COLORS: &[(&str, &str)] = &[
     ("Lime", "#65a30d"),
     ("Teal", "#0ea5a4"),
     ("Cyan", "#0891b2"),
-    ("Blue", "#2b7de9"),
+    // One step darker than 1.5 (#2b7de9), which no text colour could read
+    // on at 4.5:1. Clients that already use the old blue keep it.
+    ("Blue", "#2470dd"),
     ("Indigo", "#4f46e5"),
     ("Violet", "#7a5cf0"),
     ("Purple", "#9333ea"),

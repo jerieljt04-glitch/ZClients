@@ -20,7 +20,7 @@ use objc2_foundation::{NSArray, NSIndexSet, NSInteger, NSNotification, NSObject,
 use uuid::Uuid;
 
 use crate::model::{self, SortMode};
-use crate::{app, downloads, keychain, util, web};
+use crate::{app, downloads, keychain, theme, util, web};
 
 const SIDEBAR_W: f64 = 250.0;
 const TOP: f64 = 46.0;
@@ -1124,19 +1124,25 @@ fn set_layer_color(view: &NSView, color: &NSColor, radius: f64) {
 }
 
 /// The coloured tile: an industry symbol when the profile has one, otherwise
-/// its initials.
+/// its initials. The glyph is white or near-black, whichever reads at 4.5:1
+/// on the tile's colour (white failed on amber, teal, lime, green...).
 pub(crate) fn badge(hex: &str, symbol_name: Option<&str>, initials: &str, size: f64) -> Retained<NSView> {
     let v = NSView::initWithFrame(NSView::alloc(mtm()), rect(0.0, 0.0, size, size));
     set_layer_color(&v, &util::color(hex), size * 0.27);
+    let glyph = util::color(theme::glyph_on(hex));
     if let Some(img) = symbol_name.and_then(symbol) {
         let iv = NSImageView::imageViewWithImage(&img, mtm());
-        iv.setContentTintColor(Some(&NSColor::whiteColor()));
+        iv.setContentTintColor(Some(&glyph));
         let inset = size * 0.22;
         iv.setFrame(rect(inset, inset, size - inset * 2.0, size - inset * 2.0));
         v.addSubview(&iv);
     } else {
-        let l = label(initials, size * 0.42, true);
-        l.setTextColor(Some(&NSColor::whiteColor()));
+        // Two initials at a small size came out around 7.5 pt: a small
+        // tile shows one, at 9 pt or more.
+        let small = size < 24.0;
+        let text: String = if small { initials.chars().take(1).collect() } else { initials.to_string() };
+        let l = label(&text, if small { (size * 0.5).max(9.0) } else { size * 0.42 }, true);
+        l.setTextColor(Some(&glyph));
         l.setAlignment(objc2_app_kit::NSTextAlignment::Center);
         let h = size * 0.6;
         l.setFrame(rect(0.0, (size - h) / 2.0 - 1.0, size, h));

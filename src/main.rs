@@ -20,6 +20,7 @@ mod session;
 mod settings;
 mod suggest;
 mod tabstate;
+mod theme;
 mod ui;
 mod util;
 mod web;
