@@ -472,6 +472,15 @@ pub fn hydrate(store: &WKWebsiteDataStore, id: Uuid, retention: Retention, done:
     if backup.cookies.is_empty() {
         return finish(id);
     }
+    // A wedged network process never calls back, and the tab would stay
+    // blank for good. After a few seconds the page loads anyway (signed
+    // out at worst); a late callback still restores the cookies.
+    util::after(HYDRATE_TIMEOUT_SECS, move || {
+        if KEEPER.with_borrow(|k| k.waiters.contains_key(&id)) {
+            util::log(format!("session restore did not answer in {HYDRATE_TIMEOUT_SECS} s; loading without waiting"));
+            finish(id);
+        }
+    });
     let cookie_store = unsafe { store.httpCookieStore() };
     let cs = cookie_store.clone();
     let block = RcBlock::new(move |existing: NonNull<NSArray<NSHTTPCookie>>| {
@@ -497,6 +506,12 @@ pub fn hydrate(store: &WKWebsiteDataStore, id: Uuid, retention: Retention, done:
     unsafe { cookie_store.getAllCookies(&block) };
 }
 
+/// How long a tab's first load waits for its session to come back.
+const HYDRATE_TIMEOUT_SECS: f64 = 4.0;
+
+/// The store is ready: release every load waiting on it. Safe to call more
+/// than once (the watchdog and a late WebKit callback can both get here):
+/// each waiter runs exactly once.
 fn finish(id: Uuid) {
     let waiters = KEEPER.with_borrow_mut(|k| {
         k.hydrated.insert(id);
@@ -653,6 +668,18 @@ pub fn backup_gone(id: Uuid) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finishing_twice_runs_each_waiting_load_once() {
+        let id = Uuid::new_v4();
+        let runs = std::rc::Rc::new(std::cell::Cell::new(0));
+        let r = runs.clone();
+        KEEPER.with_borrow_mut(|k| k.waiters.entry(id).or_default().push(Box::new(move || r.set(r.get() + 1))));
+        finish(id);
+        finish(id);
+        assert_eq!(runs.get(), 1);
+        assert!(KEEPER.with_borrow(|k| k.hydrated.contains(&id) && !k.waiters.contains_key(&id)));
+    }
 
     const R: Retention = Retention { keep: true, days: 30 };
 
