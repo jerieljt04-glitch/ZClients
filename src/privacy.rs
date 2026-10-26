@@ -65,7 +65,7 @@ define_class!(
         #[unsafe(method(removeLogin:))]
         fn remove_login(&self, _s: Option<&AnyObject>) {
             let Some(id) = SELECTED.get() else { return };
-            if web::confirm("Remove the saved login?", "ZClients will no longer fill in this profile's Zoho sign-in. You stay signed in.", "Remove") {
+            if web::confirm("Remove the saved login?", "ZClients will no longer fill in this client's Zoho sign-in. You stay signed in.", "Remove") {
                 if !keychain::delete_login(id) {
                     web::run_alert("The saved login could not be removed", "Try again; if it keeps failing, export diagnostics.", &["OK"], None);
                 }
@@ -266,9 +266,9 @@ fn rebuild() {
     let selected = SELECTED.get();
 
     // ---- profile ------------------------------------------------------------
-    b.heading("Profile");
+    b.heading("Client");
     if profiles.is_empty() {
-        b.text("No profiles yet.", true);
+        b.text("No clients yet.", true);
     } else {
         let popup = NSPopUpButton::initWithFrame_pullsDown(NSPopUpButton::alloc(mtm()), rect(24.0, b.y, 280.0, 26.0), false);
         for (_, name) in &profiles {
@@ -281,7 +281,7 @@ fn rebuild() {
             popup.setTarget(Some(&actions()));
             popup.setAction(Some(sel!(pickProfile:)));
         }
-        popup.setAccessibilityLabel(Some(&util::ns("Profile to change")));
+        popup.setAccessibilityLabel(Some(&util::ns("Client to change")));
         page.addSubview(&popup);
         b.y += 36.0;
     }
@@ -299,26 +299,26 @@ fn rebuild() {
             days.setTarget(Some(&actions()));
             days.setAction(Some(sel!(keepChanged:)));
         }
-        days.setAccessibilityLabel(Some(&util::ns("How long to stay signed in without using this profile")));
+        days.setAccessibilityLabel(Some(&util::ns("How long to stay signed in without using this client")));
         page.addSubview(&days);
         CONTROLS.with_borrow_mut(|c| *c = Some((keep, days)));
         b.y += 30.0;
         b.text(
-            "Kept sessions are restored only into this profile, for Zoho and Google sign-in cookies, and never longer than chosen. Signing out — or Zoho ending the session — always signs you out here too.",
+            "Kept sessions are restored only into this client, for Zoho and Google sign-in cookies, and never longer than chosen. Signing out — or Zoho ending the session — always signs you out here too.",
             true,
         );
         match keychain::saved_login_email(id) {
             Some(email) => b.row_with_button(&format!("Saved login: {email}"), "Remove…", sel!(removeLogin:), 0),
-            None => b.text("Saved login: none. (Add one from the profile's Customise sheet.)", true),
+            None => b.text("Saved login: none. (Add one from the client's Customise sheet.)", true),
         }
-        b.row_with_button("Cookies (signs this profile out of every site)", "Clear Cookies…", sel!(clearCookies:), 0);
+        b.row_with_button("Cookies (signs this client out of every site)", "Clear Cookies…", sel!(clearCookies:), 0);
         b.row_with_button("All website data: cookies, storage, cache, offline data", "Clear All…", sel!(clearAllData:), 0);
     }
 
     // ---- deletions -------------------------------------------------------------
     let jobs = cleanup::pending_jobs();
     if !jobs.is_empty() {
-        b.heading("Unfinished profile deletions");
+        b.heading("Unfinished client deletions");
         for (i, job) in jobs.iter().enumerate() {
             b.row_with_button(&format!("“{}”: {} left", job.name, job.remaining().join(", ")), "Retry", sel!(retryCleanup:), i as isize);
         }
@@ -382,7 +382,7 @@ fn rebuild() {
     b.heading("About");
     b.text(&format!("ZClients {} (build {}).", env!("CARGO_PKG_VERSION"), env!("ZCLIENTS_BUILD")), false);
     b.text(
-        "ZClients does not check for updates or send anything anywhere by itself. Each profile's website data lives in its own WebKit store. Saved logins and kept sessions are encrypted in ZClients's vault; its key is protected by your Mac's Keychain. Diagnostics are only written when you export them, and are redacted first.",
+        "ZClients does not check for updates or send anything anywhere by itself. Each client's website data lives in its own WebKit store. Saved logins and kept sessions are encrypted in ZClients's vault; its key is protected by your Mac's Keychain. Diagnostics are only written when you export them, and are redacted first.",
         true,
     );
     b.button("Export Diagnostics…", sel!(exportDiagnostics:), 0, 24.0);
@@ -415,11 +415,11 @@ fn clear_profile_data(cookies_only: bool) {
     let Some(id) = SELECTED.get() else { return };
     let name = app::store(|s| s.client(id).map(|c| c.name.clone())).unwrap_or_default();
     let (title, body) = if cookies_only {
-        (format!("Clear cookies for “{name}”?"), "This signs the profile out of Zoho, Google and every other site in it. Its tabs stay.")
+        (format!("Clear cookies for “{name}”?"), "This signs the client out of Zoho, Google and every other site in it. Its tabs stay.")
     } else {
         (
             format!("Clear all website data for “{name}”?"),
-            "This signs the profile out and removes its cookies, local storage, databases, caches and offline data. Its tabs, saved login and settings stay.",
+            "This signs the client out and removes its cookies, local storage, databases, caches and offline data. Its tabs, saved login and settings stay.",
         )
     };
     if !web::confirm(&title, body, "Clear") {
@@ -531,7 +531,7 @@ pub fn export_diagnostics() {
     let text = diagnostics_text();
     let panel = objc2_app_kit::NSSavePanel::savePanel(mtm());
     panel.setNameFieldStringValue(&util::ns("ZClients Diagnostics.txt"));
-    panel.setMessage(Some(&util::ns("Diagnostics are redacted: no addresses, page URLs, cookies, passwords or profile names.")));
+    panel.setMessage(Some(&util::ns("Diagnostics are redacted: no addresses, page URLs, cookies, passwords or client names.")));
     if panel.runModal() != objc2_app_kit::NSModalResponseOK {
         return;
     }

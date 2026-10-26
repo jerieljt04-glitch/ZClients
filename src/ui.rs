@@ -419,8 +419,8 @@ define_class!(
         fn ax_label(&self) -> Retained<objc2_foundation::NSString> {
             let (kind, index) = (self.ivars().kind, self.ivars().index);
             util::ns(&match kind {
-                T_SWATCH => format!("{} colour", model::PROFILE_COLORS.get(index).map(|c| c.0).unwrap_or("Profile")),
-                _ => app::store(|s| s.active_client().map(|c| if c.is_search() { "Google Search workspace".to_string() } else { format!("Profile {}, customise", c.name) })).unwrap_or_default(),
+                T_SWATCH => format!("{} colour", model::PROFILE_COLORS.get(index).map(|c| c.0).unwrap_or("Client")),
+                _ => app::store(|s| s.active_client().map(|c| if c.is_search() { "Google Search workspace".to_string() } else { format!("Client {}, customise", c.name) })).unwrap_or_default(),
             })
         }
 
@@ -801,6 +801,14 @@ define_class!(
 
         #[unsafe(method(sheetSave:))] fn a_sheet_save(&self, _s: Option<&AnyObject>) { sheet_finish(true); }
         #[unsafe(method(sheetCancel:))] fn a_sheet_cancel(&self, _s: Option<&AnyObject>) { sheet_finish(false); }
+        #[unsafe(method(sheetDelete:))]
+        fn a_sheet_delete(&self, _s: Option<&AnyObject>) {
+            let client = SHEET.with_borrow(|s| s.as_ref().and_then(|s| s.client));
+            sheet_finish(false);
+            if let Some(id) = client {
+                util::later(move || app::confirm_delete_client(id));
+            }
+        }
         #[unsafe(method(sheetChangeLogin:))]
         fn a_sheet_change(&self, _s: Option<&AnyObject>) {
             sheet_set_login_mode(LoginMode::Replace);
@@ -953,7 +961,7 @@ define_class!(
             menu.addItem(&sort);
             if !search {
                 menu.addItem(&NSMenuItem::separatorItem(mtm()));
-                add_item(menu, "Delete Profile…", sel!(clientDelete:), "", 0);
+                add_item(menu, "Delete Client…", sel!(clientDelete:), "", 0);
             }
         }
     }
@@ -1199,14 +1207,14 @@ pub fn pick_profile(question: &str, profiles: &[(Uuid, String)]) -> Option<Uuid>
     let mtm = mtm();
     let alert = objc2_app_kit::NSAlert::new(mtm);
     alert.setMessageText(&util::ns(question));
-    alert.setInformativeText(&util::ns("Each profile has its own sign-in. The Search workspace has none."));
+    alert.setInformativeText(&util::ns("Each client has its own sign-in. The Google Search workspace has none."));
     alert.addButtonWithTitle(&util::ns("Open"));
     alert.addButtonWithTitle(&util::ns("Cancel"));
     let popup = NSPopUpButton::initWithFrame_pullsDown(NSPopUpButton::alloc(mtm), rect(0.0, 0.0, 260.0, 26.0), false);
     for (_, name) in profiles {
         popup.addItemWithTitle(&util::ns(name));
     }
-    popup.setAccessibilityLabel(Some(&util::ns("Profile")));
+    popup.setAccessibilityLabel(Some(&util::ns("Client")));
     alert.setAccessoryView(Some(&popup));
     if alert.runModal() != objc2_app_kit::NSAlertFirstButtonReturn {
         return None;
@@ -1474,7 +1482,7 @@ pub fn build() {
     side.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable);
     sidebar.addSubview(&side);
 
-    let side_title = label("WORKSPACES", 10.5, true);
+    let side_title = label("CLIENTS", 10.5, true);
     side_title.setTextColor(Some(&NSColor::secondaryLabelColor()));
     side.addSubview(&side_title);
     let sort_button = sym_button("arrow.up.arrow.down", "Sort clients", sel!(sortMenu:));
@@ -2152,7 +2160,7 @@ fn refresh_toolbar() {
             chip.addSubview(&b);
             l.setFrame(rect(30.0, 5.0, text_w, 18.0));
             chip.addSubview(&l);
-            chip.setToolTip(Some(&util::ns(if *search { "Independent Google Search workspace" } else { "Customise this profile" })));
+            chip.setToolTip(Some(&util::ns(if *search { "Independent Google Search workspace" } else { "Customise this client" })));
             u.toolbar.addSubview(&chip);
             u.chip.replace(Some(chip));
         }
@@ -2628,7 +2636,7 @@ pub fn show_client_sheet(client: Option<Uuid>) {
     let at = crate::session::RETENTION_CHOICES.iter().position(|d| *d == retention.days).unwrap_or(2);
     retention_popup.selectItemAtIndex(at as isize);
     retention_popup.setEnabled(retention.keep);
-    retention_popup.setAccessibilityLabel(Some(&util::ns("How long to stay signed in without using this profile")));
+    retention_popup.setAccessibilityLabel(Some(&util::ns("How long to stay signed in without using this client")));
     body.addSubview(&retention_popup);
 
     caption("Saved login", 248.0);
@@ -2669,7 +2677,7 @@ pub fn show_client_sheet(client: Option<Uuid>) {
 
     let note = NSTextField::wrappingLabelWithString(
         &util::ns(
-            "A saved login is stored encrypted in ZClients's vault, for this profile only; the vault's key is protected by your Mac's Keychain. If Zoho asks this profile to sign in again, ZClients fills it in on Zoho's own sign-in page and you press Sign In.",
+            "A saved login is stored encrypted in ZClients's vault, for this client only; the vault's key is protected by your Mac's Keychain. If Zoho asks this client to sign in again, ZClients fills it in on Zoho's own sign-in page and you press Sign In.",
         ),
         mtm,
     );
@@ -2678,6 +2686,17 @@ pub fn show_client_sheet(client: Option<Uuid>) {
     note.setFrame(rect(108.0, 364.0, w - 128.0, 72.0));
     body.addSubview(&note);
 
+    if existing.is_some() {
+        // Deleting is reachable where the client is edited, not only from
+        // the sidebar's context menu. Red, on the far left, away from Save.
+        let delete = unsafe { NSButton::buttonWithTitle_target_action(&util::ns("Delete Client…"), Some(&target()), Some(sel!(sheetDelete:)), mtm) };
+        delete.setHasDestructiveAction(true);
+        delete.setContentTintColor(Some(&theme::destructive()));
+        delete.sizeToFit();
+        let dw = delete.frame().size.width.max(theme::BUTTON_W + 22.0);
+        delete.setFrame(rect(16.0, h - 46.0, dw, 28.0));
+        body.addSubview(&delete);
+    }
     let cancel = unsafe { NSButton::buttonWithTitle_target_action(&util::ns("Cancel"), Some(&target()), Some(sel!(sheetCancel:)), mtm) };
     cancel.setKeyEquivalent(&util::ns("\u{1b}"));
     cancel.setFrame(rect(w - 196.0, h - 46.0, 88.0, 28.0));

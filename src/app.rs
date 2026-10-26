@@ -93,11 +93,11 @@ fn recover(problem: &crate::model::LoadProblem) -> Store {
     if backup.is_some() {
         buttons.push("Restore Last Good Copy");
     }
-    buttons.extend(["Start with No Profiles", "Quit"]);
+    buttons.extend(["Start with No Clients", "Quit"]);
     let (choice, _) = web::run_alert(
-        "ZClients could not open your profiles",
+        "ZClients could not open your clients",
         &format!(
-            "The profiles file {problem}. It has not been changed.\n\nRestore Last Good Copy uses the copy saved the last time it opened correctly. Start with No Profiles keeps the file aside (clients.json.damaged-…) so nothing is lost. Your profiles' sign-ins (website data) are kept either way."
+            "The clients file {problem}. It has not been changed.\n\nRestore Last Good Copy uses the copy saved the last time it opened correctly. Start with No Clients keeps the file aside (clients.json.damaged-…) so nothing is lost. Your clients' sign-ins (website data) are kept either way."
         ),
         &buttons,
         None,
@@ -116,7 +116,7 @@ fn recover(problem: &crate::model::LoadProblem) -> Store {
             READ_ONLY.set(false);
             store
         }
-        ("Start with No Profiles", _) => {
+        ("Start with No Clients", _) => {
             if save_path().exists() && aside(&save_path()).is_err() {
                 util::log("could not keep the damaged file aside; staying read-only");
             } else {
@@ -212,7 +212,7 @@ pub fn apply(effects: Vec<Effect>) {
                 }
                 web::forget_client(client_id);
                 let stores = web::release_client(client_id, &tab_ids);
-                let name = DELETING_NAME.with_borrow_mut(|n| n.take()).unwrap_or_else(|| "Profile".into());
+                let name = DELETING_NAME.with_borrow_mut(|n| n.take()).unwrap_or_else(|| "Client".into());
                 let previews = PENDING_PREVIEWS.with_borrow_mut(std::mem::take);
                 cleanup::start(cleanup::Job::new(client_id, &name, &stores, &tab_ids, &previews));
             }
@@ -315,7 +315,7 @@ fn apply_login_change(id: Uuid, change: LoginChange) {
         LoginChange::Replace(_) => {}
         LoginChange::Remove => {
             if !keychain::delete_login(id) {
-                web::run_alert("The saved login could not be removed", "ZClients will not use it, and will try to remove it again when the profile is deleted.", &["OK"], None);
+                web::run_alert("The saved login could not be removed", "ZClients will not use it, and will try to remove it again when the client is deleted.", &["OK"], None);
             }
         }
     }
@@ -325,7 +325,7 @@ pub fn confirm_delete_client(id: Uuid) {
     let Some(name) = store(|s| s.client(id).filter(|c| !c.is_search()).map(|c| c.name.clone())) else { return };
     let (button, _) = web::run_alert(
         &format!("Delete “{name}”?"),
-        "This signs the profile out and removes its tabs, website data (cookies and storage), saved session, saved login and PDF previews from this Mac. Files in your Downloads folder are not touched.",
+        "This signs the client out and removes its tabs, website data (cookies and storage), saved session, saved login and PDF previews from this Mac. Files in your Downloads folder are not touched.",
         &["Delete", "Cancel"],
         None,
     );
@@ -399,7 +399,7 @@ pub fn offer_to_save_login(client: Uuid, email: String, password: String) {
     let (choice, _) = web::run_alert(
         &title,
         &format!(
-            "{}\n\nIt is stored encrypted in ZClients's vault, for this profile only; the vault's key is kept in your Mac's Keychain. If Zoho asks you to sign in again, ZClients fills it in on Zoho's own sign-in page and you press Sign In. Deleting the profile removes it.",
+            "{}\n\nIt is stored encrypted in ZClients's vault, for this client only; the vault's key is kept in your Mac's Keychain. If Zoho asks you to sign in again, ZClients fills it in on Zoho's own sign-in page and you press Sign In. Deleting the client removes it.",
             new.email
         ),
         &[button, "Not Now"],
@@ -495,7 +495,7 @@ pub fn open_meet() {
     if mutate(ALL, |s| s.open_google_meet()) {
         return;
     }
-    if let Some(client) = choose_profile("Open Google Meet in which profile?") {
+    if let Some(client) = choose_profile("Open Google Meet in which client?") {
         mutate(ALL, |s| s.open_google_meet_in(client));
     }
 }
@@ -526,7 +526,7 @@ pub fn open_search_url(url: &Url) {
 /// picks. Never in the Search workspace's own store.
 pub fn open_from_search(search_tab: Option<Uuid>, url: Url) {
     let origin = search_tab.and_then(|t| store(|s| s.search_origin(t)));
-    let Some(client) = origin.or_else(|| choose_profile(&format!("Open {} in which profile?", url.host_str().unwrap_or("this page")))) else { return };
+    let Some(client) = origin.or_else(|| choose_profile(&format!("Open {} in which client?", url.host_str().unwrap_or("this page")))) else { return };
     open_in_client_workspace(client, url);
 }
 
