@@ -64,6 +64,18 @@ define_class!(
             app::app_resigned_active();
         }
 
+        // Quitting (⌘Q, the red close button, logging out) while a file is
+        // downloading or a call is on asks first; see `app::should_quit`.
+        #[unsafe(method(applicationShouldTerminate:))]
+        fn should_terminate(&self, _app: &NSApplication) -> objc2_app_kit::NSApplicationTerminateReply {
+            use objc2_app_kit::NSApplicationTerminateReply as R;
+            match app::should_quit() {
+                app::QuitReply::Now => R::TerminateNow,
+                app::QuitReply::Cancel => R::TerminateCancel,
+                app::QuitReply::Later => R::TerminateLater,
+            }
+        }
+
         #[unsafe(method(applicationWillTerminate:))]
         fn will_terminate(&self, _n: &NSNotification) {
             app::app_will_quit();

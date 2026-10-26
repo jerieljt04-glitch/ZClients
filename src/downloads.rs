@@ -122,17 +122,31 @@ pub fn progress(key: usize) -> Option<f64> {
     LIVE.with_borrow(|m| m.get(&key).map(|d| d.progress().fractionCompleted()))
 }
 
-pub fn cancel(key: usize) {
+/// Stop a running download and delete what it wrote so far: WebKit writes
+/// to the final name, so a partial file would look complete.
+pub fn cancel(key: usize) -> Option<PathBuf> {
     if find(key, |i| i.state == State::Downloading) != Some(true) {
-        return;
+        return None;
     }
+    let partial = path_of(key);
     if let Some(d) = LIVE.with_borrow_mut(|m| m.remove(&key)) {
         unsafe { d.cancel(None) };
+    }
+    if let Some(p) = &partial {
+        let _ = std::fs::remove_file(p);
     }
     update(key, |i| {
         i.state = State::Failed;
         i.note = Some("Cancelled".into());
     });
+    partial
+}
+
+/// Cancel every running download (quitting). Returns the partial files,
+/// already deleted once, so the caller can make sure just before exit.
+pub fn cancel_all() -> Vec<PathBuf> {
+    let keys: Vec<usize> = ITEMS.with_borrow(|v| v.iter().filter(|i| i.state == State::Downloading).map(|i| i.key).collect());
+    keys.into_iter().filter_map(cancel).collect()
 }
 
 /// The address to download again, for Retry.

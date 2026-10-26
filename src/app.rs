@@ -731,6 +731,80 @@ pub fn app_resigned_active() {
     save_now(false);
 }
 
+thread_local! {
+    /// The user already agreed to quit (or a self-test is ending).
+    static QUIT_CONFIRMED: Cell<bool> = const { Cell::new(false) };
+}
+
+pub enum QuitReply {
+    Now,
+    Cancel,
+    /// Downloads are being cancelled; `replyToApplicationShouldTerminate`
+    /// follows once their partial files are gone.
+    Later,
+}
+
+/// What to ask before quitting with `downloads` files still downloading
+/// and `calls` tabs using the camera or microphone. None: nothing to lose.
+pub fn quit_question(downloads: usize, calls: usize) -> Option<String> {
+    let files = match downloads {
+        0 => None,
+        1 => Some("cancel 1 download".to_string()),
+        n => Some(format!("cancel {n} downloads")),
+    };
+    let call = match calls {
+        0 => None,
+        1 => Some("end the call".to_string()),
+        n => Some(format!("end {n} calls")),
+    };
+    match (files, call) {
+        (None, None) => None,
+        (Some(f), None) => Some(format!("Quit and {f}?")),
+        (None, Some(c)) => Some(format!("Quit and {c}?")),
+        (Some(f), Some(c)) => Some(format!("Quit, {f} and {c}?")),
+    }
+}
+
+/// Quitting would cancel downloads (WebKit writes straight to the final
+/// name in ~/Downloads, so a half-written file would be left looking
+/// complete) or hang up a call: ask. On Quit, live downloads are cancelled
+/// and their partial files deleted before the app exits.
+pub fn should_quit() -> QuitReply {
+    if QUIT_CONFIRMED.get() {
+        return QuitReply::Now;
+    }
+    let downloading = crate::downloads::active_count();
+    let Some(question) = quit_question(downloading, web::tabs_in_calls().len()) else { return QuitReply::Now };
+    let (choice, _) = web::run_alert(&question, "Partly downloaded files are deleted. Anyone in a call with you sees you leave.", &["Quit", "Cancel"], None);
+    if choice != 0 {
+        return QuitReply::Cancel;
+    }
+    QUIT_CONFIRMED.set(true);
+    if downloading == 0 {
+        return QuitReply::Now;
+    }
+    let partial = crate::downloads::cancel_all();
+    // WebKit may still flush a last chunk after cancelling: remove the
+    // files again just before exiting.
+    util::after(0.6, move || {
+        for p in partial {
+            let _ = std::fs::remove_file(p);
+        }
+        if let Some(mtm) = objc2::MainThreadMarker::new() {
+            objc2_app_kit::NSApplication::sharedApplication(mtm).replyToApplicationShouldTerminate(true);
+        }
+    });
+    QuitReply::Later
+}
+
+/// Self-tests end by quitting without being asked.
+pub fn quit_without_asking() {
+    QUIT_CONFIRMED.set(true);
+    if let Some(mtm) = objc2::MainThreadMarker::new() {
+        objc2_app_kit::NSApplication::sharedApplication(mtm).terminate(None);
+    }
+}
+
 pub fn app_will_quit() {
     web::save_all_states();
     web::capture_sessions(true);
@@ -744,6 +818,16 @@ pub fn app_will_quit() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quitting_asks_only_when_something_would_be_lost() {
+        assert_eq!(quit_question(0, 0), None);
+        assert_eq!(quit_question(1, 0).as_deref(), Some("Quit and cancel 1 download?"));
+        assert_eq!(quit_question(2, 0).as_deref(), Some("Quit and cancel 2 downloads?"));
+        assert_eq!(quit_question(0, 1).as_deref(), Some("Quit and end the call?"));
+        assert_eq!(quit_question(2, 1).as_deref(), Some("Quit, cancel 2 downloads and end the call?"));
+        assert_eq!(quit_question(1, 2).as_deref(), Some("Quit, cancel 1 download and end 2 calls?"));
+    }
 
     #[test]
     fn address_text_only_navigates_the_tab_it_was_typed_for() {

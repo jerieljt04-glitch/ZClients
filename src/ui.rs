@@ -781,6 +781,15 @@ define_class!(
     }
 
     unsafe impl NSWindowDelegate for Actions {
+        // The red close button quits (this is a one-window app), through
+        // the same confirmation as ⌘Q: a running download or a call asks
+        // first, and Cancel leaves the window open.
+        #[unsafe(method(windowShouldClose:))]
+        fn window_should_close(&self, _w: &NSWindow) -> bool {
+            util::later(|| unsafe { NSApplication::sharedApplication(mtm()).terminate(None) });
+            false
+        }
+
         #[unsafe(method(windowWillClose:))]
         fn window_will_close(&self, _n: &NSNotification) {
             util::later(|| unsafe { NSApplication::sharedApplication(mtm()).terminate(None) });

@@ -79,7 +79,7 @@ fn prep() {
         });
         util::log(format!("SELFTEST sidebar visible = {}", ui::sidebar_visible()));
     });
-    util::after(19.0, || NSApplication::sharedApplication(MainThreadMarker::new().unwrap()).terminate(None));
+    util::after(19.0, || app::quit_without_asking());
 }
 
 fn report(step: &str) {
@@ -217,7 +217,7 @@ fn downloads_test() {
     util::after(45.0, || {
         report("after the PDF viewer's download button");
         util::log("SELFTEST done");
-        NSApplication::sharedApplication(MainThreadMarker::new().unwrap()).terminate(None);
+        app::quit_without_asking();
     });
 }
 
@@ -320,7 +320,7 @@ fn switch_round(pass: usize, i: usize, mut block: Vec<f64>, ready: Vec<f64>) {
         app::app_resigned_active();
         util::log(format!("PERF app to background (saves everything): {:.2} ms", ms(t)));
         util::log("PERF done");
-        util::after(2.0, || NSApplication::sharedApplication(MainThreadMarker::new().unwrap()).terminate(None));
+        util::after(2.0, || app::quit_without_asking());
         return;
     }
     let t = std::time::Instant::now();
@@ -455,7 +455,7 @@ fn input_test() {
         let live = web::live_tabs().len();
         util::log(format!("SELFTEST awake tabs: {live}"));
         util::log("SELFTEST done");
-        NSApplication::sharedApplication(MainThreadMarker::new().unwrap()).terminate(None);
+        app::quit_without_asking();
     });
 }
 
@@ -488,7 +488,7 @@ fn find_test() {
     }));
     util::after(30.0, || {
         util::log("SELFTEST done");
-        NSApplication::sharedApplication(MainThreadMarker::new().unwrap()).terminate(None);
+        app::quit_without_asking();
     });
 }
 
@@ -513,7 +513,7 @@ fn memory_test() {
     });
     util::after(52.0, || {
         util::log("SELFTEST done");
-        NSApplication::sharedApplication(MainThreadMarker::new().unwrap()).terminate(None);
+        app::quit_without_asking();
     });
 }
 
@@ -624,7 +624,7 @@ fn meet_test() {
     util::after(62.0, || util::log(format!("SELFTEST CALL after ⌘D on Meet: {}", tab_summary())));
     util::after(64.0, || {
         util::log("SELFTEST done");
-        NSApplication::sharedApplication(MainThreadMarker::new().unwrap()).terminate(None);
+        app::quit_without_asking();
     });
 }
 
@@ -677,7 +677,7 @@ fn address_test() {
     });
     util::after(31.0, || {
         util::log("SELFTEST done");
-        NSApplication::sharedApplication(MainThreadMarker::new().unwrap()).terminate(None);
+        app::quit_without_asking();
     });
 }
 
@@ -734,7 +734,7 @@ fn editor_test() {
     });
     util::after(20.0, || {
         util::log("SELFTEST done");
-        NSApplication::sharedApplication(MainThreadMarker::new().unwrap()).terminate(None);
+        app::quit_without_asking();
     });
 }
 
@@ -791,7 +791,7 @@ fn address_rules_test() {
     });
     util::after(34.0, || {
         util::log("SELFTEST done");
-        NSApplication::sharedApplication(MainThreadMarker::new().unwrap()).terminate(None);
+        app::quit_without_asking();
     });
 }
 
@@ -887,7 +887,7 @@ fn security_test() {
     util::after(46.0, || {
         report("security end");
         util::log("SELFTEST done");
-        NSApplication::sharedApplication(MainThreadMarker::new().unwrap()).terminate(None);
+        app::quit_without_asking();
     });
 }
 
@@ -933,7 +933,7 @@ fn a11y_test() {
     });
     util::after(14.0, || {
         util::log("SELFTEST done");
-        NSApplication::sharedApplication(MainThreadMarker::new().unwrap()).terminate(None);
+        app::quit_without_asking();
     });
 }
 
@@ -1114,7 +1114,6 @@ pub fn start() {
     });
     util::after(16.0, || {
         util::log("SELFTEST done");
-        let mtm = MainThreadMarker::new().unwrap();
-        NSApplication::sharedApplication(mtm).terminate(None);
+        app::quit_without_asking();
     });
 }
