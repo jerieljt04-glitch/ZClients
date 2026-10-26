@@ -588,6 +588,9 @@ pub struct CoordIvars {
     /// The user chose "Don't allow more dialogs from this page"; cleared
     /// when the tab goes to another page.
     dialogs_blocked: Cell<bool>,
+    /// A single sign-on that started on Zoho's sign-in page is under way
+    /// (see `policy::sso_step_allowed`).
+    sso_chain: Cell<bool>,
 }
 
 define_class!(
@@ -615,6 +618,10 @@ define_class!(
             // Suppressed dialogs last until the page changes, as in Safari.
             self.ivars().dialogs_blocked.set(false);
             self.ivars().dialogs.borrow_mut().clear();
+            // A sign-on chain lasts while the tab is on Zoho's sign-in page
+            // or at an identity provider; any other page ends it.
+            let here = ns_str_url(unsafe { web.URL() }).and_then(|s| policy::parse(&s));
+            self.ivars().sso_chain.set(here.as_ref().is_some_and(|u| policy::is_zoho_sign_in(u) || (self.ivars().sso_chain.get() && policy::is_identity_provider(u))));
             // A new page starts outside any code editor; the editor hook
             // reports again when the keyboard enters one. Otherwise ⌘A/⌘Z
             // could stay routed as editor keys on the next page.
@@ -1112,6 +1119,7 @@ impl Coordinator {
             depth,
             dialogs: RefCell::new(vec![]),
             dialogs_blocked: Cell::new(false),
+            sso_chain: Cell::new(false),
         });
         unsafe { msg_send![super(this), init] }
     }
@@ -1307,6 +1315,16 @@ impl Coordinator {
             return WKNavigationActionPolicy::Allow;
         }
 
+        // Federated sign-in: Zoho's sign-in page (or a redirect from it)
+        // sends the tab to the organisation's identity provider, which
+        // later sends it back. Not a user click, so without this the step
+        // was probed and then cancelled.
+        let from = ns_str_url(unsafe { web.URL() }).and_then(|s| policy::parse(&s));
+        if iv.workspace == Workspace::Zoho && policy::sso_step_allowed(&url, from.as_ref(), iv.sso_chain.get()) {
+            iv.sso_chain.set(true);
+            return WKNavigationActionPolicy::Allow;
+        }
+
         // A popup a Zoho page opened (OAuth for a widget or integration) may
         // travel to the provider's sign-in pages.
         if iv.popup_trusted && policy::is_https(&url) {
@@ -1387,6 +1405,9 @@ impl Coordinator {
             return WKNavigationResponsePolicy::Allow;
         }
         if allowed_page || iv.popup_trusted {
+            return WKNavigationResponsePolicy::Allow;
+        }
+        if iv.sso_chain.get() && url.as_ref().is_some_and(policy::is_identity_provider) {
             return WKNavigationResponsePolicy::Allow;
         }
         if mime.starts_with("image/") || mime.starts_with("video/") || mime.starts_with("audio/") {

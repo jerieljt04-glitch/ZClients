@@ -92,6 +92,31 @@ pub fn data_centre_of(url: &Url) -> Option<&'static str> {
     ZOHO_DATA_CENTRES.iter().copied().find(|dc| host.ends_with(&format!(".{dc}")))
 }
 
+/// Identity providers a Zoho organisation can federate its sign-in to
+/// (Microsoft Entra / personal Microsoft accounts, Sign in with Apple, Okta,
+/// OneLogin). Exact hosts, or every host under a provider's own tenant
+/// domain. Google's sign-in is already allowed everywhere.
+const IDENTITY_PROVIDER_HOSTS: &[&str] = &["login.microsoftonline.com", "login.live.com", "appleid.apple.com"];
+const IDENTITY_PROVIDER_TENANT_DOMAINS: &[&str] = &["okta.com", "onelogin.com"];
+
+pub fn is_identity_provider(url: &Url) -> bool {
+    is_https(url)
+        && Origin::of(url).is_some_and(|o| {
+            o.port == 443 && (IDENTITY_PROVIDER_HOSTS.contains(&o.host.as_str()) || IDENTITY_PROVIDER_TENANT_DOMAINS.iter().any(|d| o.host.ends_with(&format!(".{d}"))))
+        })
+}
+
+/// May a tab's main frame go to `url` as one step of a single sign-on? Only
+/// to an identity provider, and only when the chain started on Zoho's own
+/// sign-in page: either the page the tab is on now (`from`) is
+/// `https://accounts.<data centre>`, or an earlier step of the same chain
+/// was (`chain_active`). Nothing is filled in or bridged on those hosts
+/// (they are not pages this app shows), and the provider sends the user
+/// back to Zoho's sign-in, which is allowed anyway.
+pub fn sso_step_allowed(url: &Url, from: Option<&Url>, chain_active: bool) -> bool {
+    is_identity_provider(url) && (chain_active || from.is_some_and(is_zoho_sign_in))
+}
+
 const GOOGLE_AUTH_HOSTS: &[&str] = &["accounts.google.com", "consent.google.com"];
 
 const GOOGLE_SEARCH_HOSTS: &[&str] = &["google.com", "www.google.com", "images.google.com", "news.google.com", "lens.google.com", "google.ae", "www.google.ae", "images.google.ae"];
@@ -681,6 +706,40 @@ mod tests {
         assert_eq!(data_centre_of(&u("https://accounts.zoho.com/signin")), None, "everyone signs in through the US first");
         assert_eq!(data_centre_of(&u("https://www.google.com/")), None);
         assert_eq!(data_centre_of(&u("http://crm.zoho.eu/")), None);
+    }
+
+    #[test]
+    fn single_sign_on_only_from_zohos_sign_in_page() {
+        let sign_in = u("https://accounts.zoho.eu/signin?servicename=ZohoCRM");
+        for idp in [
+            "https://login.microsoftonline.com/common/saml2",
+            "https://login.live.com/oauth20",
+            "https://appleid.apple.com/auth/authorize",
+            "https://acme.okta.com/app/zoho/sso/saml",
+            "https://acme.onelogin.com/trust/saml2",
+        ] {
+            assert!(sso_step_allowed(&u(idp), Some(&sign_in), false), "{idp} from Zoho's sign-in");
+            assert!(sso_step_allowed(&u(idp), Some(&u("https://login.microsoftonline.com/x")), true), "{idp} later in the same chain");
+            assert!(!sso_step_allowed(&u(idp), Some(&u("https://crm.zoho.eu/crm/org1")), false), "{idp} from an ordinary Zoho page");
+            assert!(!sso_step_allowed(&u(idp), None, false));
+            assert!(!is_allowed_web(&u(idp), Workspace::Zoho), "never a page the app trusts");
+            let r = Request { origin: Origin::of(&u(idp)), top: Origin::of(&u(idp)), main_frame: true, user_gesture: true, workspace: Workspace::Zoho };
+            for cap in [Capability::Autofill, Capability::Bridge, Capability::Display] {
+                assert_eq!(decide(cap, &r), Decision::Deny, "{cap:?} on {idp}");
+            }
+        }
+        for bad in [
+            "http://login.microsoftonline.com/",
+            "https://login.microsoftonline.com.evil.net/",
+            "https://okta.com.evil.net/",
+            "https://evilokta.com/",
+            "https://login.microsoftonline.com:8443/",
+            "https://user@acme.okta.com/",
+            "https://evil.example/",
+        ] {
+            assert!(!sso_step_allowed(&u(bad), Some(&sign_in), true), "{bad}");
+        }
+        assert!(!sso_step_allowed(&u("https://acme.okta.com/"), Some(&u("https://accounts.zoho.com.evil.net/")), false));
     }
 
     #[test]
