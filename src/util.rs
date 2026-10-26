@@ -37,6 +37,13 @@ pub fn url_string(u: &NSURL) -> Option<String> {
 /// Run `f` once on the main run loop after `secs`. Using a timer (rather than
 /// running inline) is what breaks re-entrancy: callers never run nested inside
 /// an AppKit or WebKit callback that is still holding app state.
+///
+/// The timer runs in the run loop's *common* modes, so it also fires while
+/// an alert, a menu or a live window resize is tracking. A timer in the
+/// default mode alone waited for all of those: the UI stopped refreshing
+/// and the profile save stalled for as long as a page's `alert()` was up.
+/// Callers never hold a `RefCell` borrow across a modal call, so firing
+/// there is safe.
 pub fn after(secs: f64, f: impl FnOnce() + 'static) -> Retained<NSTimer> {
     let slot = Cell::new(Some(f));
     let block = RcBlock::new(move |_t: NonNull<NSTimer>| {
@@ -44,8 +51,10 @@ pub fn after(secs: f64, f: impl FnOnce() + 'static) -> Retained<NSTimer> {
             f();
         }
     });
-    // SAFETY: timers are scheduled on, and fire on, the main run loop only.
-    unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(secs, false, &block) }
+    // SAFETY: the timer is added to, and fires on, the main run loop only.
+    let timer = unsafe { NSTimer::timerWithTimeInterval_repeats_block(secs, false, &block) };
+    schedule(&timer);
+    timer
 }
 
 pub fn later(f: impl FnOnce() + 'static) {
@@ -55,11 +64,17 @@ pub fn later(f: impl FnOnce() + 'static) {
 pub fn every(secs: f64, f: impl Fn() + 'static) -> Retained<NSTimer> {
     let block = RcBlock::new(move |_t: NonNull<NSTimer>| f());
     // SAFETY: as above, main run loop only.
-    let timer = unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(secs, true, &block) };
+    let timer = unsafe { NSTimer::timerWithTimeInterval_repeats_block(secs, true, &block) };
     // A little slack lets macOS coalesce wake-ups, which is most of what keeps
     // an idle app at ~0% CPU.
     timer.setTolerance(secs / 4.0);
+    schedule(&timer);
     timer
+}
+
+fn schedule(timer: &NSTimer) {
+    // SAFETY: NSRunLoopCommonModes is a constant string owned by Foundation.
+    unsafe { objc2_foundation::NSRunLoop::mainRunLoop().addTimer_forMode(timer, objc2_foundation::NSRunLoopCommonModes) };
 }
 
 pub fn color(hex: &str) -> Retained<NSColor> {
