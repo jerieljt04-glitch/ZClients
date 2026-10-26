@@ -800,6 +800,11 @@ define_class!(
         }
 
         #[unsafe(method(sheetSave:))] fn a_sheet_save(&self, _s: Option<&AnyObject>) { sheet_finish(true); }
+        #[unsafe(method(dismissEmpty:))]
+        fn a_dismiss_empty(&self, _s: Option<&AnyObject>) {
+            EMPTY_DISMISSED.set(true);
+            refresh(app::CONTENT);
+        }
         #[unsafe(method(sheetCancel:))] fn a_sheet_cancel(&self, _s: Option<&AnyObject>) { sheet_finish(false); }
         #[unsafe(method(sheetDelete:))]
         fn a_sheet_delete(&self, _s: Option<&AnyObject>) {
@@ -2064,7 +2069,44 @@ fn tab_color(t: &model::Tab) -> String {
     model::matched_zoho_app(t.url.as_deref()).map(|a| a.color.to_string()).unwrap_or_else(|| "#7a7f8c".into())
 }
 
+thread_local! {
+    /// The user chose to use Google Search before adding a client.
+    static EMPTY_DISMISSED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// No clients yet: the content area explains what a client is and offers
+/// to add one, instead of opening on Google Search with no explanation.
+fn show_empty_state() -> bool {
+    let none = app::store(|s| s.client_ids_in_order().is_empty());
+    if !none || EMPTY_DISMISSED.get() {
+        return false;
+    }
+    web::set_active(None);
+    with_ui(|u| {
+        if u.content.subviews().iter().any(|v| v.identifier().is_some_and(|i| i.to_string() == "zcEmpty")) {
+            return;
+        }
+        u.launcher.replace(None);
+        for v in u.content.subviews().iter() {
+            v.removeFromSuperview();
+        }
+        let v = message_screen(
+            u.content.bounds(),
+            "person.crop.rectangle.stack",
+            "Add your first client",
+            "A client is one Zoho account, signed in on its own with its own tabs. Add one for each company or account you work with; switching between them is one click.",
+            &[("Add Client", sel!(addClient:)), ("Use Google Search", sel!(dismissEmpty:))],
+        );
+        v.setIdentifier(Some(&util::ns("zcEmpty")));
+        u.content.addSubview(&v);
+    });
+    true
+}
+
 fn refresh_content() {
+    if show_empty_state() {
+        return;
+    }
     let active = app::store(|s| s.active_tab().map(|(c, t)| (c.id, c.name.clone(), t.clone())));
     let Some((client, name, tab)) = active else {
         web::set_active(None);
