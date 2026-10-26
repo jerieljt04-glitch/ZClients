@@ -2285,6 +2285,56 @@ struct Sheet {
     retention: Retained<NSPopUpButton>,
     /// What Save does with the saved login.
     login_mode: Cell<LoginMode>,
+    /// Inline, red explanations of why Save did not close the sheet.
+    name_error: Retained<NSTextField>,
+    login_error: Retained<NSTextField>,
+}
+
+/// Why the client sheet cannot be saved as it is.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SheetProblem {
+    NoName,
+    NoPassword,
+    NoEmail,
+    BadEmail,
+}
+
+impl SheetProblem {
+    fn message(self) -> &'static str {
+        match self {
+            SheetProblem::NoName => "Enter a client name.",
+            SheetProblem::NoPassword => "Enter the password too, or clear the email to save no login.",
+            SheetProblem::NoEmail => "Enter the email too, or clear the password to save no login.",
+            SheetProblem::BadEmail => "This doesn't look like an email address.",
+        }
+    }
+}
+
+/// A plain shape check: something@domain.tld, no spaces.
+pub fn looks_like_email(e: &str) -> bool {
+    let Some((local, domain)) = e.split_once('@') else { return false };
+    !local.is_empty() && !domain.contains('@') && !e.chars().any(char::is_whitespace) && domain.split('.').count() >= 2 && domain.split('.').all(|part| !part.is_empty())
+}
+
+/// What stops Save: an empty name, or a login with only one of its two
+/// halves (which used to be dropped silently while the sheet closed as if
+/// saved), or an email that cannot be one. `entering_login` is whether the
+/// email/password fields are in use.
+pub fn sheet_problem(name: &str, entering_login: bool, email: &str, password: &str) -> Option<SheetProblem> {
+    if name.trim().is_empty() {
+        return Some(SheetProblem::NoName);
+    }
+    if !entering_login {
+        return None;
+    }
+    let email = email.trim();
+    match (email.is_empty(), password.is_empty()) {
+        (true, true) => None,
+        (false, true) => Some(SheetProblem::NoPassword),
+        (true, false) => Some(SheetProblem::NoEmail),
+        (false, false) if !looks_like_email(email) => Some(SheetProblem::BadEmail),
+        _ => None,
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -2341,14 +2391,17 @@ pub fn show_client_sheet(client: Option<Uuid>) {
     name.setFrame(rect(108.0, 56.0, w - 128.0, 24.0));
     body.addSubview(&name);
 
-    caption("Colour", 94.0);
-    let well = NSColorWell::initWithFrame(NSColorWell::alloc(mtm), rect(108.0, 94.0, 44.0, 44.0));
+    let name_error = error_label(rect(108.0, 81.0, w - 128.0, 14.0));
+    body.addSubview(&name_error);
+
+    caption("Colour", 98.0);
+    let well = NSColorWell::initWithFrame(NSColorWell::alloc(mtm), rect(108.0, 98.0, 44.0, 44.0));
     let start_hex = existing.as_ref().map(|c| c.color_hex.clone()).unwrap_or_else(|| model::PROFILE_COLORS[0].1.to_string());
     well.setColor(&util::color(&start_hex));
     body.addSubview(&well);
     for (i, (cname, hex)) in model::PROFILE_COLORS.iter().enumerate() {
         let (r, c) = (i / 8, i % 8);
-        let t = tile(T_SWATCH, i, rect(164.0 + c as f64 * 26.0, 94.0 + r as f64 * 24.0, 20.0, 20.0));
+        let t = tile(T_SWATCH, i, rect(164.0 + c as f64 * 26.0, 98.0 + r as f64 * 24.0, 20.0, 20.0));
         set_layer_color(&t, &util::color(hex), 10.0);
         t.setToolTip(Some(&util::ns(cname)));
         body.addSubview(&t);
@@ -2440,6 +2493,9 @@ pub fn show_client_sheet(client: Option<Uuid>) {
     password.setPlaceholderString(Some(&util::ns(if saved_email.is_some() { "New password" } else { "Password" })));
     body.addSubview(&password);
 
+    let login_error = error_label(rect(108.0, 344.0, w - 128.0, 14.0));
+    body.addSubview(&login_error);
+
     let note = NSTextField::wrappingLabelWithString(
         &util::ns(
             "A saved login is stored encrypted in ZClients's vault, for this profile only; the vault's key is protected by your Mac's Keychain. If Zoho asks this profile to sign in again, ZClients fills it in on Zoho's own sign-in page and you press Sign In.",
@@ -2448,7 +2504,7 @@ pub fn show_client_sheet(client: Option<Uuid>) {
     );
     note.setFont(Some(&NSFont::systemFontOfSize(11.0)));
     note.setTextColor(Some(&NSColor::secondaryLabelColor()));
-    note.setFrame(rect(108.0, 350.0, w - 128.0, 72.0));
+    note.setFrame(rect(108.0, 364.0, w - 128.0, 72.0));
     body.addSubview(&note);
 
     let cancel = unsafe { NSButton::buttonWithTitle_target_action(&util::ns("Cancel"), Some(&target()), Some(sel!(sheetCancel:)), mtm) };
@@ -2477,6 +2533,8 @@ pub fn show_client_sheet(client: Option<Uuid>) {
         keep_signed_in: keep,
         retention: retention_popup,
         login_mode: Cell::new(mode),
+        name_error,
+        login_error,
     };
     SHEET.with_borrow_mut(|s| *s = Some(sheet));
     sheet_set_login_mode(mode);
@@ -2523,13 +2581,35 @@ fn sheet_pick_swatch(index: usize) {
     }
 }
 
+/// A small red line under a field, empty until there is something to say.
+fn error_label(frame: NSRect) -> Retained<NSTextField> {
+    let l = label("", 0.0, false);
+    l.setFont(Some(&theme::font(theme::Text::Footnote)));
+    l.setTextColor(Some(&theme::destructive()));
+    l.setFrame(frame);
+    l
+}
+
 fn sheet_finish(save: bool) {
     let Some(sheet) = SHEET.with_borrow_mut(|s| s.take()) else { return };
     if save {
         let name = sheet.name.stringValue().to_string();
-        if name.trim().is_empty() {
+        let entering = sheet.login_mode.get() == LoginMode::Replace;
+        let (email, password) = (sheet.email.stringValue().to_string(), sheet.password.stringValue().to_string());
+        sheet.name_error.setStringValue(&util::ns(""));
+        sheet.login_error.setStringValue(&util::ns(""));
+        if let Some(problem) = sheet_problem(&name, entering, &email, &password) {
+            // Stay open, say what is wrong right under it, and put the
+            // cursor where the fix goes.
+            let (line, field): (&NSTextField, &NSTextField) = match problem {
+                SheetProblem::NoName => (&sheet.name_error, &sheet.name),
+                SheetProblem::NoPassword => (&sheet.login_error, &sheet.password),
+                SheetProblem::NoEmail | SheetProblem::BadEmail => (&sheet.login_error, &sheet.email),
+            };
+            line.setStringValue(&util::ns(problem.message()));
+            line.setAccessibilityLabel(Some(&util::ns(problem.message())));
+            sheet.window.makeFirstResponder(Some(field));
             SHEET.with_borrow_mut(|s| *s = Some(sheet));
-            objc2_app_kit::NSBeep();
             return;
         }
         let color = util::color_hex(&sheet.well.color()).unwrap_or_else(|| "#e42527".into());
@@ -2707,6 +2787,21 @@ fn build_menu() {
 mod tests {
     use super::*;
     use crate::web::LoadError as E;
+
+    #[test]
+    fn half_a_login_is_never_silently_dropped() {
+        assert_eq!(sheet_problem("  ", false, "", ""), Some(SheetProblem::NoName));
+        assert_eq!(sheet_problem("Acme", true, "jo@acme.com", ""), Some(SheetProblem::NoPassword));
+        assert_eq!(sheet_problem("Acme", true, "", "secret"), Some(SheetProblem::NoEmail));
+        assert_eq!(sheet_problem("Acme", true, "jo at acme", "secret"), Some(SheetProblem::BadEmail));
+        assert_eq!(sheet_problem("Acme", true, "", ""), None, "no login at all is fine");
+        assert_eq!(sheet_problem("Acme", true, " jo@acme.co.uk ", "secret"), None);
+        assert_eq!(sheet_problem("Acme", false, "jo@", ""), None, "fields not in use");
+        for bad in ["jo@acme", "@acme.com", "jo@@acme.com", "jo@acme..com", "j o@acme.com", "jo@.com"] {
+            assert!(!looks_like_email(bad), "{bad}");
+        }
+        assert!(looks_like_email("first.last+zoho@sub.example.com"));
+    }
 
     #[test]
     fn every_error_screen_offers_a_way_forward() {
