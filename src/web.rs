@@ -1597,6 +1597,8 @@ pub struct Pool {
     sign_in_attempts: HashMap<Uuid, Vec<Instant>>,
     /// When each tab's page last crashed (see `crash_allows_reload`).
     crashes: HashMap<Uuid, Vec<Instant>>,
+    /// Hidden web views starting a download for a profile with no awake tab.
+    helpers: Vec<Retained<ZWebView>>,
     bridge: Option<Retained<Bridge>>,
     max_live: usize,
 }
@@ -1613,6 +1615,7 @@ thread_local! {
         opened_by_page: HashSet::new(),
         sign_in_attempts: HashMap::new(),
         crashes: HashMap::new(),
+        helpers: vec![],
         bridge: None,
         max_live: base_live_cap(),
     });
@@ -2082,6 +2085,7 @@ pub fn release_client(client: Uuid, tabs: &[Uuid]) -> Vec<Uuid> {
     for t in tabs {
         release(*t);
     }
+    POOL.with_borrow_mut(|p| p.helpers.retain(|h| h.ivars().client_id != client));
     let popups: Vec<Retained<Coordinator>> = POOL.with_borrow(|p| p.popups.iter().filter(|(c, _)| c.ivars().client_id == client).map(|(c, _)| c.clone()).collect());
     for c in popups {
         if let Some(w) = c.ivars().popup_window.borrow().clone() {
@@ -2388,18 +2392,59 @@ pub fn print() {
 }
 
 /// Retry a failed download in its own profile (a click in the app is the
-/// user's gesture). Only https addresses, through a live tab of that profile.
-pub fn download_url(client: Option<Uuid>, url: &str) {
-    let Some(u) = policy::parse(url).filter(policy::is_https) else { return };
+/// user's gesture). Only https addresses, signed in as that profile: through
+/// one of its awake tabs, or else a hidden web view on its data store. False
+/// when it could not be started (not https, or the profile is gone).
+pub fn download_url(client: Option<Uuid>, url: &str) -> bool {
+    let Some(u) = policy::parse(url).filter(policy::is_https) else { return false };
+    let Some(nsurl) = util::ns_url(u.as_str()) else { return false };
     let view = POOL.with_borrow(|p| {
         let active = p.active.and_then(|id| p.live.get(&id)).map(|l| l.view.clone());
         active
             .filter(|v| client.is_none_or(|c| v.ivars().client_id == c))
             .or_else(|| p.live.values().find(|l| client.is_none_or(|c| l.view.ivars().client_id == c)).map(|l| l.view.clone()))
     });
-    let (Some(v), Some(nsurl)) = (view, util::ns_url(u.as_str())) else { return };
+    if let Some(v) = view {
+        start_download(&v, &nsurl);
+        return true;
+    }
+    match client.filter(|c| app::store(|s| s.client(*c).is_some())) {
+        Some(c) => {
+            download_in_hidden_view(c, nsurl);
+            true
+        }
+        None => false,
+    }
+}
+
+fn start_download(view: &WKWebView, url: &NSURL) {
     let block = RcBlock::new(|d: NonNull<WKDownload>| downloads::adopt(unsafe { d.as_ref() }));
-    unsafe { v.startDownloadUsingRequest_completionHandler(&NSURLRequest::requestWithURL(&nsurl), &block) };
+    unsafe { view.startDownloadUsingRequest_completionHandler(&NSURLRequest::requestWithURL(url), &block) };
+}
+
+/// No tab of the profile is awake: a web view that is never shown, on the
+/// profile's own store with its session restored, starts the download and
+/// is let go a little later (WebKit keeps a download going without its
+/// view).
+fn download_in_hidden_view(client: Uuid, url: Retained<NSURL>) {
+    let mtm = MainThreadMarker::new().expect("main thread");
+    let ws = if app::store(|s| s.client(client).is_some_and(|c| c.is_search())) { Workspace::GoogleSearch } else { Workspace::Zoho };
+    let (view, store, store_id, new_store) = POOL.with_borrow_mut(|p| {
+        let (store_id, store, new_store) = data_store(p, client, ws);
+        let bridge = bridge(p, mtm);
+        let cfg = configuration(mtm, &store, &bridge);
+        let view = new_zweb(mtm, NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(1.0, 1.0)), &cfg, client, ws);
+        p.helpers.push(view.clone());
+        (view, store, store_id, new_store)
+    });
+    let retention = retention_of(client);
+    if new_store {
+        session::register(store_id, &store, retention);
+    }
+    session::hydrate(&store, store_id, retention, move || {
+        start_download(&view, &url);
+        util::after(30.0, move || POOL.with_borrow_mut(|p| p.helpers.retain(|h| !std::ptr::eq(&**h, &*view))));
+    });
 }
 
 /// Download whatever the active tab is showing (handy for PDFs).

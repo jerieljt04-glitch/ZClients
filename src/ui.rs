@@ -562,8 +562,12 @@ define_class!(
         #[unsafe(method(cancelDownload:))] fn a_cancel_download(&self, s: Option<&NSMenuItem>) { if let Some(s) = s { downloads::cancel(s.tag() as usize); } }
         #[unsafe(method(retryDownload:))]
         fn a_retry_download(&self, s: Option<&NSMenuItem>) {
-            if let Some((client, url)) = s.and_then(|s| downloads::retry_url(s.tag() as usize)) {
-                web::download_url(client, &url);
+            let Some(key) = s.map(|s| s.tag() as usize) else { return };
+            if let Some((client, url)) = downloads::retry_url(key)
+                && !web::download_url(client, &url)
+            {
+                let who = client.map(web::profile_name).unwrap_or_else(|| "its client".into());
+                downloads::set_note(key, &format!("Open a tab of {who} to retry"));
             }
         }
 
@@ -665,7 +669,7 @@ define_class!(
             let Some((client, tab)) = app::store(|s| s.active_tab().map(|(c, t)| (c.id, t.id))) else { return };
             let url = LOAD_ERRORS.with_borrow(|m| m.get(&tab).and_then(|(_, u)| u.clone()));
             if let Some(u) = url {
-                web::download_url(Some(client), &u);
+                let _ = web::download_url(Some(client), &u);
             }
             util::later(move || app::close_tab(client, tab));
         }
