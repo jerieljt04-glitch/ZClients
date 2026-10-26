@@ -170,14 +170,20 @@ define_class!(
                 self.ivars().dragged.set(true);
                 self.setAlphaValue(0.6);
             }
+            if self.ivars().dragged.get() {
+                show_drop_marker(self.ivars().tab, p);
+            }
         }
 
         #[unsafe(method(mouseUp:))]
         fn mouse_up(&self, event: &NSEvent) {
             self.setAlphaValue(1.0);
+            hide_drop_marker();
             if self.ivars().dragged.replace(false) {
+                // Only a release over the tab strip moves the tab; letting
+                // go over the page or the toolbar puts it back.
                 let p = event.locationInWindow();
-                if let Some(target) = chip_at_window_point(p) {
+                if let Some((target, _)) = drop_target(p) {
                     app::move_tab_over(self.ivars().client, self.ivars().tab, target);
                 }
             }
@@ -1282,6 +1288,8 @@ struct Ui {
     right_buttons: Vec<Retained<NSButton>>,
     downloads_button: Retained<NSButton>,
     tabs: Retained<FlexView>,
+    /// Where a dragged tab will land (see `show_drop_marker`).
+    drop_marker: Retained<NSView>,
     chips: RefCell<Vec<Retained<TabChip>>>,
     tab_plus: Retained<NSButton>,
     tab_overflow: Retained<NSButton>,
@@ -1578,6 +1586,11 @@ pub fn build() {
     let tab_overflow = sym_button("chevron.down", "All tabs (⇧⌘A)", sel!(tabOverflow:));
     tab_overflow.setHidden(true);
     tabs.addSubview(&tab_overflow);
+    let drop_marker = NSView::initWithFrame(NSView::alloc(mtm), rect(0.0, 0.0, 2.0, 20.0));
+    set_layer_color(&drop_marker, &NSColor::controlAccentColor(), 1.0);
+    drop_marker.setHidden(true);
+    drop_marker.setAccessibilityElement(false);
+    tabs.addSubview(&drop_marker);
     tabs.setAccessibilityElement(true);
     tabs.setAccessibilityRole(Some(&util::ns("AXTabGroup")));
     tabs.setAccessibilityLabel(Some(&util::ns("Tabs")));
@@ -1640,6 +1653,7 @@ pub fn build() {
         right_buttons: vec![media_button.clone(), search, meet, downloads_button.clone(), plus],
         downloads_button,
         tabs,
+        drop_marker,
         chips: RefCell::new(vec![]),
         tab_plus,
         tab_overflow,
@@ -1809,15 +1823,45 @@ fn layout_chip(chip: &TabChip) {
     }
 }
 
-fn chip_at_window_point(p: NSPoint) -> Option<Uuid> {
+/// The tab a dragged tab would land on if released at window point `p`,
+/// and the chip's frame in the strip; None unless `p` is over the strip.
+fn drop_target(p: NSPoint) -> Option<(Uuid, NSRect)> {
     with_ui(|u| {
-        u.chips.borrow().iter().find_map(|c| {
-            let local = c.convertPoint_fromView(p, None);
-            let b = c.bounds();
-            (local.x >= 0.0 && local.x <= b.size.width).then(|| c.ivars().tab)
+        let in_strip = u.tabs.convertPoint_fromView(p, None);
+        let b = u.tabs.bounds();
+        if in_strip.y < 0.0 || in_strip.y > b.size.height || in_strip.x < 0.0 || in_strip.x > b.size.width {
+            return None;
+        }
+        u.chips.borrow().iter().filter(|c| !c.isHidden()).find_map(|c| {
+            let f = c.frame();
+            (in_strip.x >= f.origin.x && in_strip.x <= f.origin.x + f.size.width).then(|| (c.ivars().tab, f))
         })
     })
     .flatten()
+}
+
+/// While a tab is dragged over the strip, a thin accent line shows where it
+/// will go: before the tab under the pointer when moving left, after it
+/// when moving right.
+fn show_drop_marker(dragging: Uuid, p: NSPoint) {
+    let target = drop_target(p);
+    with_ui(|u| {
+        let chips = u.chips.borrow();
+        let from = chips.iter().position(|c| c.ivars().tab == dragging);
+        match (target, from) {
+            (Some((tab, f)), Some(from)) if tab != dragging => {
+                let to = chips.iter().position(|c| c.ivars().tab == tab).unwrap_or(from);
+                let x = if to < from { f.origin.x - 2.0 } else { f.origin.x + f.size.width };
+                u.drop_marker.setFrame(rect(x, 4.0, 2.0, theme::TAB_STRIP_H - 8.0));
+                u.drop_marker.setHidden(false);
+            }
+            _ => u.drop_marker.setHidden(true),
+        }
+    });
+}
+
+fn hide_drop_marker() {
+    with_ui(|u| u.drop_marker.setHidden(true));
 }
 
 // ---------------------------------------------------------------------------
@@ -1967,6 +2011,8 @@ fn refresh_tabs() {
             for c in &chips {
                 u.tabs.addSubview(c);
             }
+            // Keep the drop marker above the chips.
+            u.tabs.addSubview(&u.drop_marker);
             u.chips.replace(chips);
         });
     }
