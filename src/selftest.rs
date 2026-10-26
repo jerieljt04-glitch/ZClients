@@ -79,7 +79,7 @@ fn prep() {
         });
         util::log(format!("SELFTEST sidebar visible = {}", ui::sidebar_visible()));
     });
-    util::after(19.0, || app::quit_without_asking());
+    util::after(19.0, app::quit_without_asking);
 }
 
 fn report(step: &str) {
@@ -205,7 +205,8 @@ fn downloads_test() {
         report("after pdf attachment");
         app::cycle_tab(-1);
         util::after(0.5, || {
-            let shown = downloads::show_pdf(0);
+            let first = downloads::with_items(|v| v.first().map(|i| i.key()));
+            let shown = first.is_some_and(downloads::show_pdf);
             util::after(0.5, move || report(&format!("after picking it from the list again (shown={shown})")));
         });
     });
@@ -320,7 +321,7 @@ fn switch_round(pass: usize, i: usize, mut block: Vec<f64>, ready: Vec<f64>) {
         app::app_resigned_active();
         util::log(format!("PERF app to background (saves everything): {:.2} ms", ms(t)));
         util::log("PERF done");
-        util::after(2.0, || app::quit_without_asking());
+        util::after(2.0, app::quit_without_asking);
         return;
     }
     let t = std::time::Instant::now();
@@ -1014,6 +1015,92 @@ fn walk_ax(el: &objc2::runtime::AnyObject, depth: usize, out: &mut Vec<String>, 
     }
 }
 
+/// A large file on a public speed-test server, so a download is still
+/// running when the test quits.
+const SLOW_DOWNLOAD: &str = "https://proof.ovh.net/files/1Gb.dat";
+
+fn kill_web_content(tab: uuid::Uuid) -> bool {
+    web::live_view(tab).is_some_and(|v| unsafe {
+        let responds: bool = objc2::msg_send![&*v, respondsToSelector: objc2::sel!(_killWebContentProcess)];
+        if responds {
+            let _: () = objc2::msg_send![&*v, _killWebContentProcess];
+        }
+        responds
+    })
+}
+
+/// `ZCLIENTS_SELFTEST=stability` with ZCLIENTS_MOCK_MEDIA=1 and
+/// ZCLIENTS_ALERTS=decline (or =accept for the quit step):
+/// U6 closing a tab in a call asks; U1 a download keeps its key when a new
+/// one arrives; S1 quitting with a download and a call asks, and on Quit
+/// the partial file is deleted (checked by the caller after exit); S2 a
+/// page killed twice within a minute shows "stopped working" instead of
+/// reloading again.
+fn stability_test() {
+    let accept = std::env::var("ZCLIENTS_ALERTS").as_deref() == Ok("accept");
+    util::after(1.0, || {
+        app::add_client("Stability Test", "#2470dd", None, app::LoginChange::Keep, Default::default());
+        app::address_entered(PERF_PAGES[0]);
+    });
+    util::after(12.0, move || {
+        let Some((client, call_tab)) = app::store(|s| s.active_tab().map(|(c, t)| (c.id, t.id))) else { return };
+        web::eval_in_tab_async(call_tab, CALL_START, |r| util::log(format!("SELFTEST STAB call: {r}")));
+        util::after(4.0, move || {
+            util::log(format!("SELFTEST STAB U6 in call before close: {:?}", web::call_state(call_tab)));
+            app::request_close_tab(client, call_tab);
+            util::after(0.5, move || {
+                let open = app::store(|s| s.find_tab(call_tab).is_some());
+                util::log(format!("SELFTEST STAB U6 tab still open after close was {}: {open} (expected {})", if accept { "accepted" } else { "declined" }, !accept));
+            });
+        });
+        util::after(6.0, move || {
+            web::download_url(Some(client), SLOW_DOWNLOAD);
+            app::address_entered_in_new_tab(PERF_PAGES[1]);
+        });
+        util::after(11.0, move || {
+            let slow = downloads::with_items(|v| v.iter().find(|i| i.state == downloads::State::Downloading).map(|i| (i.key(), i.name.clone())));
+            util::log(format!("SELFTEST STAB slow download running: {slow:?}"));
+            let Some((key, name)) = slow else { return };
+            downloads::save_bytes(b"inserted while the menu was open".to_vec(), "u1-newer.txt", None);
+            let still = downloads::path_of(key).and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()));
+            let top = downloads::with_items(|v| v.first().map(|i| i.name.clone()));
+            util::log(format!("SELFTEST STAB U1 newest item {top:?}; key of {name:?} still names {still:?} (ok={})", still.as_deref() == Some(name.as_str())));
+            if !accept {
+                let asked = matches!(app::should_quit(), app::QuitReply::Cancel);
+                util::log(format!(
+                    "SELFTEST STAB S1 quit with a download and a call asked and was cancelled: {asked}; still downloading: {}; call: {:?}",
+                    downloads::active_count(),
+                    web::call_state(call_tab)
+                ));
+            }
+        });
+        // S2: the tab in front (the second page) crashes twice.
+        util::after(14.0, || {
+            let Some(tab) = app::store(|s| s.active_tab().map(|(_, t)| t.id)) else { return };
+            util::log(format!("SELFTEST STAB S2 first kill: {}", kill_web_content(tab)));
+            util::after(8.0, move || {
+                util::log(format!("SELFTEST STAB S2 after first kill: error={:?} loading/url={:?}", ui::load_error_of(tab), web::page_state(tab).map(|p| p.url)));
+                util::log(format!("SELFTEST STAB S2 second kill: {}", kill_web_content(tab)));
+                util::after(3.0, move || util::log(format!("SELFTEST STAB S2 after second kill: error={:?} (expected Some(Crashed))", ui::load_error_of(tab))));
+            });
+        });
+        util::after(28.0, move || {
+            let partial = downloads::with_items(|v| v.iter().find(|i| i.state == downloads::State::Downloading).and_then(|i| i.path.clone()));
+            util::log(format!("SELFTEST STAB S1 partial file before quit: {partial:?} exists={}", partial.as_ref().is_some_and(|p| p.exists())));
+            util::log("SELFTEST done");
+            if accept {
+                // Through the real path: asks, cancels, deletes, exits.
+                NSApplication::sharedApplication(MainThreadMarker::new().unwrap()).terminate(None);
+            } else {
+                for p in downloads::cancel_all() {
+                    util::log(format!("SELFTEST STAB cancelled; partial left: {}", p.exists()));
+                }
+                app::quit_without_asking();
+            }
+        });
+    });
+}
+
 pub fn start() {
     if !util::is_test_build() {
         return;
@@ -1031,6 +1118,7 @@ pub fn start() {
         Ok("address2") => return address_rules_test(),
         Ok("editor") => return editor_test(),
         Ok("a11y") => return a11y_test(),
+        Ok("stability") => return stability_test(),
         Ok(_) => {}
         Err(_) => return,
     }

@@ -1104,6 +1104,11 @@ pub fn network_restored() {
     refresh(app::CONTENT);
 }
 
+/// Self-tests: the error screen a tab is showing, if any.
+pub fn load_error_of(tab: Uuid) -> Option<web::LoadError> {
+    LOAD_ERRORS.with_borrow(|m| m.get(&tab).map(|(k, _)| *k))
+}
+
 /// A tab closed or went away: its error screen (if any) goes with it.
 pub fn forget_tab(tab: Uuid) {
     LOAD_ERRORS.with_borrow_mut(|m| m.remove(&tab));
@@ -1487,8 +1492,11 @@ thread_local! {
     /// Every layer whose colour was copied from an AppKit colour: a CGColor
     /// is a snapshot, so these are re-resolved when the appearance or the
     /// accent colour changes (see `reapply_layer_colors`).
-    static LAYER_COLORS: RefCell<Vec<(objc2::rc::Weak<NSView>, Retained<NSColor>, bool)>> = const { RefCell::new(Vec::new()) };
+    static LAYER_COLORS: RefCell<Vec<Painted>> = const { RefCell::new(Vec::new()) };
 }
+
+/// A view, the colour its layer was given, and whether that is its border.
+type Painted = (objc2::rc::Weak<NSView>, Retained<NSColor>, bool);
 
 pub(crate) fn set_layer_color(view: &NSView, color: &NSColor, radius: f64) {
     view.setWantsLayer(true);

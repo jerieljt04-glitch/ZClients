@@ -148,9 +148,11 @@ fn icon_points(i: Icon) -> f64 {
 }
 
 /// An SF Symbol at one of the app's icon sizes, always the same weight.
+type SymbolCache = std::collections::HashMap<(String, Icon), Option<Retained<NSImage>>>;
+
 pub fn symbol(name: &str, icon: Icon) -> Option<Retained<NSImage>> {
     thread_local! {
-        static CACHE: std::cell::RefCell<std::collections::HashMap<(String, Icon), Option<Retained<NSImage>>>> = std::cell::RefCell::new(std::collections::HashMap::new());
+        static CACHE: std::cell::RefCell<SymbolCache> = std::cell::RefCell::new(SymbolCache::new());
     }
     CACHE.with_borrow_mut(|c| {
         c.entry((name.to_string(), icon))
