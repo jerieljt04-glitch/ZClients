@@ -2326,6 +2326,9 @@ fn refresh_tabs() {
         if call.is_some() {
             tip.push_str("\nIn a call");
         }
+        if asleep {
+            tip.push_str("\nAsleep to save memory — click to wake");
+        }
         chip.setToolTip(Some(&util::ns(&tip)));
         if *closable {
             let close = sym_button_sized("xmark", "Close tab (⌘W)", sel!(tabClose:), theme::Icon::Tab);

@@ -2516,6 +2516,47 @@ pub fn load_test_html(html: &str, base: &str) {
     unsafe { v.loadHTMLString_baseURL(&util::ns(html), base.as_deref()) };
 }
 
+/// One awake tab's page process and what it costs (diagnostics).
+pub struct TabFootprint {
+    pub host: Option<String>,
+    pub pid: i32,
+    /// Physical footprint in bytes, as `footprint <pid>` reports it.
+    pub bytes: Option<u64>,
+}
+
+/// Every awake tab's WebContent process and memory footprint, largest
+/// first. Tabs of one site may share a process (then the same pid and
+/// number appear twice). Empty when WebKit no longer answers the private
+/// `_webProcessIdentifier`.
+pub fn tab_footprints() -> Vec<TabFootprint> {
+    let mut out: Vec<TabFootprint> = POOL.with_borrow(|p| {
+        p.live
+            .values()
+            .filter_map(|l| {
+                let v = &*l.view;
+                let responds: bool = unsafe { msg_send![v, respondsToSelector: sel!(_webProcessIdentifier)] };
+                let pid: i32 = if responds { unsafe { msg_send![v, _webProcessIdentifier] } } else { 0 };
+                let host = ns_str_url(unsafe { v.URL() }).and_then(|u| policy::parse(&u)).and_then(|u| u.host_str().map(str::to_string));
+                (pid > 0).then(|| TabFootprint { host, pid, bytes: phys_footprint(pid) })
+            })
+            .collect()
+    });
+    out.sort_by_key(|f| std::cmp::Reverse(f.bytes.unwrap_or(0)));
+    out
+}
+
+fn phys_footprint(pid: i32) -> Option<u64> {
+    unsafe extern "C" {
+        fn proc_pid_rusage(pid: i32, flavor: i32, buffer: *mut c_void) -> i32;
+    }
+    const RUSAGE_INFO_V2: i32 = 2;
+    // rusage_info_v2: a 16-byte uuid, then u64 fields; ri_phys_footprint
+    // is the eighth of them. The buffer is larger than any version.
+    let mut info = [0u64; 64];
+    let ok = unsafe { proc_pid_rusage(pid, RUSAGE_INFO_V2, info.as_mut_ptr().cast()) } == 0;
+    ok.then_some(info[9])
+}
+
 /// WebKit is holding off system sleep for this tab (private, diagnostics).
 pub fn has_sleep_disabler(tab: Uuid) -> bool {
     live_view(tab).is_some_and(|v| unsafe {

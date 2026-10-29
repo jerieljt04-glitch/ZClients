@@ -507,6 +507,9 @@ fn memory_test() {
     util::after(24.0, || {
         app::select_tab_index(0);
         util::log(format!("SELFTEST MEMORY awake before idle: {} (pid {})", web::live_tabs().len(), std::process::id()));
+        for f in web::tab_footprints() {
+            util::log(format!("SELFTEST MEMORY footprint {:?} pid {} = {:?} MB", f.host, f.pid, f.bytes.map(|b| b / (1024 * 1024))));
+        }
     });
     util::after(40.0, || {
         web::sleep_idle_tabs();

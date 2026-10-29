@@ -534,6 +534,10 @@ pub fn diagnostics_text() -> String {
         out.push_str(&format!("  profile {}: {tabs} tab(s), {pdfs} PDF tab(s), keep signed in: {keep} ({days} d), saved login: {login}\n", i + 1));
     }
     out.push_str(&format!("awake tabs: {}\ncalls: {}\nkeeping display awake: {}\n", web::live_tabs().len(), web::tabs_in_calls().len(), web::keeping_awake()));
+    for f in web::tab_footprints() {
+        let mb = f.bytes.map(|b| format!("{} MB", b / (1024 * 1024))).unwrap_or_else(|| "unknown".into());
+        out.push_str(&format!("  awake tab {}: WebContent pid {} footprint {mb}\n", f.host.as_deref().unwrap_or("(no address)"), f.pid));
+    }
     out.push_str(&format!("unfinished deletions: {}\n", cleanup::pending_jobs().len()));
     for job in cleanup::pending_jobs() {
         out.push_str(&format!("  {} attempt(s); left: {}; last error: {}\n", job.attempts, job.remaining().join(", "), job.last_error.unwrap_or_default()));
