@@ -105,6 +105,9 @@ Profiles and tabs carry over; the Swift app reads `clients.json` unchanged.
 To go back to 1.0.0 (before folder downloads and PDF tabs):
 `rm -rf /Applications/ZClients.app && ditto backup/ZClients-1.0.0.app /Applications/ZClients.app`.
 
+To go back to 2.3.0 after installing 2.3.1 (no data changes):
+`rm -rf /Applications/ZClients.app && ditto backup/ZClients-2.3.0.app /Applications/ZClients.app`.
+
 To go back to 2.2.0 after installing 2.3.0 (no data changes; settings.json
 gains `firstClickReachesPage`, which 2.2.0 ignores):
 `rm -rf /Applications/ZClients.app && ditto backup/ZClients-2.2.0.app /Applications/ZClients.app`.
