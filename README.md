@@ -57,6 +57,8 @@ Run the test app with its own home so nothing real is touched:
 - `parity` (2.3): a sliding panel, transitions, keyframes, Web Animations,
   rAF and the first click on an inactive window behave as in Chrome (see
   `docs/TESTING.md`).
+- `print` (2.3): `window.print()` from a page and from an iframe opens the
+  Print panel.
 - `memory`: with `ZCLIENTS_IDLE_SECS=6`, four tabs are shown once and Memory
   Saver should leave only the front tab awake (measure the WebContent
   processes with `footprint`).

@@ -763,6 +763,24 @@ define_class!(
             decide.call((if ok { SCREEN_PROMPT } else { DENY },));
         }
 
+        /// `window.print()` in a page or one of its frames. WebKit ignores it
+        /// unless the UI delegate answers this private method (Safari's
+        /// does), which left the Print buttons of Zoho Analytics, CRM,
+        /// Books and Invoice dead. Only the tab in front (or a popup with
+        /// the keyboard) prints, one panel at a time, and not after the
+        /// user chose "Don't allow more dialogs from this page". WebKit
+        /// lets the page continue as soon as this returns; the panel runs
+        /// as a sheet.
+        #[unsafe(method(_webView:printFrame:))]
+        fn print_frame(&self, web: &WKWebView, frame: Option<&AnyObject>) {
+            let iv = self.ivars();
+            if iv.dialogs_blocked.get() || !is_foreground(web, iv.tab_id) {
+                util::log("window.print() ignored: page not in front or its dialogs are blocked");
+                return;
+            }
+            print_view(web, frame);
+        }
+
         /// The download button in WebKit's PDF viewer. WebKit hands the
         /// document to this (private, Safari-implemented) delegate method and
         /// does nothing at all when it is missing, which is why the button
@@ -2503,9 +2521,25 @@ pub fn has_sleep_disabler(tab: Uuid) -> bool {
 
 /// Print the active page with the standard print panel.
 pub fn print() {
-    let Some(v) = active_view() else { return };
+    if let Some(v) = active_view() {
+        print_view(&v, None);
+    }
+}
+
+/// Print `frame` of `v` (a `_WKFrameHandle` from `_webView:printFrame:`),
+/// or the whole page, with the standard print panel as a sheet.
+fn print_view(v: &WKWebView, frame: Option<&AnyObject>) {
+    if v.window().is_some_and(|w| w.attachedSheet().is_some()) {
+        return;
+    }
     let info = objc2_app_kit::NSPrintInfo::sharedPrintInfo();
-    let op = unsafe { v.printOperationWithPrintInfo(&info) };
+    // Private, so only when this WebKit has it; otherwise the whole page.
+    let for_frame = frame.filter(|_| unsafe { msg_send![v, respondsToSelector: sel!(_printOperationWithPrintInfo:forFrame:)] });
+    let op: Option<Retained<objc2_app_kit::NSPrintOperation>> = match for_frame {
+        Some(f) => unsafe { msg_send![v, _printOperationWithPrintInfo: &*info, forFrame: f] },
+        None => Some(unsafe { v.printOperationWithPrintInfo(&info) }),
+    };
+    let Some(op) = op else { return };
     op.setShowsPrintPanel(true);
     op.setShowsProgressPanel(true);
     // WebKit prints blank pages unless the operation's view has a real size.

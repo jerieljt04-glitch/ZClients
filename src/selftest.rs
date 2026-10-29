@@ -1314,6 +1314,45 @@ fn parity_test() {
     });
 }
 
+const PRINT_PAGE: &str = r#"<!doctype html><meta charset=utf-8><title>Print</title>
+<button id=b style="position:fixed;top:120px;left:40px;width:160px;height:40px" onclick="window.print()">Print</button>
+<h1 style="margin-top:200px">Printable report</h1>
+<iframe id=f style="width:300px;height:100px" srcdoc="<p>Frame to print</p>"></iframe>"#;
+
+/// The print panel sheet on the main window, if any: logged, then cancelled.
+fn take_print_sheet(label: &str) {
+    let mtm = MainThreadMarker::new().unwrap();
+    let app = NSApplication::sharedApplication(mtm);
+    let window = app.mainWindow().or_else(|| app.windows().iter().find(|w| w.isVisible()));
+    let sheet = window.as_ref().and_then(|w| w.attachedSheet());
+    let what = sheet.as_ref().map(|s| {
+        let content = s.contentView().map(|v| v.subviews().iter().map(|k| k.class().name().to_string_lossy().into_owned()).collect::<Vec<_>>());
+        format!("{} title={:?} content={content:?}", s.class().name().to_string_lossy(), s.title().to_string())
+    });
+    util::log(format!("SELFTEST PRINT {label}: sheet={what:?}"));
+    if let (Some(w), Some(s)) = (window, sheet) {
+        w.endSheet_returnCode(&s, objc2_app_kit::NSModalResponseCancel);
+    }
+}
+
+/// `ZCLIENTS_SELFTEST=print`: window.print() from a page's Print button
+/// and from an iframe shows the print panel as a sheet (then cancelled).
+fn print_test() {
+    util::after(1.0, || {
+        app::add_client("Print Test", "#2470dd", None, app::LoginChange::Keep, Default::default());
+        app::address_entered("https://www.zoho.com/");
+    });
+    util::after(9.0, || web::load_test_html(PRINT_PAGE, "https://www.zoho.com/"));
+    util::after(11.0, || click_page(120.0, 140.0, NSEventModifierFlags::empty()));
+    util::after(13.0, || take_print_sheet("Print button (window.print)"));
+    util::after(15.0, || eval_log("PRINT iframe", "(() => { document.getElementById('f').contentWindow.print(); return 'iframe print called'; })()"));
+    util::after(17.0, || take_print_sheet("iframe print"));
+    util::after(19.0, || {
+        util::log("SELFTEST done");
+        app::quit_without_asking();
+    });
+}
+
 pub fn start() {
     if !util::is_test_build() {
         return;
@@ -1334,6 +1373,7 @@ pub fn start() {
         Ok("stability") => return stability_test(),
         Ok("search") => return search_workspace_test(),
         Ok("parity") => return parity_test(),
+        Ok("print") => return print_test(),
         Ok(_) => {}
         Err(_) => return,
     }
