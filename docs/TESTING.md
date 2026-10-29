@@ -82,6 +82,13 @@ slides in a Settings panel in Chrome, nothing in ZClients.
 
 Run on the test app first; on the real app only after installing 2.0.0.
 
+**New in 2.3.0** (the gap that let the Analytics panel bug ship: no manual pass ever clicked through real page UI)
+- [ ] Zoho Analytics report editor → gear next to View Mode → the Settings panel slides in and the chart narrows, (a) with ZClients already active, (b) clicking the gear straight from another app (Cliq, Chrome) with ZClients behind it. The slide looks like Chrome's (30 fps in Low Power Mode is a macOS limit, see BACKLOG A3).
+- [ ] Settings › Keyboard & mouse › "Clicks in an inactive window go to the page" off → (b) only brings ZClients forward; on again → (b) opens the panel.
+- [ ] A Print button in Zoho Analytics, CRM, Books or Invoice opens the macOS Print panel as a sheet; Cancel closes it; printing/PDF shows the report, not a blank page.
+- [ ] Drag a column in Zoho Analytics' column panel onto the report.
+- [ ] Hover an asleep tab (moon) → "Asleep to save memory — click to wake"; Help › Export Diagnostics lists each awake tab with its memory.
+
 **New in 2.0.0**
 - [ ] ⌘Q / red close button during a download → "Quit and cancel 1 download?"; Cancel keeps the window; Quit leaves no partial file in ~/Downloads.
 - [ ] ⌘W on a Meet tab during a call → "Close … and end the call?".
