@@ -32,6 +32,32 @@ for ICON in ../zoho-workspace-manager/build/ZPort.icns /Applications/ZClients.ap
   if [ -f "$ICON" ]; then cp "$ICON" "$APP/Contents/Resources/ZClients.icns"; break; fi
 done
 
+# The same icon as a compiled asset catalog. AppKit and CoreUI look for the
+# app's Assets.car (the Print panel, app activation, system state dumps);
+# without one every lookup logs "CUICatalog … unable to find a bundle".
+ICON_NAME=""
+if [ -f "$APP/Contents/Resources/ZClients.icns" ] && xcrun --find actool >/dev/null 2>&1; then
+  CAT="$(mktemp -d "${TMPDIR:-/tmp}/zclients-assets.XXXXXX")"
+  SET="$CAT/Assets.xcassets/AppIcon.appiconset"
+  mkdir -p "$SET"
+  iconutil -c iconset -o "$CAT/icon.iconset" "$APP/Contents/Resources/ZClients.icns"
+  cp "$CAT"/icon.iconset/*.png "$SET/"
+  IMAGES=""
+  for F in "$SET"/icon_*.png; do
+    B="$(basename "$F")"; SIZE="${B#icon_}"; SIZE="${SIZE%.png}"; SCALE=1x
+    [[ "$SIZE" == *@2x ]] && { SIZE="${SIZE%@2x}"; SCALE=2x; }
+    IMAGES="$IMAGES${IMAGES:+,}{\"idiom\":\"mac\",\"size\":\"$SIZE\",\"scale\":\"$SCALE\",\"filename\":\"$B\"}"
+  done
+  echo "{\"images\":[$IMAGES],\"info\":{\"version\":1,\"author\":\"xcode\"}}" > "$SET/Contents.json"
+  echo '{"info":{"version":1,"author":"xcode"}}' > "$CAT/Assets.xcassets/Contents.json"
+  xcrun actool "$CAT/Assets.xcassets" --compile "$APP/Contents/Resources" --platform macosx \
+    --minimum-deployment-target 14.0 --app-icon AppIcon --output-partial-info-plist "$CAT/partial.plist" >/dev/null
+  rm -rf "$CAT"
+  [ -f "$APP/Contents/Resources/Assets.car" ] && ICON_NAME="<key>CFBundleIconName</key><string>AppIcon</string>"
+else
+  echo "warning: no actool (Xcode) or icon: the app ships without Assets.car" >&2
+fi
+
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -45,6 +71,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleShortVersionString</key><string>$VERSION</string>
   <key>CFBundleVersion</key><string>$BUILD_NUMBER</string>
   <key>CFBundleIconFile</key><string>ZClients</string>
+  $ICON_NAME
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>LSApplicationCategoryType</key><string>public.app-category.business</string>
   <key>NSPrincipalClass</key><string>NSApplication</string>
