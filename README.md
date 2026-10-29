@@ -54,6 +54,9 @@ Run the test app with its own home so nothing real is touched:
   blocks every other website, and sends Meet to a client.
 - `stability` (2.0): quit/close confirmations, partial-download cleanup, the
   crash-loop guard and download-menu keys (see `docs/TESTING.md`).
+- `parity` (2.3): a sliding panel, transitions, keyframes, Web Animations,
+  rAF and the first click on an inactive window behave as in Chrome (see
+  `docs/TESTING.md`).
 - `memory`: with `ZCLIENTS_IDLE_SECS=6`, four tabs are shown once and Memory
   Saver should leave only the front tab awake (measure the WebContent
   processes with `footprint`).

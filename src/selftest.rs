@@ -1151,6 +1151,169 @@ fn search_workspace_test() {
     });
 }
 
+/// A point in the active page (CSS pixels from its top-left corner) in
+/// global display coordinates (origin top-left of the main display), as
+/// CGEvent and System Events use them.
+fn page_point_on_screen(x: f64, y: f64) -> (f64, f64) {
+    let Some(view) = web::active_view() else { return (0.0, 0.0) };
+    let b = view.bounds();
+    let local = NSPoint::new(x, if view.isFlipped() { y } else { b.size.height - y });
+    let in_window = view.convertPoint_toView(local, None);
+    let Some(window) = view.window() else { return (0.0, 0.0) };
+    let p = window.convertPointToScreen(in_window);
+    let main_height = objc2_app_kit::NSScreen::screens(MainThreadMarker::new().unwrap()).firstObject().map(|s| s.frame().size.height).unwrap_or(0.0);
+    (p.x, main_height - p.y)
+}
+
+/// The page used by `parity`: a button that opens a right-side panel
+/// (transform transition) and, from the same click, a width transition, a
+/// keyframe animation, a Web Animations call, a rAF tween and a panel shown
+/// from requestIdleCallback. Every time is measured from the click.
+const PARITY_PAGE: &str = r#"<!doctype html><meta charset=utf-8><title>Parity</title>
+<style>
+#b{position:fixed;top:120px;left:40px;width:160px;height:40px}
+#p{position:fixed;top:0;right:0;width:300px;height:100%;background:#ccc;transform:translateX(100%);transition:transform .3s ease}
+#p.open{transform:none}
+#w{position:fixed;top:0;left:0;width:0;height:50px;background:red;transition:width .3s}
+#w.open{width:300px}
+@keyframes k{from{opacity:0}to{opacity:1}}
+#k{position:fixed;top:60px;left:40px;opacity:0}
+#k.run{animation:k .3s 1 forwards}
+#t{position:fixed;top:200px;right:-200px;width:200px;height:40px;background:blue}
+#i{position:fixed;top:260px;right:0;width:200px;height:40px;background:green;display:none}
+</style>
+<button id=b>Settings</button><div id=p></div><div id=w></div><div id=k>k</div><div id=t></div><div id=i></div>
+<script>
+var R = {clicks: 0, downs: 0, blurred: false};
+var since = function () { return Math.round(performance.now() - R.t0); };
+addEventListener('blur', function () { R.blurred = true; });
+b.addEventListener('mousedown', function () { R.downs++; });
+k.addEventListener('animationend', function () { R.animationend = since(); });
+p.addEventListener('transitionend', function (e) { if (e.propertyName === 'transform') { R.transitionend = since(); } });
+w.addEventListener('transitionend', function () { R.widthTransitionend = since(); });
+b.addEventListener('click', function () {
+  if (++R.clicks > 1) { return; }
+  R.t0 = performance.now();
+  p.classList.add('open'); w.classList.add('open'); k.classList.add('run');
+  document.body.animate([{opacity: 1}, {opacity: .99}], {duration: 300}).finished.then(function () { R.waapi = since(); });
+  var frames = 0, start = null;
+  requestAnimationFrame(function loop(now) {
+    if (start === null) { start = now; }
+    frames++;
+    var f = Math.min(1, (now - start) / 300);
+    t.style.right = (-200 + 200 * f) + 'px';
+    if (f >= 1 && R.tween === undefined) { R.tween = since(); }
+    if (now - start < 1000) { requestAnimationFrame(loop); } else { R.rafPerSec = Math.round(frames * 1000 / (now - start)); }
+  });
+  if (window.requestIdleCallback) { requestIdleCallback(function () { i.style.display = 'block'; R.idle = since(); }); } else { R.idle = 'unsupported'; }
+});
+</script>"#;
+
+const PARITY_RESULT: &str =
+    "JSON.stringify(Object.assign({}, R, {panel: getComputedStyle(p).transform, tweenRight: t.style.right, hasFocus: document.hasFocus(), visibility: document.visibilityState}))";
+
+/// The parity page's result against the rules: every animation finished
+/// within a second of exactly one click, the panel ended open, frames
+/// arrived at ≥ 25 a second (≥ 55 outside Low Power Mode) and the page kept
+/// the focus. Returns the failures (empty = pass).
+fn parity_failures(r: &serde_json::Value, low_power: bool) -> Vec<String> {
+    let mut bad = vec![];
+    let num = |k: &str| r.get(k).and_then(|v| v.as_f64());
+    if r.get("clicks").and_then(|v| v.as_u64()) != Some(1) {
+        bad.push(format!("clicks={}", r.get("clicks").unwrap_or(&serde_json::Value::Null)));
+    }
+    for k in ["transitionend", "widthTransitionend", "animationend", "waapi", "tween"] {
+        match num(k) {
+            Some(ms) if ms <= 1000.0 => {}
+            other => bad.push(format!("{k}={other:?}")),
+        }
+    }
+    if r.get("panel").and_then(|v| v.as_str()) != Some("none") {
+        bad.push(format!("panel transform={}", r.get("panel").unwrap_or(&serde_json::Value::Null)));
+    }
+    let min_fps = if low_power { 25.0 } else { 55.0 };
+    if num("rafPerSec").is_none_or(|f| f < min_fps) {
+        bad.push(format!("rafPerSec={:?} (need ≥ {min_fps})", num("rafPerSec")));
+    }
+    if r.get("hasFocus").and_then(|v| v.as_bool()) != Some(true) {
+        bad.push("page lost focus".into());
+    }
+    if r.get("blurred").and_then(|v| v.as_bool()) != Some(false) {
+        bad.push("blur fired".into());
+    }
+    bad
+}
+
+/// Where the parity page's button is, in CSS pixels (see `PARITY_PAGE`).
+const PARITY_BUTTON: (f64, f64) = (120.0, 140.0);
+
+fn parity_round(label: &'static str, inactive: bool, then: impl FnOnce() + 'static) {
+    web::load_test_html(PARITY_PAGE, "https://www.zoho.com/");
+    util::after(2.0, move || {
+        let mtm = MainThreadMarker::new().unwrap();
+        let app = NSApplication::sharedApplication(mtm);
+        if inactive {
+            // Another app in front, as when the user comes from Cliq or
+            // Chrome and clicks straight into a page.
+            if let Some(finder) = objc2_app_kit::NSRunningApplication::runningApplicationsWithBundleIdentifier(&util::ns("com.apple.finder")).firstObject() {
+                app.yieldActivationToApplication(&finder);
+                finder.activateWithOptions(objc2_app_kit::NSApplicationActivationOptions::empty());
+            }
+            app.deactivate();
+        }
+        util::after(1.0, move || {
+            let app = NSApplication::sharedApplication(MainThreadMarker::new().unwrap());
+            let key = app.mainWindow().is_some_and(|w| w.isKeyWindow());
+            util::log(format!("SELFTEST PARITY {label}: before the click app active={} window key={key}", app.isActive()));
+            // The blur from losing the window is not what is being measured.
+            web::eval_active("(() => { R.blurred = false; return 'ready'; })()", |_| {});
+            // ZCLIENTS_REAL_CLICK=1: the click comes from outside (a real
+            // mouse event posted at the logged screen point), which is the
+            // only way the window server activates the app as it would for
+            // the user; a click sent through NSApp.sendEvent never does.
+            let real = inactive && std::env::var_os("ZCLIENTS_REAL_CLICK").is_some();
+            if real {
+                let (x, y) = page_point_on_screen(PARITY_BUTTON.0, PARITY_BUTTON.1);
+                util::log(format!("SELFTEST PARITY real click at {x:.0} {y:.0}"));
+            }
+            util::after(if real { 4.0 } else { 0.2 }, move || {
+                if !real {
+                    click_page(PARITY_BUTTON.0, PARITY_BUTTON.1, NSEventModifierFlags::empty());
+                }
+                util::after(1.5, move || {
+                    let app = NSApplication::sharedApplication(MainThreadMarker::new().unwrap());
+                    util::log(format!("SELFTEST PARITY {label}: after the click app active={}", app.isActive()));
+                    web::eval_active(PARITY_RESULT, move |r| {
+                        let low_power = objc2_foundation::NSProcessInfo::processInfo().isLowPowerModeEnabled();
+                        let fails = serde_json::from_str(&r).map(|v| parity_failures(&v, low_power)).unwrap_or_else(|e| vec![format!("no result ({e}): {r}")]);
+                        let verdict = if fails.is_empty() { "PASS".to_string() } else { format!("FAIL {fails:?}") };
+                        util::log(format!("SELFTEST PARITY {label}: {verdict} low power={low_power} {r}"));
+                    });
+                    util::after(0.5, then);
+                });
+            });
+        });
+    });
+}
+
+/// `ZCLIENTS_SELFTEST=parity`: in-page UI behaves like Chrome. A real click
+/// (down + up through `NSApp.sendEvent`) opens a sliding panel, with the
+/// app active and again with another app in front; see `parity_failures`.
+fn parity_test() {
+    util::after(1.0, || {
+        app::add_client("Parity Test", "#2470dd", None, app::LoginChange::Keep, Default::default());
+        app::address_entered("https://www.zoho.com/");
+    });
+    util::after(9.0, || {
+        parity_round("active window", false, || {
+            parity_round("another app in front", true, || {
+                util::log("SELFTEST done");
+                app::quit_without_asking();
+            })
+        })
+    });
+}
+
 pub fn start() {
     if !util::is_test_build() {
         return;
@@ -1170,6 +1333,7 @@ pub fn start() {
         Ok("a11y") => return a11y_test(),
         Ok("stability") => return stability_test(),
         Ok("search") => return search_workspace_test(),
+        Ok("parity") => return parity_test(),
         Ok(_) => {}
         Err(_) => return,
     }
@@ -1255,4 +1419,23 @@ pub fn start() {
         util::log("SELFTEST done");
         app::quit_without_asking();
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parity_failures;
+
+    #[test]
+    fn parity_passes_only_one_click_that_finished_every_animation() {
+        let good = serde_json::json!({"clicks": 1, "blurred": false, "transitionend": 320, "widthTransitionend": 320, "animationend": 320, "waapi": 320, "tween": 330, "rafPerSec": 31, "panel": "none", "hasFocus": true});
+        assert!(parity_failures(&good, true).is_empty());
+        assert_eq!(parity_failures(&good, false), vec!["rafPerSec=Some(31.0) (need ≥ 55)"], "30 fps only passes in Low Power Mode");
+        let swallowed = serde_json::json!({"clicks": 0, "blurred": false, "panel": "matrix(1, 0, 0, 1, 300, 0)", "hasFocus": true});
+        let fails = parity_failures(&swallowed, true);
+        assert!(fails.contains(&"clicks=0".to_string()) && fails.iter().any(|f| f.starts_with("panel transform")));
+        let mut slow = good.clone();
+        slow["transitionend"] = 1200.into();
+        slow["blurred"] = true.into();
+        assert_eq!(parity_failures(&slow, true), vec!["transitionend=Some(1200.0)", "blur fired"]);
+    }
 }

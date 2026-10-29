@@ -19,6 +19,7 @@ HOME=$H ZCLIENTS_SELFTEST=a11y ZCLIENTS_ALERTS=decline "$APP"
 HOME=$H ZCLIENTS_SELFTEST=address2 "$APP"
 HOME=$H ZCLIENTS_SELFTEST=downloads ZCLIENTS_ALERTS=accept "$APP"
 HOME=$H ZCLIENTS_SELFTEST=search "$APP"
+HOME=$H ZCLIENTS_SELFTEST=parity "$APP"          # add ZCLIENTS_REAL_CLICK=1 + a posted mouse click, see below
 HOME=$H ZCLIENTS_SELFTEST=stability ZCLIENTS_ALERTS=decline ZCLIENTS_MOCK_MEDIA=1 "$APP"
 HOME=$H ZCLIENTS_SELFTEST=stability ZCLIENTS_ALERTS=accept ZCLIENTS_MOCK_MEDIA=1 "$APP"   # then: the logged partial file must not exist
 ```
@@ -39,6 +40,7 @@ question with its first / last button and logs it.
 | `downloads` | PDF popups become tabs with viewer controls; hidden-frame and popup zips download; PDF attachments open as tabs; the PDF viewer's download button saves; every file is quarantined |
 | `search` (2.1) | Google Search workspace: a Zoho page stays in the Search tab; example.com is blocked both by script and when typed (page kept, "can't be opened here" shown); a Meet link opens in a client, which comes to the front |
 | `stability` (2.0) | U6 closing a tab in a call asks; U1 a newer download leaves an item's key on the same file; S1 quitting with a download and a call asks (decline: both continue; accept: real quit path, partial file deleted); S2 a page whose WebContent process is killed twice shows "This page stopped working" instead of reloading |
+| `parity` (2.3) | In-page UI works like Chrome: one click on a fixture button (loaded with `loadHTMLString`, base www.zoho.com) opens a sliding panel; transform + width transitions, keyframes, Web Animations and a rAF tween all finish within 1 s, the panel ends at `transform: none`, rAF ≥ 25 fps in Low Power Mode (≥ 55 otherwise), the page keeps focus and gets no blur. Run once with ZClients active and once with Finder in front. With `ZCLIENTS_REAL_CLICK=1` the second click must come from outside: the log says `SELFTEST PARITY real click at X Y` (global points) and a real mouse click has to be posted there within 4 s (a CGEvent from a process with Accessibility access); without it the click is sent through `NSApp.sendEvent`, which never activates the app, so only `hasFocus` can fail |
 | `meet`, `input`, `find`, `memory`, `perf`, `address`, `prep` | Unchanged from 1.4.0 (see README); `address`, `input`, `find` need System Events keystrokes |
 
 Recovery can be exercised by writing a truncated

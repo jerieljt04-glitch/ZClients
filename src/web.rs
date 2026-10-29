@@ -2485,6 +2485,14 @@ pub fn eval_in_client_world(js: &str, done: impl Fn(String) + 'static) {
     unsafe { v.callAsyncJavaScript_arguments_inFrame_inContentWorld_completionHandler(&util::ns(js), None, None, &world, Some(&block)) };
 }
 
+/// Self-tests: show `html` in the active tab as if it came from `base`
+/// (test builds only).
+pub fn load_test_html(html: &str, base: &str) {
+    let Some(v) = active_view().filter(|_| util::is_test_build()) else { return };
+    let base = util::ns_url(base);
+    unsafe { v.loadHTMLString_baseURL(&util::ns(html), base.as_deref()) };
+}
+
 /// WebKit is holding off system sleep for this tab (private, diagnostics).
 pub fn has_sleep_disabler(tab: Uuid) -> bool {
     live_view(tab).is_some_and(|v| unsafe {
