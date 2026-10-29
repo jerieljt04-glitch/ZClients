@@ -715,20 +715,31 @@ fn editor_test() {
             ui::focus_view(&v);
         }
     });
-    util::after(13.0, || {
-        press("a", 0, NSEventModifierFlags::Command);
-        press("z", 6, NSEventModifierFlags::Command);
-        press("z", 6, NSEventModifierFlags::Command | NSEventModifierFlags::Shift);
-        press("a", 0, NSEventModifierFlags::Control);
-        util::after(1.0, || web::eval_active("JSON.stringify(window.__zcKeys)", |r| util::log(format!("SELFTEST EDITOR code editor received: {r}"))));
+    // ZCLIENTS_REAL_KEYS=1: the keys come from outside (posted keyboard
+    // events, with the test app in front); synthesized ones are unreliable.
+    let real = std::env::var_os("ZCLIENTS_REAL_KEYS").is_some();
+    util::after(13.0, move || {
+        if real {
+            util::log(format!("SELFTEST EDITOR real keys now: cmd+a cmd+z shift+cmd+z ctrl+a (pid {})", std::process::id()));
+        } else {
+            press("a", 0, NSEventModifierFlags::Command);
+            press("z", 6, NSEventModifierFlags::Command);
+            press("z", 6, NSEventModifierFlags::Command | NSEventModifierFlags::Shift);
+            press("a", 0, NSEventModifierFlags::Control);
+        }
+        util::after(if real { 2.0 } else { 1.0 }, || web::eval_active("JSON.stringify(window.__zcKeys)", |r| util::log(format!("SELFTEST EDITOR code editor received: {r}"))));
     });
-    util::after(15.5, || {
+    util::after(15.5, move || {
         web::eval_active("(() => { const p = document.getElementById('zc-plain'); p.focus(); p.setSelectionRange(0, 0); return 'plain box focused'; })()", |r| {
             util::log(format!("SELFTEST EDITOR {r}"))
         });
-        util::after(1.0, || {
-            press("a", 0, NSEventModifierFlags::Command);
-            util::after(0.8, || {
+        util::after(1.0, move || {
+            if real {
+                util::log("SELFTEST EDITOR real keys now: cmd+a");
+            } else {
+                press("a", 0, NSEventModifierFlags::Command);
+            }
+            util::after(if real { 1.5 } else { 0.8 }, || {
                 web::eval_active(
                     "(() => { const p = document.getElementById('zc-plain'); return 'selected ' + (p.selectionEnd - p.selectionStart) + ' of ' + p.value.length; })()",
                     |r| util::log(format!("SELFTEST EDITOR plain text box after ⌘A: {r}")),
