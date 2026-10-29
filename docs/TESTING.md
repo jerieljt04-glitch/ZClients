@@ -21,6 +21,7 @@ HOME=$H ZCLIENTS_SELFTEST=downloads ZCLIENTS_ALERTS=accept "$APP"
 HOME=$H ZCLIENTS_SELFTEST=search "$APP"
 HOME=$H ZCLIENTS_SELFTEST=print "$APP"
 HOME=$H ZCLIENTS_SELFTEST=window ZCLIENTS_ALERTS=accept "$APP"
+HOME=$H ZCLIENTS_SELFTEST=addressbar "$APP"       # logs the window number twice: screencapture -l <n>
 HOME=$H ZCLIENTS_SELFTEST=announce "$APP"         # watch AXAnnouncementRequested with an AX observer
 HOME=$H ZCLIENTS_SELFTEST=parity "$APP"          # add ZCLIENTS_REAL_CLICK=1 + a posted mouse click, see below
 HOME=$H ZCLIENTS_SELFTEST=stability ZCLIENTS_ALERTS=decline ZCLIENTS_MOCK_MEDIA=1 "$APP"
@@ -47,6 +48,7 @@ question with its first / last button and logs it.
 | `print` (2.3) | `window.print()` from a page's Print button (a real click) and from an iframe each show the macOS Print panel as a sheet (title "Print"); the test cancels it |
 | `window` (2.3.1) | The red close button hides the window and the app keeps running (a page timer still ticks, tabs stay awake); a page `alert()` brings the window back; so does the Dock-icon reopen message; Window › ZClients exists |
 | `announce` (2.3.1) | Save on the New Client sheet with no name keeps it open, shows "Enter a client name." and posts it as a VoiceOver announcement (priority high); an AXObserver on the app's pid for `AXAnnouncementRequested` receives it. AppKit does not quit while a sheet is open, so the test cancels the sheet first |
+| `addressbar` (2.3.1) | Logs the window number with an https address shown and again while typing; `screencapture -x -o -l <n>` at each shows the lock, then a magnifying glass, *inside* the field with the text starting after it |
 | `meet`, `input`, `find`, `memory`, `perf`, `address`, `prep` | Unchanged from 1.4.0 (see README); `address`, `input`, `find` need System Events keystrokes |
 
 Recovery can be exercised by writing a truncated

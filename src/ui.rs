@@ -152,6 +152,22 @@ define_class!(
     }
 );
 
+define_class!(
+    /// The address field's cell: its text (drawn and edited) starts after
+    /// the icon instead of under it.
+    #[unsafe(super(objc2_app_kit::NSTextFieldCell, objc2_app_kit::NSActionCell, objc2_app_kit::NSCell, NSObject))]
+    #[thread_kind = MainThreadOnly]
+    struct AddressCell;
+
+    impl AddressCell {
+        #[unsafe(method(drawingRectForBounds:))]
+        fn drawing_rect(&self, bounds: NSRect) -> NSRect {
+            let r: NSRect = unsafe { msg_send![super(self), drawingRectForBounds: bounds] };
+            NSRect::new(NSPoint::new(r.origin.x + theme::ADDRESS_ICON_INSET, r.origin.y), NSSize::new((r.size.width - theme::ADDRESS_ICON_INSET).max(0.0), r.size.height))
+        }
+    }
+);
+
 /// The clipboard's text, if it holds any.
 fn clipboard_text() -> Option<String> {
     objc2_app_kit::NSPasteboard::generalPasteboard().stringForType(unsafe { objc2_app_kit::NSPasteboardTypeString }).map(|s| s.to_string()).filter(|s| !s.trim().is_empty())
@@ -979,6 +995,19 @@ define_class!(
             }
             Bool::NO
         }
+
+        // Typing in the address bar: the lock or globe described the page's
+        // address, not the text being typed.
+        #[unsafe(method(controlTextDidChange:))]
+        fn text_did_change(&self, n: &objc2_foundation::NSNotification) {
+            let object = n.object();
+            with_ui(|u| {
+                if object.as_deref().is_some_and(|o| std::ptr::eq(o as *const AnyObject, Retained::as_ptr(&u.address).cast())) {
+                    u.address_icon.setImage(theme::symbol(TYPING_GLYPH.0, theme::Icon::Tab).as_deref());
+                    u.address_icon.setToolTip(Some(&util::ns(TYPING_GLYPH.1)));
+                }
+            });
+        }
     }
 
     unsafe impl NSTextFieldDelegate for Actions {}
@@ -1767,6 +1796,11 @@ pub fn build() {
     let address: Retained<NSTextField> = {
         let this = AddressField::alloc(mtm).set_ivars(());
         let field: Retained<AddressField> = unsafe { msg_send![super(this), initWithFrame: rect(0.0, 0.0, 400.0, 24.0)] };
+        let cell: Retained<AddressCell> = {
+            let this = AddressCell::alloc(mtm).set_ivars(());
+            unsafe { msg_send![super(this), initTextCell: &*util::ns("")] }
+        };
+        field.setCell(Some(&cell));
         Retained::into_super(field)
     };
     address.setStringValue(&util::ns(""));
@@ -1790,7 +1824,6 @@ pub fn build() {
     address.setControlSize(objc2_app_kit::NSControlSize::Large);
     let address_icon = NSImageView::imageViewWithImage(&theme::symbol("globe", theme::Icon::Tab).unwrap_or_default(), mtm);
     address_icon.setContentTintColor(Some(&theme::secondary_text()));
-    address_icon.setHidden(true);
     unsafe { address.setDelegate(Some(ProtocolObject::from_ref(&*actions()))) };
     let search = sym_button("magnifyingglass", "Google Search workspace", sel!(search:));
     let meet = sym_button("video.fill", "Google Meet for this client", sel!(meet:));
@@ -1994,11 +2027,11 @@ fn layout(kind: u8, view: &FlexView) {
             let right_w = shown.len() as f64 * (BTN + G) - G + GAP * 2.0;
             let addr_w = (b.width - x - right_w).max(120.0);
             let ay = (TOP - theme::ADDRESS_H) / 2.0;
-            // The lock (https) or globe sits just before the field.
-            u.address_icon.setFrame(rect(x, ay + (theme::ADDRESS_H - 16.0) / 2.0, 16.0, 16.0));
-            let fx = x + 16.0 + G;
-            let addr_w = (addr_w - 16.0 - G).max(120.0);
+            // The lock (https), globe or magnifying glass sits inside the
+            // field, in the room its cell leaves (theme::ADDRESS_ICON_INSET).
+            let fx = x;
             u.address.setFrame(rect(fx, ay, addr_w, theme::ADDRESS_H));
+            u.address_icon.setFrame(rect(fx + 8.0, ay + (theme::ADDRESS_H - 16.0) / 2.0, 16.0, 16.0));
             let mut rx = fx + addr_w + GAP;
             for btn in shown {
                 btn.setFrame(rect(rx, y, BTN, BTN));
@@ -2562,15 +2595,14 @@ fn refresh_toolbar() {
         }
         if u.address.currentEditor().is_none() {
             let shown = if url.starts_with("file:") { String::new() } else { url };
-            let glyph = address_glyph(&shown);
-            u.address_icon.setHidden(glyph.is_none());
-            if let Some((name, tip)) = glyph {
-                u.address_icon.setImage(theme::symbol(name, theme::Icon::Tab).as_deref());
-                u.address_icon.setToolTip(Some(&util::ns(tip)));
-            }
+            let (name, tip) = address_glyph(&shown).unwrap_or(TYPING_GLYPH);
+            u.address_icon.setImage(theme::symbol(name, theme::Icon::Tab).as_deref());
+            u.address_icon.setToolTip(Some(&util::ns(tip)));
             u.address.setStringValue(&util::ns(&shown));
         } else {
-            u.address_icon.setHidden(true);
+            // While typing, the icon says what Return will do.
+            u.address_icon.setImage(theme::symbol(TYPING_GLYPH.0, theme::Icon::Tab).as_deref());
+            u.address_icon.setToolTip(Some(&util::ns(TYPING_GLYPH.1)));
         }
         // The Dock icon shows how many files are downloading, like Safari.
         let dock = NSApplication::sharedApplication(mtm()).dockTile();
@@ -2589,6 +2621,9 @@ fn refresh_toolbar() {
 
 /// The glyph inside the address field: a lock for an https page, a globe
 /// for anything else, none for an empty field.
+/// The address field's icon while typing or with no address.
+const TYPING_GLYPH: (&str, &str) = ("magnifyingglass", "Search Zoho or enter address");
+
 pub fn address_glyph(url: &str) -> Option<(&'static str, &'static str)> {
     if url.is_empty() {
         None
@@ -2711,6 +2746,8 @@ pub fn type_in_address(text: &str) {
         if let Some(e) = u.address.currentEditor() {
             unsafe {
                 e.selectAll(None);
+                // insertText: is the path real typing takes, so the field
+                // posts controlTextDidChange: as it would for keystrokes.
                 let _: () = msg_send![&*e, insertText: &*util::ns(text)];
             }
         }

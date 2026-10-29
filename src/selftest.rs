@@ -1471,6 +1471,30 @@ fn announce_test() {
     });
 }
 
+/// `ZCLIENTS_SELFTEST=addressbar`: logs the window number with an address
+/// shown, then while typing, so the toolbar can be captured
+/// (`screencapture -l <number>`) to check the icon sits inside the field.
+fn address_bar_test() {
+    util::after(1.0, || {
+        app::add_client("Address Bar", "#2470dd", None, app::LoginChange::Keep, Default::default());
+        app::address_entered("https://www.zoho.com/crm/");
+    });
+    let number = || {
+        let app = NSApplication::sharedApplication(MainThreadMarker::new().unwrap());
+        app.windows().iter().find(|w| w.isVisible() && w.title().to_string() == "ZClients").map(|w| w.windowNumber()).unwrap_or(0)
+    };
+    util::after(8.0, move || util::log(format!("SELFTEST ADDRBAR shown: window {} {}", number(), ui::address_state())));
+    util::after(11.0, || {
+        ui::click_address();
+        util::after(0.3, || ui::type_in_address("books.zoho.com/typed-text"));
+    });
+    util::after(12.0, move || util::log(format!("SELFTEST ADDRBAR typing: window {} {}", number(), ui::address_state())));
+    util::after(15.0, || {
+        util::log("SELFTEST done");
+        app::quit_without_asking();
+    });
+}
+
 pub fn start() {
     if !util::is_test_build() {
         return;
@@ -1494,6 +1518,7 @@ pub fn start() {
         Ok("print") => return print_test(),
         Ok("window") => return window_test(),
         Ok("announce") => return announce_test(),
+        Ok("addressbar") => return address_bar_test(),
         Ok(_) => {}
         Err(_) => return,
     }

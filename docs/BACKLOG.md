@@ -11,7 +11,7 @@ commit log, one commit per finding ID). What was deliberately left, and why:
 | U4: data centre for a brand-new client | By design | Unknown until the client loads its first Zoho app page; until then the launcher uses `.zoho.com`, which Zoho redirects. |
 | U10: notification permission | By design | macOS asks once ("ZClients would like to send notifications"); if declined, nothing is shown. |
 | D4: darkening all seven weak palette colours | Owner choice | Text colour now follows luminance (always ≥ 4.5:1); only Blue had to change (no text colour reached 4.5:1 on it). If white initials are preferred everywhere, darken Amber, Teal, Lime, Green, Orange, Cyan one step. |
-| D7: lock/globe glyph *inside* the address field | Partly | The glyph sits just before the field; drawing it inside needs a custom NSTextFieldCell. |
+| D7: lock/globe glyph *inside* the address field | Done in 2.3.1 | `AddressCell` (an NSTextFieldCell) leaves `theme::ADDRESS_ICON_INSET` at the left for drawing and editing; the icon sits there. A magnifying glass replaces it with no address and while typing. Checked with `ZCLIENTS_SELFTEST=addressbar` + `screencapture -l`. |
 | U2: VoiceOver announcement of the sheet's inline error | Done in 2.3.1 | The message is also posted as a high-priority `NSAccessibilityAnnouncementRequestedNotification` (`ZCLIENTS_SELFTEST=announce`; an AX observer receives it). |
 | Manual passes (Light/Dark with a changed accent, "Larger Text", VoiceOver script, real Zoho accounts in EU/IN/UK, SSO, Wi-Fi off/on) | Not run here | Need a signed-in account / a person at the Mac. Checklist in `docs/TESTING.md` › New in 2.0.0. |
 

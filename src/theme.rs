@@ -22,6 +22,8 @@ pub const PROGRESS_H: f64 = 2.0;
 pub const ICON_BUTTON: f64 = 28.0;
 pub const TOOLBAR_GAP: f64 = 8.0;
 pub const ADDRESS_H: f64 = 28.0;
+/// Room at the left of the address text for the icon inside the field.
+pub const ADDRESS_ICON_INSET: f64 = 24.0;
 pub const SIDEBAR_ROW_H: f64 = 44.0;
 pub const SIDEBAR_ROW_PAD: f64 = 12.0;
 pub const SIDEBAR_BADGE: f64 = 28.0;
@@ -276,7 +278,7 @@ mod tests {
 
     #[test]
     fn spacing_is_on_the_four_point_grid() {
-        for v in [TOOLBAR_H, ICON_BUTTON, TOOLBAR_GAP, ADDRESS_H, SIDEBAR_ROW_H, SIDEBAR_ROW_PAD, BADGE_TEXT_GAP, LABEL_COL_W, SECTION_GAP, SIDEBAR_BADGE] {
+        for v in [TOOLBAR_H, ICON_BUTTON, TOOLBAR_GAP, ADDRESS_H, ADDRESS_ICON_INSET, SIDEBAR_ROW_H, SIDEBAR_ROW_PAD, BADGE_TEXT_GAP, LABEL_COL_W, SECTION_GAP, SIDEBAR_BADGE] {
             assert_eq!(v % GRID, 0.0, "{v}");
         }
     }
