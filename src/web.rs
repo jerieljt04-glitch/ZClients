@@ -49,17 +49,15 @@ const DOWNLOAD_GESTURE_WINDOW: Duration = Duration::from_secs(10);
 /// A popup may open one more popup (OAuth inside a widget), no deeper.
 const MAX_POPUP_DEPTH: u8 = 2;
 
-thread_local! {
-    static LAST_INPUT: Cell<Option<Instant>> = const { Cell::new(None) };
+/// A real keyboard or mouse event reached *this* page within `within`. A
+/// click in one tab gives no credit to any other tab or popup.
+fn recent_gesture(web: &WKWebView, within: Duration) -> bool {
+    let last = web.downcast_ref::<ZWebView>().and_then(|z| z.ivars().last_input.get());
+    gesture_credit(last, Instant::now(), within)
 }
 
-fn note_input() {
-    LAST_INPUT.set(Some(Instant::now()));
-}
-
-/// A real keyboard or mouse event reached a page within `within`.
-pub fn recent_gesture(within: Duration) -> bool {
-    LAST_INPUT.get().is_some_and(|t| t.elapsed() < within)
+fn gesture_credit(last_input: Option<Instant>, now: Instant, within: Duration) -> bool {
+    last_input.is_some_and(|t| now.saturating_duration_since(t) < within)
 }
 
 const KVO_KEYS: &[&str] = &["title", "URL", "canGoBack", "canGoForward", "loading", "estimatedProgress", "cameraCaptureState", "microphoneCaptureState"];
@@ -130,6 +128,8 @@ pub struct ZWebIvars {
     last_click: Cell<Option<(objc2_app_kit::NSEventModifierFlags, Instant)>>,
     /// The keyboard is in a code editor (see `scripts::EDITOR_HOOK`).
     code_editor: Cell<bool>,
+    /// The last real key press or click in this page (see `recent_gesture`).
+    last_input: Cell<Option<Instant>>,
 }
 
 define_class!(
@@ -158,7 +158,7 @@ define_class!(
         // define — ⌘Enter in a Zoho editor, say — still reaches the page.
         #[unsafe(method(performKeyEquivalent:))]
         fn perform_key_equivalent(&self, event: &NSEvent) -> bool {
-            note_input();
+            self.note_input();
             // Control+A selects all too, the way it does in browsers on
             // Windows (on a Mac it would only move to the start of a line).
             // A setting turns this back into the Mac behaviour.
@@ -193,7 +193,7 @@ define_class!(
 
         #[unsafe(method(keyDown:))]
         fn key_down(&self, event: &NSEvent) {
-            note_input();
+            self.note_input();
             unsafe {
                 let _: () = msg_send![super(self), keyDown: event];
             }
@@ -201,7 +201,7 @@ define_class!(
 
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, event: &NSEvent) {
-            note_input();
+            self.note_input();
             self.ivars().last_click.set(Some((event.modifierFlags(), Instant::now())));
             unsafe {
                 let _: () = msg_send![super(self), mouseDown: event];
@@ -221,7 +221,7 @@ define_class!(
 
         #[unsafe(method(rightMouseDown:))]
         fn right_mouse_down(&self, event: &NSEvent) {
-            note_input();
+            self.note_input();
             unsafe {
                 let _: () = msg_send![super(self), rightMouseDown: event];
             }
@@ -359,6 +359,10 @@ impl ZWebView {
         menu.insertItem_atIndex(&NSMenuItem::separatorItem(mtm), at);
     }
 
+    fn note_input(&self) {
+        self.ivars().last_input.set(Some(Instant::now()));
+    }
+
     fn client_world(&self) -> Retained<WKContentWorld> {
         unsafe { WKContentWorld::defaultClientWorld(self.mtm()) }
     }
@@ -372,6 +376,7 @@ fn new_zweb(mtm: MainThreadMarker, frame: NSRect, cfg: &WKWebViewConfiguration, 
         menu_targets: RefCell::new(vec![]),
         last_click: Cell::new(None),
         code_editor: Cell::new(false),
+        last_input: Cell::new(None),
     });
     let web: Retained<ZWebView> = unsafe { msg_send![super(this), initWithFrame: frame, configuration: cfg] };
     unsafe {
@@ -938,7 +943,7 @@ fn request_for(web: &WKWebView, frame: Option<&WKFrameInfo>, workspace: Workspac
         Some(f) => (frame_origin(f), unsafe { f.isMainFrame() }),
         None => (top.clone(), true),
     };
-    policy::Request { origin, top, main_frame, user_gesture: recent_gesture(GESTURE_WINDOW), workspace }
+    policy::Request { origin, top, main_frame, user_gesture: recent_gesture(web, GESTURE_WINDOW), workspace }
 }
 
 /// A two-button confirmation. True for the first button.
@@ -1327,7 +1332,7 @@ impl Coordinator {
         let source = unsafe { action.sourceFrame() };
         let source_request = || {
             let mut r = request_for(web, source.as_deref(), iv.workspace);
-            r.user_gesture = recent_gesture(DOWNLOAD_GESTURE_WINDOW);
+            r.user_gesture = recent_gesture(web, DOWNLOAD_GESTURE_WINDOW);
             r
         };
 
@@ -1546,7 +1551,7 @@ impl Coordinator {
                 return None;
             }
             // A link to an outside website: the default browser.
-            if policy::is_https(u) && user_link && !policy::is_allowed_web(u, iv.workspace) && recent_gesture(GESTURE_WINDOW) {
+            if policy::is_https(u) && user_link && !policy::is_allowed_web(u, iv.workspace) && recent_gesture(web, GESTURE_WINDOW) {
                 open_externally(u);
                 return None;
             }
@@ -1603,7 +1608,7 @@ impl Coordinator {
             Some(u) => Origin::of(u),
             None => None,
         };
-        policy::Request { origin: origin.clone(), top: origin, main_frame: true, user_gesture: recent_gesture(DOWNLOAD_GESTURE_WINDOW), workspace: self.ivars().workspace }
+        policy::Request { origin: origin.clone(), top: origin, main_frame: true, user_gesture: recent_gesture(web, DOWNLOAD_GESTURE_WINDOW), workspace: self.ivars().workspace }
     }
 
     /// On Zoho's sign-in page, fill in the profile's saved login. The email
@@ -2696,6 +2701,23 @@ mod tests {
         assert_eq!(user_agent_suffix(Some("26.1")), "Version/26.1 Safari/605.1.15");
         assert_eq!(user_agent_suffix(None), "Safari/605.1.15");
         assert_eq!(safari_version("<key>CFBundleShortVersionString</key><string>1.0; evil</string>"), None);
+    }
+
+    #[test]
+    fn gesture_credit_belongs_to_the_page_that_got_the_input() {
+        let now = Instant::now();
+        let ago = |s| now.checked_sub(Duration::from_secs(s));
+        // Tab A was clicked a second ago: A may open a window or download.
+        assert!(gesture_credit(ago(1), now, GESTURE_WINDOW));
+        assert!(gesture_credit(ago(1), now, DOWNLOAD_GESTURE_WINDOW));
+        // Tab B (or a popup) got no input of its own: no credit, however
+        // recently A was clicked.
+        assert!(!gesture_credit(None, now, GESTURE_WINDOW));
+        assert!(!gesture_credit(None, now, DOWNLOAD_GESTURE_WINDOW));
+        // A's own credit runs out: 5 s for windows, 10 s for downloads.
+        assert!(!gesture_credit(ago(6), now, GESTURE_WINDOW));
+        assert!(gesture_credit(ago(6), now, DOWNLOAD_GESTURE_WINDOW));
+        assert!(!gesture_credit(ago(11), now, DOWNLOAD_GESTURE_WINDOW));
     }
 
     #[test]
