@@ -1453,6 +1453,24 @@ fn window_test() {
     });
 }
 
+/// `ZCLIENTS_SELFTEST=announce`: Save on the New Client sheet with no name
+/// keeps it open, shows the red line and asks VoiceOver to announce it
+/// (watch with an accessibility observer for AXAnnouncementRequested).
+fn announce_test() {
+    util::after(2.0, || ui::show_client_sheet(None));
+    util::after(4.0, || {
+        util::log(format!("SELFTEST ANNOUNCE sheet before Save: {:?} (pid {})", ui::sheet_state(), std::process::id()));
+        ui::finish_sheet(true);
+        util::after(0.5, || util::log(format!("SELFTEST ANNOUNCE sheet after Save with no name: {:?}", ui::sheet_state())));
+    });
+    util::after(7.0, || {
+        // AppKit does not quit while a sheet is open (⌘Q neither).
+        ui::finish_sheet(false);
+        util::log("SELFTEST done");
+        app::quit_without_asking();
+    });
+}
+
 pub fn start() {
     if !util::is_test_build() {
         return;
@@ -1475,6 +1493,7 @@ pub fn start() {
         Ok("parity") => return parity_test(),
         Ok("print") => return print_test(),
         Ok("window") => return window_test(),
+        Ok("announce") => return announce_test(),
         Ok(_) => {}
         Err(_) => return,
     }

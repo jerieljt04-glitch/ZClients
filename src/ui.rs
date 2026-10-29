@@ -3207,6 +3207,32 @@ fn sheet_pick_swatch(index: usize) {
     }
 }
 
+/// Self-tests: press Save (true) or Cancel on the open client sheet.
+pub fn finish_sheet(save: bool) {
+    sheet_finish(save);
+}
+
+/// Self-tests: the client sheet's name field and its error line.
+pub fn sheet_state() -> Option<(String, String)> {
+    SHEET.with_borrow(|s| s.as_ref().map(|s| (s.name.stringValue().to_string(), s.name_error.stringValue().to_string())))
+}
+
+/// Have VoiceOver say `text` now, at high priority (it interrupts what it
+/// was reading).
+pub fn announce(text: &str) {
+    use objc2_app_kit::{
+        NSAccessibilityAnnouncementKey, NSAccessibilityAnnouncementRequestedNotification, NSAccessibilityPostNotificationWithUserInfo, NSAccessibilityPriorityKey,
+        NSAccessibilityPriorityLevel,
+    };
+    let message = util::ns(text);
+    let priority = objc2_foundation::NSNumber::new_isize(NSAccessibilityPriorityLevel::High.0);
+    let keys = unsafe { [NSAccessibilityAnnouncementKey, NSAccessibilityPriorityKey] };
+    let values: [&AnyObject; 2] = [&message, &priority];
+    let info = objc2_foundation::NSDictionary::from_slices(&keys, &values);
+    let app = NSApplication::sharedApplication(mtm());
+    unsafe { NSAccessibilityPostNotificationWithUserInfo(&app, NSAccessibilityAnnouncementRequestedNotification, Some(&info)) };
+}
+
 /// A small red line under a field, empty until there is something to say.
 fn error_label(frame: NSRect) -> Retained<NSTextField> {
     let l = text("", theme::Text::Footnote, theme::Weight::Regular);
@@ -3234,6 +3260,8 @@ fn sheet_finish(save: bool) {
             line.setStringValue(&util::ns(problem.message()));
             line.setAccessibilityLabel(Some(&util::ns(problem.message())));
             sheet.window.makeFirstResponder(Some(field));
+            // VoiceOver reads the field that got focus, not the red line.
+            announce(problem.message());
             SHEET.with_borrow_mut(|s| *s = Some(sheet));
             return;
         }
