@@ -208,6 +208,17 @@ define_class!(
             }
         }
 
+        // WebKit turns down the first click on a window that is not key
+        // (another app in front): AppKit then only brings the window
+        // forward and the page never sees the click, so a Zoho button
+        // clicked straight from Cliq or Chrome did nothing. Chrome hands
+        // that click to the page; so does ZClients unless the setting is
+        // off. Drags and text selection start from the same mouse-down.
+        #[unsafe(method(acceptsFirstMouse:))]
+        fn accepts_first_mouse(&self, event: Option<&NSEvent>) -> bool {
+            settings::get(|s| s.first_click_reaches_page) || unsafe { msg_send![super(self), acceptsFirstMouse: event] }
+        }
+
         #[unsafe(method(rightMouseDown:))]
         fn right_mouse_down(&self, event: &NSEvent) {
             note_input();

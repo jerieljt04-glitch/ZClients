@@ -34,6 +34,10 @@ pub struct Settings {
     /// page (Zoho Sheet fill-down, Writer save, link insertion...). The
     /// app's own versions stay on ⌃S, ⌥⌘K, ⌥⌘S and the menus.
     pub page_owns_editor_shortcuts: bool,
+    /// A click in the window while another app is in front also reaches the
+    /// page (Chrome's behaviour). Off: that click only brings ZClients
+    /// forward (Safari's behaviour).
+    pub first_click_reaches_page: bool,
     /// Origin ("https://crm.zoho.com") → what to do when it starts a
     /// download without a recent click.
     pub downloads: BTreeMap<String, SitePermission>,
@@ -43,7 +47,15 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { version: 1, developer_mode: false, control_a_selects_all: true, page_owns_editor_shortcuts: true, downloads: BTreeMap::new(), zoom: BTreeMap::new() }
+        Settings {
+            version: 1,
+            developer_mode: false,
+            control_a_selects_all: true,
+            page_owns_editor_shortcuts: true,
+            first_click_reaches_page: true,
+            downloads: BTreeMap::new(),
+            zoom: BTreeMap::new(),
+        }
     }
 }
 
@@ -145,6 +157,7 @@ mod tests {
         let s: Settings = serde_json::from_str(r#"{"developerMode":true,"futureThing":1}"#).unwrap();
         assert!(s.developer_mode);
         assert!(s.control_a_selects_all, "missing fields take defaults");
+        assert!(s.first_click_reaches_page, "a 2.2 settings file gets Chrome-like first clicks");
         let s: Settings = serde_json::from_str("{}").unwrap();
         assert_eq!(s, Settings::default());
     }

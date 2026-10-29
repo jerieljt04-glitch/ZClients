@@ -128,6 +128,7 @@ define_class!(
             match b.tag() {
                 1 => settings::update(|st| st.control_a_selects_all = on),
                 2 => settings::update(|st| st.page_owns_editor_shortcuts = on),
+                4 => settings::update(|st| st.first_click_reaches_page = on),
                 3 if util::is_test_build() => settings::update(|st| st.developer_mode = on),
                 _ => {}
             }
@@ -397,10 +398,12 @@ fn rebuild() {
     b.text("PDF previews are private copies kept only while their tab is open (or reopenable); the rest are removed at launch and at quit.", true);
 
     // ---- keyboard ---------------------------------------------------------
-    b.heading("Keyboard");
+    b.heading("Keyboard & mouse");
     b.checkbox("Control-A selects all (as on Windows); off: start of line", settings::get(|s| s.control_a_selects_all), sel!(toggleSetting:), 1);
     b.checkbox("Web pages keep ⌘D, ⌘S, ⌘K and ⇧⌘S while they have the keyboard", settings::get(|s| s.page_owns_editor_shortcuts), sel!(toggleSetting:), 2);
     b.text("The app's own versions stay available: Toggle Sidebar ⌃S, Google Search ⌥⌘K, Download Current Page ⌥⌘S, Duplicate Tab from the File menu.", true);
+    b.checkbox("Clicks in an inactive window go to the page", settings::get(|s| s.first_click_reaches_page), sel!(toggleSetting:), 4);
+    b.text("Off: the first click only brings ZClients to the front, as in Safari.", true);
 
     // ---- developer (test builds only) ---------------------------------------
     if util::is_test_build() {
@@ -537,9 +540,10 @@ pub fn diagnostics_text() -> String {
     }
     let s = settings::get(|s| s.clone());
     out.push_str(&format!(
-        "settings: control-A select-all {}, page owns editor keys {}, developer mode {}, inspector allowed {}\n",
+        "settings: control-A select-all {}, page owns editor keys {}, first click reaches page {}, developer mode {}, inspector allowed {}\n",
         s.control_a_selects_all,
         s.page_owns_editor_shortcuts,
+        s.first_click_reaches_page,
         s.developer_mode,
         settings::web_inspector_allowed()
     ));

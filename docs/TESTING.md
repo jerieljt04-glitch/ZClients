@@ -47,6 +47,33 @@ Recovery can be exercised by writing a truncated
 file untouched) or `accept` (Restore: damaged file kept as
 `clients.json.damaged-<time>`).
 
+## 2.3 finding: Zoho side panels "don't open" (A0)
+
+Symptom: in the Zoho Analytics report editor the gear next to View Mode
+slides in a Settings panel in Chrome, nothing in ZClients.
+
+- Plain WebKit animates normally (bare WKWebView: CSS transition, keyframes,
+  Web Animations, rAF all finish in ~430 ms; Low Power Mode holds rAF at
+  30 fps, Chrome stays at 60, but every animation still finishes).
+- User check, installed 2.2.0: click once on the page first (ZClients
+  active), then the gear → **the panel opens**. Safari could not be checked
+  (no signed-in Safari); the Web Inspector capture in ZClients Test was not
+  needed once the next point reproduced it.
+- `ZCLIENTS_SELFTEST=parity` on 2.2.0 code, another app (Finder) in front, a
+  real mouse click posted at the button: the app comes forward but the page
+  gets **0 mousedown, 0 click**; panel stays at `translateX(300px)`. Same run
+  with ZClients active: 1 click, panel `none`, everything done in ~320 ms.
+- Root cause: WKWebView's `acceptsFirstMouse:` answers NO for an ordinary
+  click, so AppKit spends the first click on an inactive window on bringing
+  it forward. Chrome passes that click to the page. Fixed in 2.3.0 (A1):
+  `ZWebView` accepts the first mouse unless Settings › Keyboard & mouse ›
+  "Clicks in an inactive window go to the page" is off. With the fix the
+  same real click gives 1 click, panel open in ~305 ms, `document.hasFocus()`
+  true, no blur.
+- Not the cause: missing `requestIdleCallback` / `scheduler.postTask` (no
+  page error involved; Zoho's panel opens once the click arrives), the user
+  agent, the client-world scripts, KVO.
+
 ## Manual verification checklist (real app, real accounts)
 
 Run on the test app first; on the real app only after installing 2.0.0.
