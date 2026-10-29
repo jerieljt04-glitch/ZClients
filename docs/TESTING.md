@@ -5,7 +5,7 @@
 ```sh
 scripts/check.sh          # every CI gate (fmt, clippy, tests, property tests,
                           # audit, deny, universal build, Miri)
-cargo test                # 137 unit / migration / failure-injection / property tests
+cargo test                # 139 unit / migration / failure-injection / property tests
 ./build.sh --test         # "ZClients Test": own bundle id + data, ad-hoc signed
 ```
 

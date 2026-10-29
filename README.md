@@ -12,7 +12,7 @@ scripts/check.sh        # every CI gate: fmt, clippy -D warnings, tests, propert
 ./build.sh --test       # "ZClients Test": separate bundle id and data, ad-hoc signed
 ./build.sh              # test, build universal, sign (local identity), ask, install
 ./build.sh --no-install # build and sign into .build/
-cargo test              # 137 unit, migration, failure-injection and property tests
+cargo test              # 139 unit, migration, failure-injection and property tests
 ```
 
 The version lives only in `Cargo.toml` (`version` + `[package.metadata.zclients]
@@ -102,6 +102,10 @@ Profiles and tabs carry over; the Swift app reads `clients.json` unchanged.
 
 To go back to 1.0.0 (before folder downloads and PDF tabs):
 `rm -rf /Applications/ZClients.app && ditto backup/ZClients-1.0.0.app /Applications/ZClients.app`.
+
+To go back to 2.2.0 after installing 2.3.0 (no data changes; settings.json
+gains `firstClickReachesPage`, which 2.2.0 ignores):
+`rm -rf /Applications/ZClients.app && ditto backup/ZClients-2.2.0.app /Applications/ZClients.app`.
 
 To go back to 1.5.0 after installing 2.0.0 (no data changes; see `docs/MIGRATION.md`):
 `rm -rf /Applications/ZClients.app && ditto backup/ZClients-1.5.0.app /Applications/ZClients.app`.
