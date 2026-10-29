@@ -663,6 +663,7 @@ define_class!(
 
         #[unsafe(method(settings:))] fn a_settings(&self, _s: Option<&AnyObject>) { crate::privacy::show(); }
         #[unsafe(method(exportDiagnostics:))] fn a_diagnostics(&self, _s: Option<&AnyObject>) { crate::privacy::export_diagnostics(); }
+        #[unsafe(method(showMainWindow:))] fn a_show_window(&self, _s: Option<&AnyObject>) { show_window(); }
         #[unsafe(method(moveTabLeft:))] fn a_move_left(&self, _s: Option<&AnyObject>) { if let Some((c, t)) = app::store(|s| s.active_tab().map(|(c, t)| (c.id, t.id))) { app::move_tab(c, t, -1); } }
         #[unsafe(method(moveTabRight:))] fn a_move_right(&self, _s: Option<&AnyObject>) { if let Some((c, t)) = app::store(|s| s.active_tab().map(|(c, t)| (c.id, t.id))) { app::move_tab(c, t, 1); } }
         #[unsafe(method(focusTabs:))]
@@ -891,12 +892,13 @@ define_class!(
     }
 
     unsafe impl NSWindowDelegate for Actions {
-        // The red close button quits (this is a one-window app), through
-        // the same confirmation as ⌘Q: a running download or a call asks
-        // first, and Cancel leaves the window open.
+        // The red close button hides the window, like Chrome or Mail: tabs,
+        // calls and downloads go on, and the Dock icon (or Window ›
+        // ZClients) brings it back. ⌘Q quits, asking first during a
+        // download or a call (`app::should_quit`).
         #[unsafe(method(windowShouldClose:))]
         fn window_should_close(&self, _w: &NSWindow) -> bool {
-            util::later(|| unsafe { NSApplication::sharedApplication(mtm()).terminate(None) });
+            hide_window();
             false
         }
 
@@ -2760,6 +2762,35 @@ pub fn focus_tab_strip() {
     });
 }
 
+/// The red close button: hide the window (leaving full screen first, or
+/// its empty Space would stay behind) and keep everything running.
+fn hide_window() {
+    let full = with_ui(|u| u.window.styleMask().contains(NSWindowStyleMask::FullScreen)).unwrap_or(false);
+    if full {
+        with_ui(|u| u.window.toggleFullScreen(None));
+        util::after(0.9, hide_window);
+        return;
+    }
+    with_ui(|u| u.window.orderOut(None));
+    // The same snapshot as when the app goes to the background.
+    util::later(app::app_resigned_active);
+}
+
+/// Bring the main window back (Dock icon, Window › ZClients, or a page
+/// that needs the user: a dialog or the print panel).
+pub fn show_window() {
+    with_ui(|u| {
+        if u.window.isMiniaturized() {
+            u.window.deminiaturize(None);
+        }
+        u.window.makeKeyAndOrderFront(None);
+    });
+}
+
+pub fn window_visible() -> bool {
+    with_ui(|u| u.window.isVisible()).unwrap_or(false)
+}
+
 pub fn focus_view(view: &NSView) {
     with_ui(|u| u.window.makeFirstResponder(Some(view)));
 }
@@ -3388,6 +3419,9 @@ fn build_menu() {
     let window = submenu(&bar, "Window");
     std_item(&window, "Minimize", sel!(performMiniaturize:), "m", cmd);
     std_item(&window, "Zoom", sel!(performZoom:), "", cmd);
+    window.addItem(&NSMenuItem::separatorItem(mtm));
+    // A hidden window is not listed by AppKit; this always brings it back.
+    add_item(&window, "ZClients", sel!(showMainWindow:), "", 0);
     app.setWindowsMenu(Some(&window));
 
     let help = submenu(&bar, "Help");

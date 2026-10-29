@@ -20,6 +20,7 @@ HOME=$H ZCLIENTS_SELFTEST=address2 "$APP"
 HOME=$H ZCLIENTS_SELFTEST=downloads ZCLIENTS_ALERTS=accept "$APP"
 HOME=$H ZCLIENTS_SELFTEST=search "$APP"
 HOME=$H ZCLIENTS_SELFTEST=print "$APP"
+HOME=$H ZCLIENTS_SELFTEST=window ZCLIENTS_ALERTS=accept "$APP"
 HOME=$H ZCLIENTS_SELFTEST=parity "$APP"          # add ZCLIENTS_REAL_CLICK=1 + a posted mouse click, see below
 HOME=$H ZCLIENTS_SELFTEST=stability ZCLIENTS_ALERTS=decline ZCLIENTS_MOCK_MEDIA=1 "$APP"
 HOME=$H ZCLIENTS_SELFTEST=stability ZCLIENTS_ALERTS=accept ZCLIENTS_MOCK_MEDIA=1 "$APP"   # then: the logged partial file must not exist
@@ -43,6 +44,7 @@ question with its first / last button and logs it.
 | `stability` (2.0) | U6 closing a tab in a call asks; U1 a newer download leaves an item's key on the same file; S1 quitting with a download and a call asks (decline: both continue; accept: real quit path, partial file deleted); S2 a page whose WebContent process is killed twice shows "This page stopped working" instead of reloading |
 | `parity` (2.3) | In-page UI works like Chrome: one click on a fixture button (loaded with `loadHTMLString`, base www.zoho.com) opens a sliding panel; transform + width transitions, keyframes, Web Animations and a rAF tween all finish within 1 s, the panel ends at `transform: none`, rAF ≥ 25 fps in Low Power Mode (≥ 55 otherwise), the page keeps focus and gets no blur. Run once with ZClients active and once with Finder in front. With `ZCLIENTS_REAL_CLICK=1` the second click must come from outside: the log says `SELFTEST PARITY real click at X Y` (global points) and a real mouse click has to be posted there within 4 s (a CGEvent from a process with Accessibility access); without it the click is sent through `NSApp.sendEvent`, which never activates the app, so only `hasFocus` can fail. Third round (B7): HTML5 drag and drop, started with Finder in front: `dragstart`, `dragover` and a `drop` carrying the dragged data. It needs a real drag (`SELFTEST PARITY real drag from X Y to X Y`: post mouse down, ~30 dragged moves, up); without `ZCLIENTS_REAL_CLICK=1` it logs "not run" |
 | `print` (2.3) | `window.print()` from a page's Print button (a real click) and from an iframe each show the macOS Print panel as a sheet (title "Print"); the test cancels it |
+| `window` (2.3.1) | The red close button hides the window and the app keeps running (a page timer still ticks, tabs stay awake); a page `alert()` brings the window back; so does the Dock-icon reopen message; Window › ZClients exists |
 | `meet`, `input`, `find`, `memory`, `perf`, `address`, `prep` | Unchanged from 1.4.0 (see README); `address`, `input`, `find` need System Events keystrokes |
 
 Recovery can be exercised by writing a truncated
@@ -90,7 +92,8 @@ Run on the test app first; on the real app only after installing 2.0.0.
 - [ ] Hover an asleep tab (moon) → "Asleep to save memory — click to wake"; Help › Export Diagnostics lists each awake tab with its memory.
 
 **New in 2.0.0**
-- [ ] ⌘Q / red close button during a download → "Quit and cancel 1 download?"; Cancel keeps the window; Quit leaves no partial file in ~/Downloads.
+- [ ] ⌘Q during a download → "Quit and cancel 1 download?"; Cancel keeps the window; Quit leaves no partial file in ~/Downloads.
+- [ ] (2.3.1) Red close button during a download or a call → the window hides, nothing is asked, the download and the call continue; the Dock icon or Window › ZClients brings the window back.
 - [ ] ⌘W on a Meet tab during a call → "Close … and end the call?".
 - [ ] A page `alert()` appears as a sheet titled "<client> — <host>"; a second one within 10 s offers "Don't allow more dialogs from this page".
 - [ ] Customise: email without password → red message under Password, sheet stays open; empty name → "Enter a client name."

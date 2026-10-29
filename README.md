@@ -59,6 +59,8 @@ Run the test app with its own home so nothing real is touched:
   `docs/TESTING.md`).
 - `print` (2.3): `window.print()` from a page and from an iframe opens the
   Print panel.
+- `window` (2.3.1): the close button hides the window; alerts and the Dock
+  icon bring it back.
 - `memory`: with `ZCLIENTS_IDLE_SECS=6`, four tabs are shown once and Memory
   Saver should leave only the front tab awake (measure the WebContent
   processes with `footprint`).
@@ -67,7 +69,7 @@ Run the test app with its own home so nothing real is touched:
 
 | File | What it does |
 |---|---|
-| `main.rs` | App delegate: launch, background, quit (asks first during a download or call) |
+| `main.rs` | App delegate: launch, background, Dock-icon reopen, quit (asks first during a download or call); closing the window only hides it |
 | `app.rs` | The hub: profile store, saving, every user command |
 | `model.rs` | Clients, tabs, sorting, each client's data centre; reads/writes the Swift-compatible `clients.json` |
 | `policy.rs` | Which URLs load (the Google Search workspace: Google Search and Zoho in place, Meet to a client, nothing else — `search_route`); one `decide(Capability, Request)` for camera, mic, screen, autofill, bridge, downloads, file chooser, deep links, popups — by exact origin; per-data-centre host lists; SSO identity-provider steps |

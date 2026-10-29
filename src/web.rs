@@ -783,6 +783,9 @@ define_class!(
                 util::log("window.print() ignored: page not in front or its dialogs are blocked");
                 return;
             }
+            if iv.tab_id.is_some() && !ui::window_visible() {
+                ui::show_window();
+            }
             print_view(web, frame);
         }
 
@@ -1202,6 +1205,10 @@ impl Coordinator {
             util::later(move || {
                 app::show_tab(client, tab);
             });
+        }
+        // A sheet on the hidden main window would wait unseen.
+        if iv.tab_id.is_some() && !ui::window_visible() {
+            ui::show_window();
         }
         let offer_stop = dialog_offers_suppression(&mut iv.dialogs.borrow_mut(), Instant::now());
         let title = format!("{} — {}", profile_name(iv.client_id), origin_title(frame));

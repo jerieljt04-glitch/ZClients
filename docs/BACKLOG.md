@@ -5,7 +5,7 @@ commit log, one commit per finding ID). What was deliberately left, and why:
 
 | Item | Status | Why |
 |---|---|---|
-| S1 option: closing the main window hides it instead of quitting | Not done | The work order makes this the owner's call. Closing still quits, through the same confirmation as ⌘Q. |
+| S1 option: closing the main window hides it instead of quitting | Done in 2.3.1 | Owner chose "hide, keep running" (2026-10-30). ⌘Q still quits with the confirmation. |
 | U3: custom SAML identity providers (an organisation's own ADFS/Ping host) | Not done | Only a fixed, tested list (Microsoft, Apple, Okta, OneLogin; Google was already allowed) is trusted. Adding an arbitrary IdP host needs a per-client setting with its own policy tests. |
 | U4: Log360 Cloud in SA, SG and CN | Not trusted | `log360cloud.manageengine.{sa,sg,com.cn}` gave no HTTPS answer on 2026-10-26. Remove the entry from `LOG360_UNAVAILABLE` (policy.rs) once Zoho serves it there. |
 | U4: data centre for a brand-new client | By design | Unknown until the client loads its first Zoho app page; until then the launcher uses `.zoho.com`, which Zoho redirects. |

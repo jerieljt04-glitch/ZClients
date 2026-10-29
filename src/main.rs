@@ -65,7 +65,7 @@ define_class!(
             app::app_resigned_active();
         }
 
-        // Quitting (⌘Q, the red close button, logging out) while a file is
+        // Quitting (⌘Q, logging out) while a file is
         // downloading or a call is on asks first; see `app::should_quit`.
         #[unsafe(method(applicationShouldTerminate:))]
         fn should_terminate(&self, _app: &NSApplication) -> objc2_app_kit::NSApplicationTerminateReply {
@@ -82,8 +82,18 @@ define_class!(
             app::app_will_quit();
         }
 
+        // Closing the window only hides it (see `ui` windowShouldClose).
         #[unsafe(method(applicationShouldTerminateAfterLastWindowClosed:))]
         fn should_terminate_after_last_window(&self, _app: &NSApplication) -> bool {
+            false
+        }
+
+        // Clicking the Dock icon with the window hidden brings it back.
+        #[unsafe(method(applicationShouldHandleReopen:hasVisibleWindows:))]
+        fn should_handle_reopen(&self, _app: &NSApplication, visible: bool) -> bool {
+            if !visible || !ui::window_visible() {
+                ui::show_window();
+            }
             true
         }
 

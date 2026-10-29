@@ -1403,6 +1403,56 @@ fn print_test() {
     });
 }
 
+fn main_window_state() -> String {
+    let app = NSApplication::sharedApplication(MainThreadMarker::new().unwrap());
+    let visible = app.windows().iter().any(|w| w.isVisible() && w.title().to_string() == "ZClients");
+    format!("window visible={visible} (ui says {}) awake tabs={}", ui::window_visible(), web::live_tabs().len())
+}
+
+/// `ZCLIENTS_SELFTEST=window` (with ZCLIENTS_ALERTS=accept): the red close
+/// button hides the window and the app keeps running (pages too); a page
+/// dialog brings the window back; so does a click on the Dock icon.
+fn window_test() {
+    util::after(1.0, || {
+        app::add_client("Window Test", "#2470dd", None, app::LoginChange::Keep, Default::default());
+        app::address_entered("https://www.zoho.com/");
+    });
+    util::after(9.0, || {
+        util::log(format!("SELFTEST WINDOW before close: {}", main_window_state()));
+        let app = NSApplication::sharedApplication(MainThreadMarker::new().unwrap());
+        if let Some(w) = app.windows().iter().find(|w| w.isVisible() && w.title().to_string() == "ZClients") {
+            w.performClose(None);
+        }
+        web::eval_active("(() => { window.__ticks = 0; setInterval(() => window.__ticks++, 100); return 'ticking'; })()", |_| {});
+    });
+    util::after(11.0, || {
+        util::log(format!("SELFTEST WINDOW after the close button (expected hidden, app running): {}", main_window_state()));
+        web::eval_active("String(window.__ticks > 0)", |r| util::log(format!("SELFTEST WINDOW page still running while hidden: {r}")));
+        web::eval_active("(() => { setTimeout(() => alert('hello from a hidden page'), 10); return 'alert queued'; })()", |_| {});
+    });
+    util::after(13.0, || {
+        util::log(format!("SELFTEST WINDOW after a page alert (expected visible): {}", main_window_state()));
+        let app = NSApplication::sharedApplication(MainThreadMarker::new().unwrap());
+        if let Some(w) = app.windows().iter().find(|w| w.isVisible() && w.title().to_string() == "ZClients") {
+            w.performClose(None);
+        }
+    });
+    util::after(14.5, || {
+        util::log(format!("SELFTEST WINDOW closed again: {}", main_window_state()));
+        let app = NSApplication::sharedApplication(MainThreadMarker::new().unwrap());
+        // What a click on the Dock icon sends.
+        if let Some(d) = app.delegate() {
+            let _: bool = unsafe { objc2::msg_send![&*d, applicationShouldHandleReopen: &*app, hasVisibleWindows: false] };
+        }
+        let item = app.windowsMenu().and_then(|m| m.itemWithTitle(&util::ns("ZClients"))).is_some();
+        util::after(0.5, move || util::log(format!("SELFTEST WINDOW after a Dock click (expected visible): {}; Window › ZClients item={item}", main_window_state())));
+    });
+    util::after(16.5, || {
+        util::log("SELFTEST done");
+        app::quit_without_asking();
+    });
+}
+
 pub fn start() {
     if !util::is_test_build() {
         return;
@@ -1424,6 +1474,7 @@ pub fn start() {
         Ok("search") => return search_workspace_test(),
         Ok("parity") => return parity_test(),
         Ok("print") => return print_test(),
+        Ok("window") => return window_test(),
         Ok(_) => {}
         Err(_) => return,
     }
