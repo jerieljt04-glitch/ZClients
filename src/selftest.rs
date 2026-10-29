@@ -1247,6 +1247,16 @@ fn parity_failures(r: &serde_json::Value, low_power: bool) -> Vec<String> {
     bad
 }
 
+/// Another app (Finder) in front, as when the user comes from Cliq or
+/// Chrome and clicks straight into a page.
+fn put_another_app_in_front(app: &NSApplication) {
+    if let Some(finder) = objc2_app_kit::NSRunningApplication::runningApplicationsWithBundleIdentifier(&util::ns("com.apple.finder")).firstObject() {
+        app.yieldActivationToApplication(&finder);
+        finder.activateWithOptions(objc2_app_kit::NSApplicationActivationOptions::empty());
+    }
+    app.deactivate();
+}
+
 /// Where the parity page's button is, in CSS pixels (see `PARITY_PAGE`).
 const PARITY_BUTTON: (f64, f64) = (120.0, 140.0);
 
@@ -1256,13 +1266,7 @@ fn parity_round(label: &'static str, inactive: bool, then: impl FnOnce() + 'stat
         let mtm = MainThreadMarker::new().unwrap();
         let app = NSApplication::sharedApplication(mtm);
         if inactive {
-            // Another app in front, as when the user comes from Cliq or
-            // Chrome and clicks straight into a page.
-            if let Some(finder) = objc2_app_kit::NSRunningApplication::runningApplicationsWithBundleIdentifier(&util::ns("com.apple.finder")).firstObject() {
-                app.yieldActivationToApplication(&finder);
-                finder.activateWithOptions(objc2_app_kit::NSApplicationActivationOptions::empty());
-            }
-            app.deactivate();
+            put_another_app_in_front(&app);
         }
         util::after(1.0, move || {
             let app = NSApplication::sharedApplication(MainThreadMarker::new().unwrap());
@@ -1299,6 +1303,47 @@ fn parity_round(label: &'static str, inactive: bool, then: impl FnOnce() + 'stat
     });
 }
 
+/// HTML5 drag and drop between two elements (Zoho Analytics' column
+/// panel works this way).
+const DRAG_PAGE: &str = r#"<!doctype html><meta charset=utf-8><title>Drag</title>
+<div id=s draggable=true style="position:fixed;top:300px;left:40px;width:160px;height:40px;background:#9cf">Column</div>
+<div id=d style="position:fixed;top:280px;left:400px;width:200px;height:80px;background:#fc9">Drop here</div>
+<script>
+var R = {};
+s.addEventListener('dragstart', function (e) { R.dragstart = true; e.dataTransfer.setData('text/plain', 'column-1'); });
+d.addEventListener('dragover', function (e) { e.preventDefault(); R.dragover = true; });
+d.addEventListener('drop', function (e) { e.preventDefault(); R.drop = e.dataTransfer.getData('text/plain'); });
+</script>"#;
+const DRAG_FROM: (f64, f64) = (120.0, 320.0);
+const DRAG_TO: (f64, f64) = (500.0, 320.0);
+
+/// A real drag from `DRAG_FROM` to `DRAG_TO`, started with another app in
+/// front, must deliver dragstart and a drop carrying the dragged data. Only real mouse events (posted from
+/// outside with ZCLIENTS_REAL_CLICK=1) drive a macOS drag session; without
+/// them the round is reported as not run.
+fn parity_drag_round(then: impl FnOnce() + 'static) {
+    web::load_test_html(DRAG_PAGE, "https://www.zoho.com/");
+    util::after(2.0, move || {
+        if std::env::var_os("ZCLIENTS_REAL_CLICK").is_none() {
+            util::log("SELFTEST PARITY drag and drop: not run (needs ZCLIENTS_REAL_CLICK=1 and a real posted drag)");
+            return then();
+        }
+        // From an inactive window: the drag's mouse-down is also the first
+        // click (see ZWebView acceptsFirstMouse:).
+        put_another_app_in_front(&NSApplication::sharedApplication(MainThreadMarker::new().unwrap()));
+        let (a, b) = (page_point_on_screen(DRAG_FROM.0, DRAG_FROM.1), page_point_on_screen(DRAG_TO.0, DRAG_TO.1));
+        util::log(format!("SELFTEST PARITY real drag from {:.0} {:.0} to {:.0} {:.0}", a.0, a.1, b.0, b.1));
+        util::after(6.0, move || {
+            web::eval_active("JSON.stringify(R)", |r| {
+                let v: serde_json::Value = serde_json::from_str(&r).unwrap_or_default();
+                let ok = v.get("dragstart").and_then(|x| x.as_bool()) == Some(true) && v.get("drop").and_then(|x| x.as_str()) == Some("column-1");
+                util::log(format!("SELFTEST PARITY drag and drop: {} {r}", if ok { "PASS" } else { "FAIL" }));
+            });
+            util::after(0.5, then);
+        });
+    });
+}
+
 /// `ZCLIENTS_SELFTEST=parity`: in-page UI behaves like Chrome. A real click
 /// (down + up through `NSApp.sendEvent`) opens a sliding panel, with the
 /// app active and again with another app in front; see `parity_failures`.
@@ -1310,8 +1355,10 @@ fn parity_test() {
     util::after(9.0, || {
         parity_round("active window", false, || {
             parity_round("another app in front", true, || {
-                util::log("SELFTEST done");
-                app::quit_without_asking();
+                parity_drag_round(|| {
+                    util::log("SELFTEST done");
+                    app::quit_without_asking();
+                })
             })
         })
     });
