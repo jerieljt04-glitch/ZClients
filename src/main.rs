@@ -8,9 +8,9 @@ mod cleanup;
 mod downloads;
 mod keychain;
 mod model;
-mod pdf;
 mod picker;
 mod policy;
+mod preview;
 mod privacy;
 #[cfg(test)]
 mod proptests;
@@ -44,6 +44,7 @@ define_class!(
         fn did_finish_launching(&self, _n: &NSNotification) {
             let app = NSApplication::sharedApplication(self.mtm());
             app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
+            theme::apply_appearance(settings::get(|s| s.appearance));
             app::load();
             // The window goes up first: restoring the session reads the
             // vault key, and after an update macOS asks for Keychain access

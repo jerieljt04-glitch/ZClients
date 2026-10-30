@@ -12,7 +12,7 @@ scripts/check.sh        # every CI gate: fmt, clippy -D warnings, tests, propert
 ./build.sh --test       # "ZClients Test": separate bundle id and data, ad-hoc signed
 ./build.sh              # test, build universal, sign (local identity), ask, install
 ./build.sh --no-install # build and sign into .build/
-cargo test              # 139 unit, migration, failure-injection and property tests
+cargo test              # 144 unit, migration, failure-injection and property tests
 ```
 
 The version lives only in `Cargo.toml` (`version` + `[package.metadata.zclients]
@@ -32,7 +32,8 @@ Run the test app with its own home so nothing real is touched:
 `HOME=/tmp/zc ZCLIENTS_SELFTEST=<mode> ".build/ZClients Test.app/Contents/MacOS/ZClients"`
 
 - `downloads`: PDF popups become tabs, hidden-frame and popup zips download,
-  downloaded PDFs open as tabs, the PDF viewer's download button saves.
+  downloaded PDFs and pictures open as tabs (an SVG stays a file), the PDF
+  viewer's download button saves.
 - `perf`: launch time, tab strip/toolbar cost, tab switches and saves with 12
   tabs open (main-thread milliseconds).
 - `input`: ⌘A / Control+A in a text box and on the page, ⌘-click on a plain
@@ -73,8 +74,8 @@ Run the test app with its own home so nothing real is touched:
 | `app.rs` | The hub: profile store, saving, every user command |
 | `model.rs` | Clients, tabs, sorting, each client's data centre; reads/writes the Swift-compatible `clients.json` |
 | `policy.rs` | Which URLs load (the Google Search workspace: Google Search and Zoho in place, Meet to a client, nothing else — `search_route`); one `decide(Capability, Request)` for camera, mic, screen, autofill, bridge, downloads, file chooser, deep links, popups — by exact origin; per-data-centre host lists; SSO identity-provider steps |
-| `settings.rs` | settings.json: per-site download permission, zoom, keyboard choices, developer mode |
-| `pdf.rs` | PDF validation (magic, size, no links) and private per-preview folders |
+| `settings.rs` | settings.json: per-site download permission, zoom, keyboard choices, appearance (light/dark/system), developer mode |
+| `preview.rs` | File previews (PDF, pictures, video, audio): kind from the bytes, name must match, size, no links; private per-preview folders |
 | `cleanup.rs` | Profile deletion as a persisted, verified, retryable job |
 | `privacy.rs` | Settings & Privacy window (⌘,) and redacted diagnostics export |
 | `web.rs` | Web views, data stores, sleeping tabs, navigation/UI delegates, page dialogs (sheets), crash guard, popups, network watch |
@@ -109,6 +110,11 @@ Profiles and tabs carry over; the Swift app reads `clients.json` unchanged.
 
 To go back to 1.0.0 (before folder downloads and PDF tabs):
 `rm -rf /Applications/ZClients.app && ditto backup/ZClients-1.0.0.app /Applications/ZClients.app`.
+
+To go back to 2.3.1 after installing 2.4.0 (no data changes; settings.json
+gains `appearance`, which 2.3.1 ignores; picture/video/audio tabs from 2.4
+show "This file is no longer available" in 2.3.1):
+`rm -rf /Applications/ZClients.app && ditto backup/ZClients-2.3.1.app /Applications/ZClients.app`.
 
 To go back to 2.3.0 after installing 2.3.1 (no data changes):
 `rm -rf /Applications/ZClients.app && ditto backup/ZClients-2.3.0.app /Applications/ZClients.app`.

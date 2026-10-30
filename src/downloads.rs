@@ -353,7 +353,7 @@ define_class!(
             let preview = PREVIEWS.with_borrow_mut(|m| {
                 let p = m.get_mut(&key)?;
                 p.name = pdf_name(&suggested.to_string());
-                let path = crate::pdf::new_preview_dir().ok()?.join(&p.name);
+                let path = crate::preview::new_preview_dir().ok()?.join(&p.name);
                 p.path = Some(path.clone());
                 Some(path)
             });
@@ -435,12 +435,12 @@ define_class!(
             LIVE.with_borrow_mut(|m| m.remove(&key));
             if let Some(p) = PREVIEWS.with_borrow_mut(|m| m.remove(&key)) {
                 let Some(path) = p.path else { return };
-                match crate::pdf::adopt_downloaded(&path) {
+                match crate::preview::adopt_downloaded(&path) {
                     Ok(()) => util::later(move || {
                         crate::app::open_pdf_tab(p.client, path, p.name, p.source_url);
                     }),
                     Err(e) => {
-                        crate::pdf::remove_preview(&util::pdf_previews_dir(), &path);
+                        crate::preview::remove_preview(&util::pdf_previews_dir(), &path);
                         record_failure_note(&p.name, &format!("Not opened: {e}"));
                     }
                 }
@@ -460,7 +460,7 @@ define_class!(
             }
             if quarantined {
                 util::later(move || {
-                    show_pdf_where(|i| i.key == key);
+                    show_preview_where(|i| i.key == key);
                 });
             } else {
                 util::log("a finished download could not be quarantined");
@@ -475,7 +475,7 @@ define_class!(
             util::log(format!("download failed: {reason}"));
             if let Some(p) = PREVIEWS.with_borrow_mut(|m| m.remove(&key)) {
                 if let Some(path) = &p.path {
-                    crate::pdf::remove_preview(&util::pdf_previews_dir(), path);
+                    crate::preview::remove_preview(&util::pdf_previews_dir(), path);
                 }
                 record_failure_note(&p.name, &reason);
                 return;
@@ -533,24 +533,25 @@ pub fn pdf_name(suggested: &str) -> String {
     }
 }
 
-/// Show the listed PDF with this key as a tab. False when it is not a
-/// finished PDF, so the caller opens it some other way.
-pub fn show_pdf(key: usize) -> bool {
-    show_pdf_where(|i| i.key == key)
+/// Show the listed download with this key as a tab when it is a PDF,
+/// picture, video or audio file. False otherwise, so the caller opens it
+/// some other way.
+pub fn show_preview(key: usize) -> bool {
+    show_preview_where(|i| i.key == key)
 }
 
-fn show_pdf_where(find: impl Fn(&Item) -> bool) -> bool {
+fn show_preview_where(find: impl Fn(&Item) -> bool) -> bool {
     let found = ITEMS.with_borrow(|v| {
         let i = v.iter().find(|i| find(i)).filter(|i| i.state == State::Done && i.note.is_none())?;
-        // Named .pdf or served as a PDF, *and* the bytes are a PDF.
-        let path = i.path.clone().filter(|p| is_pdf(p) || i.mime.as_deref().is_some_and(|m| m.eq_ignore_ascii_case("application/pdf")))?;
-        crate::pdf::mime_allows_pdf(i.mime.as_deref()).then_some(())?;
+        // Named or served as a kind a tab shows, *and* the bytes are one.
+        let path = i.path.clone().filter(|p| is_pdf(p) || crate::preview::kind_by_name(p).is_some() || crate::preview::mime_is_previewable(i.mime.as_deref()))?;
+        crate::preview::mime_allows_preview(i.mime.as_deref()).then_some(())?;
         Some((i.key, path, i.name.clone(), i.client, i.source_url.clone(), i.tab))
     });
     let Some((key, path, name, client, source, tab)) = found else { return false };
-    if let Err(e) = crate::pdf::validate(&path) {
-        if e == crate::pdf::PdfError::NotPdf {
-            update(key, |i| i.note = Some("Named like a PDF but is not one; not opened".into()));
+    if let Err(e) = crate::preview::sniff(&path) {
+        if e == crate::preview::PreviewError::NotPreviewable {
+            update(key, |i| i.note = Some("Its contents are not what its name says; not opened".into()));
         }
         return false;
     }
@@ -561,7 +562,8 @@ fn show_pdf_where(find: impl Fn(&Item) -> bool) -> bool {
     }
     // Its own profile, or the one in front if that profile is gone.
     let active = crate::app::store(|s| s.active_client_id);
-    let opened = client.and_then(|c| crate::app::open_downloaded_pdf(c, &path, &name, source.clone())).or_else(|| crate::app::open_downloaded_pdf(active?, &path, &name, source));
+    let opened =
+        client.and_then(|c| crate::app::open_downloaded_preview(c, &path, &name, source.clone())).or_else(|| crate::app::open_downloaded_preview(active?, &path, &name, source));
     match opened {
         Some(tab) => {
             ITEMS.with_borrow_mut(|v| {
@@ -595,7 +597,7 @@ pub fn save_bytes(data: Vec<u8>, suggested: &str, client: Option<Uuid>) {
         && client.is_some()
     {
         util::later(move || {
-            show_pdf_where(|i| i.key == key);
+            show_preview_where(|i| i.key == key);
         });
     }
 }

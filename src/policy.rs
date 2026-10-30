@@ -92,6 +92,28 @@ pub fn data_centre_of(url: &Url) -> Option<&'static str> {
     ZOHO_DATA_CENTRES.iter().copied().find(|dc| host.ends_with(&format!(".{dc}")))
 }
 
+/// Where to open a Zoho app's bare address outside the US data centre.
+/// Signed out, Zoho sends most of them (crm.zoho.ae, desk.zoho.eu,
+/// books.zoho.ae...) to its marketing site on www.zoho.com, whose Sign In is
+/// the US one, so the client never reaches its own region. That data
+/// centre's sign-in page with the app as `serviceurl` stays in the region,
+/// and goes straight on to the app when already signed in. Only
+/// `https://<app>.<data centre>/` itself; any other address loads as typed.
+pub fn regional_entry(url: &Url) -> Option<Url> {
+    if !is_https(url) || !matches!(url.path(), "" | "/") || url.query().is_some() || url.port().is_some() {
+        return None;
+    }
+    let host = host_lower(url)?;
+    let dc = ZOHO_DATA_CENTRES.iter().copied().filter(|dc| *dc != "zoho.com").find(|dc| host.ends_with(&format!(".{dc}")))?;
+    let app = crate::apps::app_for_host(&host)?;
+    if host != format!("{}.{dc}", app.slug) {
+        return None;
+    }
+    let mut entry = Url::parse(&format!("https://accounts.{dc}/signin")).ok()?;
+    entry.query_pairs_mut().append_pair("serviceurl", &format!("https://{host}/"));
+    Some(entry)
+}
+
 /// Identity providers a Zoho organisation can federate its sign-in to
 /// (Microsoft Entra / personal Microsoft accounts, Sign in with Apple, Okta,
 /// OneLogin). Exact hosts, or every host under a provider's own tenant
@@ -558,6 +580,27 @@ mod tests {
     fn req(url: &str, main: bool, gesture: bool) -> Request {
         let o = Origin::of(&parse(url).unwrap());
         Request { origin: o.clone(), top: if main { o } else { Origin::of(&u("https://crm.zoho.com/")) }, main_frame: main, user_gesture: gesture, workspace: Workspace::Zoho }
+    }
+
+    #[test]
+    fn bare_app_addresses_outside_the_us_sign_in_in_their_own_region() {
+        let e = regional_entry(&u("https://crm.zoho.ae")).unwrap();
+        assert_eq!(e.as_str(), "https://accounts.zoho.ae/signin?serviceurl=https%3A%2F%2Fcrm.zoho.ae%2F");
+        assert_eq!(regional_entry(&u("https://desk.zoho.eu/")).unwrap().host_str(), Some("accounts.zoho.eu"));
+        assert_eq!(regional_entry(&u("https://crm.zohocloud.ca/")).unwrap().host_str(), Some("accounts.zohocloud.ca"));
+        for kept in [
+            "https://crm.zoho.com/",
+            "https://crm.zoho.ae/crm/org1/tab/Home",
+            "https://crm.zoho.ae/?a=1",
+            "https://www.zoho.ae/",
+            "https://accounts.zoho.ae/",
+            "https://evil.crm.zoho.ae/",
+            "https://crm.zoho.ae.evil.net/",
+            "http://crm.zoho.ae/",
+            "https://notanapp.zoho.ae/",
+        ] {
+            assert_eq!(regional_entry(&u(kept)), None, "{kept} loads as typed");
+        }
     }
 
     #[test]

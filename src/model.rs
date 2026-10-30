@@ -921,7 +921,9 @@ impl Store {
 
     pub fn open_app(&mut self, tab_id: Uuid, app: &ZohoApp) -> Vec<Effect> {
         let dc = self.clients.iter().find(|c| c.tabs.iter().any(|t| t.id == tab_id)).and_then(|c| c.data_centre.clone());
-        self.navigate_tab(tab_id, Some(app.url_in(dc.as_deref())), None)
+        let url = app.url_in(dc.as_deref());
+        let url = policy::parse(&url).and_then(|u| policy::regional_entry(&u)).map(|u| u.to_string()).unwrap_or(url);
+        self.navigate_tab(tab_id, Some(url), None)
     }
 
     /// The tab showed a page of a Zoho app: remember its data centre for the
@@ -1478,7 +1480,11 @@ mod tests {
         assert!(Store::from_json(&serde_json::to_vec(&extra).unwrap()).is_ok(), "unknown keys never fail a load");
         let launcher_tab = store.clients[1].tabs[1].id;
         store.open_app(launcher_tab, &ZOHO_APPS[0]);
-        assert_eq!(store.find_tab(launcher_tab).unwrap().url.as_deref(), Some("https://crm.zoho.eu"));
+        assert_eq!(
+            store.find_tab(launcher_tab).unwrap().url.as_deref(),
+            Some("https://accounts.zoho.eu/signin?serviceurl=https%3A%2F%2Fcrm.zoho.eu%2F"),
+            "outside the US the launcher goes through the region's own sign-in"
+        );
     }
 
     #[test]

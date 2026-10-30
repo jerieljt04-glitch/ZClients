@@ -177,6 +177,21 @@ pub fn client_tint_alpha(dark: bool) -> f64 {
     if dark { 0.10 } else { 0.07 }
 }
 
+/// Make the whole app (window, sheets, Settings, pages) light, dark, or
+/// follow the Mac. Views already re-resolve their colours when their
+/// appearance changes, so this works while the app is open.
+pub fn apply_appearance(choice: crate::settings::Appearance) {
+    use crate::settings::Appearance;
+    use objc2_app_kit::{NSAppearance, NSAppearanceNameAqua, NSAppearanceNameDarkAqua};
+    let Some(mtm) = objc2::MainThreadMarker::new() else { return };
+    let named = match choice {
+        Appearance::System => None,
+        Appearance::Light => NSAppearance::appearanceNamed(unsafe { NSAppearanceNameAqua }),
+        Appearance::Dark => NSAppearance::appearanceNamed(unsafe { NSAppearanceNameDarkAqua }),
+    };
+    objc2_app_kit::NSApplication::sharedApplication(mtm).setAppearance(named.as_deref());
+}
+
 /// Is this appearance a dark one?
 pub fn is_dark(appearance: &objc2_app_kit::NSAppearance) -> bool {
     use objc2_app_kit::{NSAppearanceNameAqua, NSAppearanceNameDarkAqua};

@@ -13,7 +13,7 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::model::{Effect, GOOGLE_SEARCH_ID, SortMode, Store, Workspace, ZOHO_APPS};
-use crate::{cleanup, keychain, pdf, policy, suggest, tabstate, ui, util, web};
+use crate::{cleanup, keychain, policy, preview, suggest, tabstate, ui, util, web};
 
 pub const SIDEBAR: u8 = 1;
 pub const TABS: u8 = 2;
@@ -217,7 +217,7 @@ pub fn apply(effects: Vec<Effect>) {
                 cleanup::start(cleanup::Job::new(client_id, &name, &stores, &tab_ids, &previews));
             }
             Effect::RemoveFile(path) => {
-                pdf::remove_preview(&util::pdf_previews_dir(), std::path::Path::new(&path));
+                preview::remove_preview(&util::pdf_previews_dir(), std::path::Path::new(&path));
             }
         }
     }
@@ -325,7 +325,7 @@ pub fn confirm_delete_client(id: Uuid) {
     let Some(name) = store(|s| s.client(id).filter(|c| !c.is_search()).map(|c| c.name.clone())) else { return };
     let (button, _) = web::run_alert(
         &format!("Delete “{name}”?"),
-        "This signs the client out and removes its tabs, website data (cookies and storage), saved session, saved login and PDF previews from this Mac. Files in your Downloads folder are not touched.",
+        "This signs the client out and removes its tabs, website data (cookies and storage), saved session, saved login and file previews from this Mac. Files in your Downloads folder are not touched.",
         &["Delete", "Cancel"],
         None,
     );
@@ -590,17 +590,18 @@ pub fn open_pdf_tab(client: Uuid, path: std::path::PathBuf, title: String, sourc
     tab
 }
 
-/// Show a PDF from ~/Downloads as a tab of `client`. The tab gets its own
-/// copy in the previews folder, so closing the tab never touches the user's
-/// file and moving or renaming that file never breaks the tab.
-pub fn open_downloaded_pdf(client: Uuid, path: &std::path::Path, name: &str, source_url: Option<String>) -> Option<Uuid> {
+/// Show a PDF, picture, video or audio file from ~/Downloads as a tab of
+/// `client`. The tab gets its own copy in the previews folder, so closing
+/// the tab never touches the user's file and moving or renaming that file
+/// never breaks the tab.
+pub fn open_downloaded_preview(client: Uuid, path: &std::path::Path, name: &str, source_url: Option<String>) -> Option<Uuid> {
     store(|s| s.client(client).map(|_| ()))?;
-    // Copied through the descriptor that was checked to be a PDF, into its
-    // own private folder.
-    let copy = match pdf::copy_into_preview(path, name) {
+    // Copied through the descriptor whose bytes were checked, into its own
+    // private folder, named for what those bytes are.
+    let copy = match preview::copy_into_preview(path, name) {
         Ok(c) => c,
         Err(e) => {
-            util::log(format!("a downloaded file was not opened as a PDF tab: {e}"));
+            util::log(format!("a downloaded file was not opened as a tab: {e}"));
             return None;
         }
     };
@@ -681,6 +682,7 @@ pub fn address_entered(text: &str) {
 }
 
 fn load_destination(url: Url) {
+    let url = policy::regional_entry(&url).unwrap_or(url);
     let Some((_client, tab, ws, launcher)) = store(|s| s.active_tab().map(|(c, t)| (c.id, t.id, t.effective_workspace(), t.url.is_none() || t.pdf_path.is_some()))) else {
         return;
     };
@@ -734,9 +736,9 @@ pub fn prune_previews() -> usize {
     if READ_ONLY.get() {
         return 0;
     }
-    let n = pdf::prune(&util::pdf_previews_dir(), &referenced_previews());
+    let n = preview::prune(&util::pdf_previews_dir(), &referenced_previews());
     if n > 0 {
-        util::log(format!("removed {n} unused PDF preview(s)"));
+        util::log(format!("removed {n} unused preview(s)"));
     }
     n
 }
@@ -749,10 +751,10 @@ fn migrate_flat_previews() {
     let tabs: Vec<(Uuid, String, String)> = store(|s| s.clients.iter().flat_map(|c| c.tabs.iter().filter_map(|t| Some((t.id, t.pdf_path.clone()?, t.title.clone())))).collect());
     for (tab, path, title) in tabs {
         let p = std::path::Path::new(&path);
-        if pdf::preview_dir_of(&root, p).is_some() {
+        if preview::preview_dir_of(&root, p).is_some() {
             continue;
         }
-        let moved = pdf::migrate_flat(&root, p, &title).map(|m| m.to_string_lossy().into_owned());
+        let moved = preview::migrate_flat(&root, p, &title).map(|m| m.to_string_lossy().into_owned());
         mutate(TABS | CONTENT, |s| s.set_pdf_path(tab, moved));
     }
 }

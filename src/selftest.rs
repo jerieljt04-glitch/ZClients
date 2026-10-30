@@ -84,7 +84,7 @@ fn prep() {
 
 fn report(step: &str) {
     let tabs = app::store(|s| {
-        s.active_client().map(|c| c.tabs.iter().map(|t| format!("{:?}{}", t.display_title(), if t.pdf_path.is_some() { " [pdf]" } else { "" })).collect::<Vec<_>>())
+        s.active_client().map(|c| c.tabs.iter().map(|t| format!("{:?}{}", t.display_title(), if t.pdf_path.is_some() { " [preview]" } else { "" })).collect::<Vec<_>>())
     });
     let files = downloads::with_items(|v| v.iter().map(|i| format!("{} {:?}", i.name, i.state)).collect::<Vec<_>>());
     let mtm = MainThreadMarker::new().unwrap();
@@ -206,7 +206,7 @@ fn downloads_test() {
         app::cycle_tab(-1);
         util::after(0.5, || {
             let first = downloads::with_items(|v| v.first().map(|i| i.key()));
-            let shown = first.is_some_and(downloads::show_pdf);
+            let shown = first.is_some_and(downloads::show_preview);
             util::after(0.5, move || report(&format!("after picking it from the list again (shown={shown})")));
         });
     });
@@ -217,6 +217,40 @@ fn downloads_test() {
     });
     util::after(45.0, || {
         report("after the PDF viewer's download button");
+        app::select_tab_index(0);
+    });
+    util::after(46.0, || {
+        // A picture the page downloads opens as a tab too; an SVG (it can
+        // carry scripts) stays a file.
+        web::eval_active(
+            r#"(() => {
+            const c = document.createElement('canvas');
+            c.width = 64; c.height = 32;
+            const g = c.getContext('2d'); g.fillStyle = '#3366cc'; g.fillRect(0, 0, 64, 32);
+            c.toBlob(b => {
+                const a = document.createElement('a');
+                a.href = URL.createObjectURL(b); a.download = 'Chart.png';
+                document.body.appendChild(a); a.click();
+                setTimeout(() => {
+                    const s = document.createElement('a');
+                    s.href = URL.createObjectURL(new Blob(['<svg xmlns="http://www.w3.org/2000/svg"/>'], {type: 'image/svg+xml'}));
+                    s.download = 'Logo.svg';
+                    document.body.appendChild(s); s.click();
+                }, 1500);
+            }, 'image/png');
+            return 'picture and svg downloads clicked';
+        })()"#,
+            |r| util::log(format!("SELFTEST image download: {r}")),
+        );
+    });
+    util::after(51.0, || {
+        report("after picture and svg downloads");
+        web::eval_active(
+            "(() => location.protocol + ' ' + document.contentType + ' images=' + document.images.length + ' width=' + (document.images[0] || {}).naturalWidth)()",
+            |r| util::log(format!("SELFTEST picture tab: {r}")),
+        );
+    });
+    util::after(53.0, || {
         util::log("SELFTEST done");
         app::quit_without_asking();
     });
@@ -701,7 +735,9 @@ fn editor_test() {
             const ta = ed.appendChild(document.createElement('textarea'));
             ta.style.cssText = 'position:absolute;width:1px;height:1px;opacity:0';
             window.__zcKeys = [];
-            ta.addEventListener('keydown', e => { if (e.metaKey) { window.__zcKeys.push((e.shiftKey ? 'shift+' : '') + 'cmd+' + e.key.toLowerCase()); e.preventDefault(); } });
+            // Like an editor with Save but no Find of its own: ⌘F / ⌘G are
+            // left unhandled, so the app's find bar must open.
+            ta.addEventListener('keydown', e => { if (e.metaKey) { const k = e.key.toLowerCase(); window.__zcKeys.push((e.shiftKey ? 'shift+' : '') + 'cmd+' + k); if (k !== 'f' && k !== 'g') { e.preventDefault(); } } });
             const plain = document.body.appendChild(document.createElement('textarea'));
             plain.id = 'zc-plain';
             plain.value = 'line one\nline two\nline three';
@@ -720,16 +756,26 @@ fn editor_test() {
     let real = std::env::var_os("ZCLIENTS_REAL_KEYS").is_some();
     util::after(13.0, move || {
         if real {
-            util::log(format!("SELFTEST EDITOR real keys now: cmd+a cmd+z shift+cmd+z ctrl+a (pid {})", std::process::id()));
+            util::log(format!("SELFTEST EDITOR real keys now: cmd+a cmd+z shift+cmd+z ctrl+a cmd+s cmd+f (pid {})", std::process::id()));
         } else {
             press("a", 0, NSEventModifierFlags::Command);
             press("z", 6, NSEventModifierFlags::Command);
             press("z", 6, NSEventModifierFlags::Command | NSEventModifierFlags::Shift);
             press("a", 0, NSEventModifierFlags::Control);
+            press("s", 1, NSEventModifierFlags::Command);
+            press("f", 3, NSEventModifierFlags::Command);
         }
-        util::after(if real { 2.0 } else { 1.0 }, || web::eval_active("JSON.stringify(window.__zcKeys)", |r| util::log(format!("SELFTEST EDITOR code editor received: {r}"))));
+        util::after(if real { 7.0 } else { 1.0 }, || {
+            web::eval_active("JSON.stringify(window.__zcKeys)", |r| util::log(format!("SELFTEST EDITOR code editor received: {r}")));
+            // ⌘S was the editor's (the sidebar stays); ⌘F reached the editor
+            // first and, unhandled there, opened the app's find bar.
+            util::log(format!("SELFTEST EDITOR sidebar visible={} find bar={}", ui::sidebar_visible(), ui::find_visible()));
+            if ui::find_visible() {
+                ui::editor_left_find_key("close");
+            }
+        });
     });
-    util::after(15.5, move || {
+    util::after(if real { 21.0 } else { 15.5 }, move || {
         web::eval_active("(() => { const p = document.getElementById('zc-plain'); p.focus(); p.setSelectionRange(0, 0); return 'plain box focused'; })()", |r| {
             util::log(format!("SELFTEST EDITOR {r}"))
         });
@@ -739,7 +785,7 @@ fn editor_test() {
             } else {
                 press("a", 0, NSEventModifierFlags::Command);
             }
-            util::after(if real { 1.5 } else { 0.8 }, || {
+            util::after(if real { 3.0 } else { 0.8 }, || {
                 web::eval_active(
                     "(() => { const p = document.getElementById('zc-plain'); return 'selected ' + (p.selectionEnd - p.selectionStart) + ' of ' + p.value.length; })()",
                     |r| util::log(format!("SELFTEST EDITOR plain text box after ⌘A: {r}")),
@@ -747,7 +793,7 @@ fn editor_test() {
             });
         });
     });
-    util::after(20.0, || {
+    util::after(if real { 27.0 } else { 20.0 }, || {
         util::log("SELFTEST done");
         app::quit_without_asking();
     });
@@ -853,7 +899,7 @@ fn security_test() {
     util::after(24.0, || {
         // An HTML file disguised as a PDF must not be shown; a real one is.
         let Some(client) = app::store(|s| s.active_client_id) else { return };
-        let dir = crate::pdf::new_preview_dir().unwrap();
+        let dir = crate::preview::new_preview_dir().unwrap();
         let fake = dir.join("fake.pdf");
         std::fs::write(&fake, b"<html><body>not a pdf</body></html>").unwrap();
         app::open_pdf_tab(client, fake, "fake.pdf".into(), None);
@@ -862,7 +908,7 @@ fn security_test() {
             let src = std::env::temp_dir().join("zc-selftest-real.pdf");
             std::fs::write(&src, b"%PDF-1.1\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj 2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj 3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 300 144]>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF").unwrap();
             let client = app::store(|s| s.active_client_id).unwrap();
-            let opened = app::open_downloaded_pdf(client, &src, "Real.pdf", None);
+            let opened = app::open_downloaded_preview(client, &src, "Real.pdf", None);
             util::after(2.5, move || {
                 web::eval_active("location.protocol", move |r| util::log(format!("SELFTEST SEC real PDF tab opened={} protocol={r}", opened.is_some())));
                 let path = app::store(|s| s.active_tab().and_then(|(_, t)| t.pdf_path.clone())).unwrap_or_default();

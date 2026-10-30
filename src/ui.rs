@@ -803,8 +803,9 @@ define_class!(
         #[unsafe(method(downloadItem:))]
         fn a_download_item(&self, s: Option<&NSMenuItem>) {
             let Some(key) = s.map(|s| s.tag() as usize) else { return };
-            // PDFs open as a tab here, never in Preview.
-            if downloads::show_pdf(key) {
+            // PDFs, pictures, video and audio open as a tab here, never in
+            // Preview or another app.
+            if downloads::show_preview(key) {
                 return;
             }
             if let Some(path) = downloads::path_of(key) {
@@ -1135,12 +1136,18 @@ pub fn show_load_error(tab: Uuid, kind: web::LoadError, failing_url: Option<Stri
 pub fn network_restored() {
     let offline: Vec<(Uuid, Option<String>)> =
         LOAD_ERRORS.with_borrow_mut(|m| m.extract_if(|_, (kind, _)| *kind == web::LoadError::Offline).map(|(tab, (_, url))| (tab, url)).collect());
-    if offline.is_empty() {
+    // Pages that loaded during the outage without the app's offline screen
+    // (Zoho's own error, a service worker's offline copy).
+    let stale: Vec<Uuid> = web::take_loaded_offline().into_iter().filter(|t| !offline.iter().any(|(o, _)| o == t)).collect();
+    if offline.is_empty() && stale.is_empty() {
         return;
     }
-    util::log(format!("retrying {} offline tab(s)", offline.len()));
+    util::log(format!("retrying {} offline tab(s), reloading {} loaded while offline", offline.len(), stale.len()));
     for (tab, url) in offline {
         web::reload_tab_at(tab, url.as_deref().and_then(crate::policy::parse).as_ref());
+    }
+    for tab in stale {
+        web::reload_tab_at(tab, None);
     }
     refresh(app::CONTENT);
 }
@@ -1168,7 +1175,7 @@ fn load_error_text(kind: web::LoadError, url: Option<&str>) -> (String, String) 
             ("This page stopped working".into(), format!("{host} closed unexpectedly more than once, so ZClients stopped reloading it. Try Again to load it once more."))
         }
         web::LoadError::PdfMissing => (
-            "This PDF is no longer available".into(),
+            "This file is no longer available".into(),
             if url.is_some_and(|u| u.starts_with("https:")) {
                 format!("Its preview copy was removed or is damaged. Re-download fetches it again from {host}.")
             } else {
@@ -2297,8 +2304,9 @@ fn refresh_tabs() {
         let call = web::call_state(t.id);
         // State in words, never by colour alone.
         let mut ax = title.clone();
-        if t.pdf_path.is_some() {
-            ax.push_str(", PDF");
+        if let Some(path) = t.pdf_path.as_deref() {
+            let kind = crate::preview::kind_by_name(std::path::Path::new(path)).unwrap_or(crate::preview::Kind::Pdf);
+            ax.push_str(&format!(", {}", kind.word()));
         }
         if let Some((camera, mic)) = call {
             ax.push_str(match (camera, mic) {
@@ -2860,6 +2868,16 @@ fn toggle_sidebar() {
         u.root.setNeedsLayout(true);
         u.toolbar.setNeedsLayout(true);
     });
+}
+
+/// A code editor got ⌘F / ⌘G / ⇧⌘G and left it unhandled: the app's find.
+pub fn editor_left_find_key(key: &str) {
+    match key {
+        "f" => show_find(true),
+        "g" => run_find(false),
+        "shift+g" => run_find(true),
+        _ => show_find(false),
+    }
 }
 
 fn show_find(visible: bool) {

@@ -5,7 +5,7 @@
 ```sh
 scripts/check.sh          # every CI gate (fmt, clippy, tests, property tests,
                           # audit, deny, universal build, Miri)
-cargo test                # 139 unit / migration / failure-injection / property tests
+cargo test                # 144 unit / migration / failure-injection / property tests
 ./build.sh --test         # "ZClients Test": own bundle id + data, ad-hoc signed
 ```
 
@@ -40,8 +40,8 @@ question with its first / last button and logs it.
 | `security` | Inspector off; WebKit UA + installed Safari version; sign-in helper absent off accounts.zoho.*; popup / download / mailto without a click all ask (declined → nothing happens); camera on www.zoho.com is *asked*, on meet.google.com *allowed* with two live tracks; Stop ends capture and the keep-awake assertion; an HTML file named .pdf is not shown; a real PDF opens from a 0700/0600 private folder |
 | `a11y` | Every toolbar/tab/sidebar control has a VoiceOver name; tabs are AXRadioButton/AXTabButton in an AXTabGroup with one selected; ←/→, Return, ⌥⇧→ work on the tab strip and focus stays there |
 | `address2` | Typed address text is dropped on tab switch and never navigates on page click; Esc restores; a Return for a tab no longer in front is dropped; Return on the same tab navigates |
-| `editor` | ⌘A, ⌘Z, ⇧⌘Z and Control-A reach a code editor's own key handler (CodeMirror/Ace/Monaco/hidden-textarea editors such as Zoho's Deluge editor); ⌘A in a plain text box still selects all With `ZCLIENTS_REAL_KEYS=1` the test logs `SELFTEST EDITOR real keys now: …` and waits for posted keyboard events (the test app must be frontmost); simulated keys failed on 2.2.0 and 2.3.0 alike on 2026-10-30, real keys pass. |
-| `downloads` | PDF popups become tabs with viewer controls; hidden-frame and popup zips download; PDF attachments open as tabs; the PDF viewer's download button saves; every file is quarantined |
+| `editor` | ⌘A, ⌘Z, ⇧⌘Z, Control-A and (2.4) ⌘S and ⌘F reach a code editor's own key handler (CodeMirror/Ace/Monaco/hidden-textarea editors such as Zoho's Deluge editor); ⌘S leaves the sidebar alone; the fixture leaves ⌘F unhandled, so the app's find bar opens (once) as the fallback; ⌘A in a plain text box still selects all. With `ZCLIENTS_REAL_KEYS=1` the test logs `SELFTEST EDITOR real keys now: …` and waits for posted keyboard events (the test app must be frontmost); simulated keys are unreliable here, real keys pass (2.4.0, 2026-10-31). |
+| `downloads` | PDF popups become tabs with viewer controls; hidden-frame and popup zips download; PDF attachments open as tabs; the PDF viewer's download button saves; (2.4) a downloaded PNG opens as a picture tab (`image/png`), an SVG stays a file; every file is quarantined |
 | `search` (2.1) | Google Search workspace: a Zoho page stays in the Search tab; example.com is blocked both by script and when typed (page kept, "can't be opened here" shown); a Meet link opens in a client, which comes to the front |
 | `stability` (2.0) | U6 closing a tab in a call asks; U1 a newer download leaves an item's key on the same file; S1 quitting with a download and a call asks (decline: both continue; accept: real quit path, partial file deleted); S2 a page whose WebContent process is killed twice shows "This page stopped working" instead of reloading |
 | `parity` (2.3) | In-page UI works like Chrome: one click on a fixture button (loaded with `loadHTMLString`, base www.zoho.com) opens a sliding panel; transform + width transitions, keyframes, Web Animations and a rAF tween all finish within 1 s, the panel ends at `transform: none`, rAF ≥ 25 fps in Low Power Mode (≥ 55 otherwise), the page keeps focus and gets no blur. Run once with ZClients active and once with Finder in front. With `ZCLIENTS_REAL_CLICK=1` the second click must come from outside: the log says `SELFTEST PARITY real click at X Y` (global points) and a real mouse click has to be posted there within 4 s (a CGEvent from a process with Accessibility access); without it the click is sent through `NSApp.sendEvent`, which never activates the app, so only `hasFocus` can fail. Third round (B7): HTML5 drag and drop, started with Finder in front: `dragstart`, `dragover` and a `drop` carrying the dragged data. It needs a real drag (`SELFTEST PARITY real drag from X Y to X Y`: post mouse down, ~30 dragged moves, up); without `ZCLIENTS_REAL_CLICK=1` it logs "not run" |
@@ -87,6 +87,14 @@ slides in a Settings panel in Chrome, nothing in ZClients.
 ## Manual verification checklist (real app, real accounts)
 
 Run on the test app first; on the real app only after installing 2.0.0.
+
+**New in 2.4.0** (from the owner's real-account pass on 2026-10-31)
+- [ ] Deluge function editor (CRM › Setup › Functions): ⌘F opens the editor's own search, not the app's find bar; ⌘S saves the function and the client list stays put; ⌘/ comments a line.
+- [ ] A JPEG/PNG attachment (CRM, Desk, WorkDrive, Mail) opens as a tab; so does an MP4 or MP3. A .docx/.xlsx/.csv still only downloads.
+- [ ] UAE client (or any non-US region): type `crm.zoho.ae` (or pick CRM in the launcher) → the **zoho.ae** sign-in page, never www.zoho.com; after signing in, CRM opens on crm.zoho.ae and the launcher uses .ae from then on.
+- [ ] Wi-Fi off, open or reload a Zoho page (it shows Zoho's own or the app's offline screen), Wi-Fi on → that tab reloads by itself within a few seconds. Pages that were already open before Wi-Fi went off are not reloaded.
+- [ ] Settings (⌘,) › Appearance: Light, Dark and Same as the Mac switch the window at once and are kept after relaunch.
+- [ ] ⌘Q (or ZClients › Quit, or Quit in the Dock menu) while a large download runs → "Quit and cancel 1 download?". The red close button only hides the window (2.3.1): nothing is asked and the download continues.
 
 **New in 2.3.0** (the gap that let the Analytics panel bug ship: no manual pass ever clicked through real page UI)
 - [ ] Zoho Analytics report editor → gear next to View Mode → the Settings panel slides in and the chart narrows, (a) with ZClients already active, (b) clicking the gear straight from another app (Cliq, Chrome) with ZClients behind it. The slide looks like Chrome's (30 fps in Low Power Mode is a macOS limit, see BACKLOG A3).

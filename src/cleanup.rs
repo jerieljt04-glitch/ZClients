@@ -181,7 +181,7 @@ impl Cleaner for Disk {
     fn preview(&self, path: &str) -> Result<(), String> {
         let root = util::pdf_previews_dir();
         let p = std::path::Path::new(path);
-        crate::pdf::remove_preview(&root, p);
+        crate::preview::remove_preview(&root, p);
         if p.exists() { Err("still present".into()) } else { Ok(()) }
     }
 

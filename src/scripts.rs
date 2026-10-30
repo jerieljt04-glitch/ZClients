@@ -8,9 +8,11 @@ pub const EDITOR_HANDLER: &str = "zcEditor";
 /// Tells the app whether the keyboard is in a code editor (CodeMirror, Ace,
 /// Monaco, or any editor that types into a hidden text field and draws the
 /// text itself — Zoho's Deluge editor among them). Those editors implement
-/// Select All and Undo in their own key handlers, so the app sends them
-/// ⌘A / ⌘Z / ⇧⌘Z as keystrokes instead of running the menu command, which
-/// would only act on the hidden field. Reports a yes/no only; never text.
+/// Select All, Undo, Find, Save, Comment and Indent in their own key
+/// handlers, so the app sends them those shortcuts as keystrokes instead of
+/// running its own menu command (see `web::editor_owned_shortcut`). When the
+/// editor leaves ⌘F / ⌘G / ⇧⌘G unhandled, the app's find bar opens after
+/// all. Reports a yes/no and the unhandled find key only; never text.
 pub const EDITOR_HOOK: &str = r#"
 (function () {
   if (window.__zcEditorHook) { return; }
@@ -36,6 +38,14 @@ pub const EDITOR_HOOK: &str = r#"
     report(isCodeEditor(e.target));
   }, true);
   document.addEventListener('focusout', function (e) { if (!e.relatedTarget) { report(false); } }, true);
+  // Bubble phase on the window: after the editor's own handlers.
+  window.addEventListener('keydown', function (e) {
+    if (!e.metaKey || e.ctrlKey || e.altKey || e.defaultPrevented || !isCodeEditor(document.activeElement)) { return; }
+    var k = (e.key || '').toLowerCase();
+    if ((k === 'f' && !e.shiftKey) || k === 'g') {
+      try { window.webkit.messageHandlers.zcEditor.postMessage({ unhandled: e.shiftKey ? 'shift+' + k : k }); } catch (x) {}
+    }
+  }, false);
 })();
 "#;
 pub const LOGIN_HANDLER: &str = "zcLogin";

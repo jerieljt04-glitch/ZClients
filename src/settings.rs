@@ -20,6 +20,17 @@ pub enum SitePermission {
     Block,
 }
 
+/// Light or dark for the app's window and the pages in it.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum Appearance {
+    /// Follow System Settings › Appearance.
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Settings {
@@ -38,6 +49,9 @@ pub struct Settings {
     /// page (Chrome's behaviour). Off: that click only brings ZClients
     /// forward (Safari's behaviour).
     pub first_click_reaches_page: bool,
+    /// Light, dark, or as the Mac is set. Pages see it as
+    /// `prefers-color-scheme`.
+    pub appearance: Appearance,
     /// Origin ("https://crm.zoho.com") → what to do when it starts a
     /// download without a recent click.
     pub downloads: BTreeMap<String, SitePermission>,
@@ -53,6 +67,7 @@ impl Default for Settings {
             control_a_selects_all: true,
             page_owns_editor_shortcuts: true,
             first_click_reaches_page: true,
+            appearance: Appearance::System,
             downloads: BTreeMap::new(),
             zoom: BTreeMap::new(),
         }
@@ -160,5 +175,9 @@ mod tests {
         assert!(s.first_click_reaches_page, "a 2.2 settings file gets Chrome-like first clicks");
         let s: Settings = serde_json::from_str("{}").unwrap();
         assert_eq!(s, Settings::default());
+        assert_eq!(s.appearance, Appearance::System, "a 2.3 settings file follows the Mac");
+        let s: Settings = serde_json::from_str(r#"{"appearance":"dark"}"#).unwrap();
+        assert_eq!(s.appearance, Appearance::Dark);
+        assert!(serde_json::to_string(&s).unwrap().contains(r#""appearance":"dark""#));
     }
 }

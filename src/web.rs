@@ -162,11 +162,13 @@ define_class!(
             // Control+A selects all too, the way it does in browsers on
             // Windows (on a Mac it would only move to the start of a line).
             // A setting turns this back into the Mac behaviour.
-            // In a code editor, Select All / Undo / Redo are the editor's own:
-            // it gets the keystroke, as in Safari.
+            // In a code editor, its own shortcuts (Select All, Undo, Find,
+            // Save, Comment...) are the editor's: it gets the keystroke, as in
+            // Safari, and the app's menu command does not run as well.
             if self.ivars().code_editor.get() {
                 use objc2_app_kit::NSEventModifierFlags as M;
-                if is_key(event, "a", M::Command) || is_key(event, "z", M::Command) || is_key(event, "z", M::Command | M::Shift) {
+                let chars = event.charactersIgnoringModifiers().map(|c| c.to_string()).unwrap_or_default();
+                if editor_owned_shortcut(&chars, event.modifierFlags()) {
                     unsafe {
                         let _: () = msg_send![self, keyDown: event];
                     }
@@ -263,6 +265,23 @@ pub fn page_owned_shortcut(chars: &str, mods: objc2_app_kit::NSEventModifierFlag
         return true;
     }
     page_owns_editor_keys && ((held == M::Command && matches!(key.as_str(), "d" | "s" | "k")) || (held == M::Command | M::Shift && key == "s"))
+}
+
+/// Shortcuts a focused code editor handles itself (CodeMirror, Ace, Monaco,
+/// Zoho's Deluge editor): Select All, Undo/Redo, Find / Find Next / Previous
+/// / Replace, Save, Duplicate line, Toggle comment, Indent/Outdent. The
+/// clipboard keys stay on the menu route, which still reaches the editor.
+pub fn editor_owned_shortcut(chars: &str, mods: objc2_app_kit::NSEventModifierFlags) -> bool {
+    use objc2_app_kit::NSEventModifierFlags as M;
+    let held = mods & (M::Command | M::Shift | M::Option | M::Control);
+    let key = chars.to_ascii_lowercase();
+    if held == M::Command {
+        matches!(key.as_str(), "a" | "z" | "f" | "g" | "s" | "d" | "/" | "[" | "]")
+    } else if held == M::Command | M::Shift {
+        matches!(key.as_str(), "z" | "g" | "f" | "s")
+    } else {
+        held == M::Command | M::Option && key == "f"
+    }
 }
 
 fn menu_first(event: &NSEvent, on_meet: bool) -> bool {
@@ -520,7 +539,15 @@ define_class!(
             let request = request_for(web, Some(&frame), web.ivars().workspace);
             if name == scripts::EDITOR_HANDLER {
                 if policy::decide(Capability::Bridge, &request) == Decision::Allow {
-                    web.ivars().code_editor.set(get("editor").as_deref() == Some("yes"));
+                    match get("unhandled").as_deref() {
+                        // The editor has no find of its own: the app's.
+                        Some(key @ ("f" | "g" | "shift+g")) => {
+                            let key = key.to_string();
+                            util::later(move || ui::editor_left_find_key(&key));
+                        }
+                        Some(_) => {}
+                        None => web.ivars().code_editor.set(get("editor").as_deref() == Some("yes")),
+                    }
                 }
                 return;
             }
@@ -663,6 +690,7 @@ define_class!(
         #[unsafe(method(webView:didFinishNavigation:))]
         fn did_finish(&self, web: &WKWebView, _nav: Option<&WKNavigation>) {
             self.state_changed(web);
+            note_load_while_offline(self.ivars().tab_id);
             if let Some(win) = self.ivars().popup_window.borrow().as_ref()
                 && let Some(t) = unsafe { web.title() } {
                     win.setTitle(&t);
@@ -679,7 +707,12 @@ define_class!(
         fn did_fail_provisional(&self, web: &WKWebView, _nav: Option<&WKNavigation>, e: &NSError) {
             self.ivars().external_probe.set(false);
             self.state_changed(web);
-            if let (Some(tab), Some(kind)) = (self.ivars().tab_id, load_error_kind(&e.domain().to_string(), e.code())) {
+            note_load_while_offline(self.ivars().tab_id);
+            let kind = load_error_kind(&e.domain().to_string(), e.code());
+            if kind.is_some() {
+                util::log(format!("page load failed: {} {}", e.domain(), e.code()));
+            }
+            if let (Some(tab), Some(kind)) = (self.ivars().tab_id, kind) {
                 let failing = e.userInfo().objectForKey(&util::ns("NSErrorFailingURLStringKey")).and_then(|v| v.downcast::<NSString>().ok()).map(|s| s.to_string());
                 ui::show_load_error(tab, kind, failing);
             }
@@ -689,6 +722,7 @@ define_class!(
         fn did_fail(&self, web: &WKWebView, _nav: Option<&WKNavigation>, _e: &NSError) {
             self.ivars().external_probe.set(false);
             self.state_changed(web);
+            note_load_while_offline(self.ivars().tab_id);
         }
 
         #[unsafe(method(webViewWebContentProcessDidTerminate:))]
@@ -1864,19 +1898,19 @@ pub fn view_for(client_id: Uuid, tab: &Tab) -> Retained<ZWebView> {
 fn load_tab(view: &ZWebView, tab: &Tab) {
     let ws = tab.effective_workspace();
     if let Some(path) = tab.pdf_path.as_deref() {
-        // Only a valid PDF in its own private preview folder is shown, and
-        // WebKit may read that folder alone.
+        // Only a valid preview (PDF, picture, video, audio) in its own
+        // private folder is shown, and WebKit may read that folder alone.
         let file = std::path::Path::new(path);
         let root = util::pdf_previews_dir();
-        match (crate::pdf::validate(file), crate::pdf::preview_dir_of(&root, file)) {
-            (Ok(()), Some(dir)) => {
+        match (crate::preview::validate(file), crate::preview::preview_dir_of(&root, file)) {
+            (Ok(_), Some(dir)) => {
                 let file = NSURL::fileURLWithPath(&util::ns(path));
                 let dir = NSURL::fileURLWithPath(&util::ns(&dir.to_string_lossy()));
                 unsafe { view.loadFileURL_allowingReadAccessToURL(&file, &dir) };
                 return;
             }
             (result, _) => {
-                util::log(format!("PDF tab not shown: {}", result.err().map(|e| e.to_string()).unwrap_or_else(|| "not in a preview folder".into())));
+                util::log(format!("preview tab not shown: {}", result.err().map(|e| e.to_string()).unwrap_or_else(|| "not in a preview folder".into())));
                 return explain_blank(tab.id, LoadError::PdfMissing, tab.pdf_source_url.clone());
             }
         }
@@ -1895,7 +1929,10 @@ fn load_tab(view: &ZWebView, tab: &Tab) {
         return;
     }
     let allowed = policy::parse(url).is_some_and(|u| policy::is_allowed_web(&u, ws));
-    match (allowed, util::ns_url(url)) {
+    // A bare regional app address (a tab last left on its sign-in page)
+    // goes through that region's sign-in again, not Zoho's US bounce.
+    let entry = policy::parse(url).and_then(|u| policy::regional_entry(&u)).map(|u| u.to_string());
+    match (allowed, util::ns_url(entry.as_deref().unwrap_or(url))) {
         (true, Some(nsurl)) => {
             let req = NSURLRequest::requestWithURL(&nsurl);
             unsafe { view.loadRequest(&req) };
@@ -2077,6 +2114,26 @@ const NW_PATH_STATUS_SATISFIED: i32 = 1;
 
 thread_local! {
     static ONLINE: Cell<Option<bool>> = const { Cell::new(None) };
+    /// Tabs whose page loaded, or failed to, while the Mac was offline. Such
+    /// a page shows Zoho's own "can't connect" state, or a service worker's
+    /// offline copy, not the app's offline screen, and does not recover by
+    /// itself: it is reloaded when the network is back. Pages loaded before
+    /// the outage are left alone (Zoho reconnects them, and unsaved work in
+    /// them is kept).
+    static LOADED_OFFLINE: RefCell<HashSet<Uuid>> = RefCell::new(HashSet::new());
+}
+
+fn note_load_while_offline(tab: Option<Uuid>) {
+    if let Some(tab) = tab
+        && ONLINE.get() == Some(false)
+    {
+        LOADED_OFFLINE.with_borrow_mut(|s| s.insert(tab));
+    }
+}
+
+/// The tabs that loaded while offline (see `LOADED_OFFLINE`), once.
+pub fn take_loaded_offline() -> Vec<Uuid> {
+    LOADED_OFFLINE.with_borrow_mut(|s| s.drain().collect())
 }
 
 /// Call `back_online` on the main thread each time the Mac regains a usable
@@ -2089,9 +2146,12 @@ pub fn watch_network(back_online: fn()) {
         }
         let handler = RcBlock::new(move |path: *mut c_void| {
             let online = nw_path_get_status(path) == NW_PATH_STATUS_SATISFIED;
-            if ONLINE.replace(Some(online)) == Some(false) && online {
+            let was = ONLINE.replace(Some(online));
+            if was == Some(false) && online {
                 util::log("network is back");
                 util::later(back_online);
+            } else if was != Some(false) && !online {
+                util::log("network is gone");
             }
         });
         nw_path_monitor_set_update_handler(monitor, &handler);
@@ -2707,6 +2767,36 @@ mod tests {
         assert!(!page_owned_shortcut("s", M::Command, false, false), "setting off: the app's ⌘S");
         for (k, m) in [("t", M::Command), ("w", M::Command), ("l", M::Command), ("r", M::Command), ("v", M::Command), ("1", M::Command), ("s", M::Command | M::Control)] {
             assert!(!page_owned_shortcut(k, m, true, true), "browser shortcut {k} stays with the app");
+        }
+    }
+
+    #[test]
+    fn code_editors_keep_find_save_and_comment_but_not_clipboard_or_tabs() {
+        use objc2_app_kit::NSEventModifierFlags as M;
+        for (k, m) in [
+            ("f", M::Command),
+            ("G", M::Command),
+            ("g", M::Command | M::Shift),
+            ("f", M::Command | M::Option),
+            ("s", M::Command),
+            ("/", M::Command),
+            ("[", M::Command),
+            ("z", M::Command | M::Shift),
+        ] {
+            assert!(editor_owned_shortcut(k, m), "{k} {m:?} goes to the editor");
+        }
+        for (k, m) in [
+            ("c", M::Command),
+            ("v", M::Command),
+            ("x", M::Command),
+            ("t", M::Command),
+            ("w", M::Command),
+            ("l", M::Command),
+            ("1", M::Command),
+            ("f", M::Command | M::Control),
+            ("s", M::Control),
+        ] {
+            assert!(!editor_owned_shortcut(k, m), "{k} {m:?} stays with the app");
         }
     }
 

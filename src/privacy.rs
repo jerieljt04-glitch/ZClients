@@ -114,8 +114,8 @@ define_class!(
         fn clear_previews(&self, _s: Option<&AnyObject>) {
             let n = app::clear_previews_and_download_history();
             web::run_alert(
-                "PDF previews and download history cleared",
-                &format!("{n} unused preview(s) removed. PDFs still open in a tab stay until the tab is closed. Files in your Downloads folder were not touched."),
+                "File previews and download history cleared",
+                &format!("{n} unused preview(s) removed. Files still open in a tab stay until the tab is closed. Files in your Downloads folder were not touched."),
                 &["OK"],
                 None,
             );
@@ -132,6 +132,18 @@ define_class!(
                 3 if util::is_test_build() => settings::update(|st| st.developer_mode = on),
                 _ => {}
             }
+        }
+
+        #[unsafe(method(chooseAppearance:))]
+        fn choose_appearance(&self, s: Option<&NSButton>) {
+            let Some(b) = s else { return };
+            let choice = match b.tag() {
+                1 => settings::Appearance::Light,
+                2 => settings::Appearance::Dark,
+                _ => settings::Appearance::System,
+            };
+            settings::update(|st| st.appearance = choice);
+            crate::theme::apply_appearance(choice);
         }
 
         #[unsafe(method(exportDiagnostics:))]
@@ -266,6 +278,18 @@ impl Builder {
         b.setContentTintColor(Some(&theme::destructive()));
     }
 
+    /// One choice of several: radio buttons sharing a superview and an
+    /// action form one group.
+    fn radio(&mut self, title: &str, on: bool, action: objc2::runtime::Sel, tag: isize) -> Retained<NSButton> {
+        let b = unsafe { NSButton::radioButtonWithTitle_target_action(&util::ns(title), Some(&actions()), Some(action), mtm()) };
+        b.setState(if on { NSControlStateValueOn } else { NSControlStateValueOff });
+        b.setTag(tag);
+        b.setFrame(rect(24.0, self.y, W - 48.0, 22.0));
+        self.page.addSubview(&b);
+        self.y += 26.0;
+        b
+    }
+
     fn checkbox(&mut self, title: &str, on: bool, action: objc2::runtime::Sel, tag: isize) -> Retained<NSButton> {
         let b = unsafe { NSButton::checkboxWithTitle_target_action(&util::ns(title), Some(&actions()), Some(action), mtm()) };
         b.setState(if on { NSControlStateValueOn } else { NSControlStateValueOff });
@@ -383,7 +407,7 @@ fn rebuild() {
     }
 
     // ---- downloads ---------------------------------------------------------
-    b.heading("Downloads and PDF previews");
+    b.heading("Downloads and file previews");
     b.text("A download a page starts without a recent click asks first. Apps, installers, disk images, scripts, archives and macro documents always ask.", true);
     let sites: Vec<(String, settings::SitePermission)> = settings::get(|s| s.downloads.iter().map(|(k, v)| (k.clone(), *v)).collect());
     for (i, (site, p)) in sites.iter().enumerate() {
@@ -394,8 +418,20 @@ fn rebuild() {
         };
         b.row_with_button(&format!("{site}: {what}"), "Reset", sel!(resetDownloadSite:), i as isize);
     }
-    b.destructive_row("PDF previews no tab is showing, and the downloads list", "Clear…", sel!(clearPreviews:), 0);
-    b.text("PDF previews are private copies kept only while their tab is open (or reopenable); the rest are removed at launch and at quit.", true);
+    b.destructive_row("File previews no tab is showing, and the downloads list", "Clear…", sel!(clearPreviews:), 0);
+    b.text("Downloaded PDFs, pictures, videos and audio open as tabs. Their previews are private copies kept only while their tab is open (or reopenable); the rest are removed at launch and at quit. Other files (spreadsheets, documents, archives) stay in your Downloads folder.", true);
+
+    // ---- appearance -------------------------------------------------------
+    b.heading("Appearance");
+    let current = settings::get(|s| s.appearance);
+    for (i, (title, choice)) in
+        [("Same as the Mac (System Settings › Appearance)", settings::Appearance::System), ("Light", settings::Appearance::Light), ("Dark", settings::Appearance::Dark)]
+            .into_iter()
+            .enumerate()
+    {
+        b.radio(title, current == choice, sel!(chooseAppearance:), i as isize);
+    }
+    b.text("Applies to the window and to web pages that offer a dark look (prefers-color-scheme). Zoho apps that have their own theme setting keep it.", true);
 
     // ---- keyboard ---------------------------------------------------------
     b.heading("Keyboard & mouse");
@@ -531,7 +567,7 @@ pub fn diagnostics_text() -> String {
     });
     out.push_str(&format!("profiles: {}\n", rows.len()));
     for (i, (tabs, keep, days, pdfs, login)) in rows.iter().enumerate() {
-        out.push_str(&format!("  profile {}: {tabs} tab(s), {pdfs} PDF tab(s), keep signed in: {keep} ({days} d), saved login: {login}\n", i + 1));
+        out.push_str(&format!("  profile {}: {tabs} tab(s), {pdfs} preview tab(s), keep signed in: {keep} ({days} d), saved login: {login}\n", i + 1));
     }
     out.push_str(&format!("awake tabs: {}\ncalls: {}\nkeeping display awake: {}\n", web::live_tabs().len(), web::tabs_in_calls().len(), web::keeping_awake()));
     for f in web::tab_footprints() {
@@ -544,10 +580,11 @@ pub fn diagnostics_text() -> String {
     }
     let s = settings::get(|s| s.clone());
     out.push_str(&format!(
-        "settings: control-A select-all {}, page owns editor keys {}, first click reaches page {}, developer mode {}, inspector allowed {}\n",
+        "settings: control-A select-all {}, page owns editor keys {}, first click reaches page {}, appearance {:?}, developer mode {}, inspector allowed {}\n",
         s.control_a_selects_all,
         s.page_owns_editor_shortcuts,
         s.first_click_reaches_page,
+        s.appearance,
         s.developer_mode,
         settings::web_inspector_allowed()
     ));
