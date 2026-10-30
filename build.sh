@@ -17,7 +17,7 @@
 # prompts for the password) or the build is signed ad hoc.
 set -euo pipefail
 cd "$(dirname "$0")"
-source "$HOME/.cargo/env" 2>/dev/null || true
+if [ -f "$HOME/.cargo/env" ]; then source "$HOME/.cargo/env"; fi  # macOS bash 3.2 exits on a missing sourced file, even with || true
 
 MODE="install"
 case "${1:-}" in

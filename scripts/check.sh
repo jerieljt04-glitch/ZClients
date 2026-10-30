@@ -4,7 +4,7 @@
 #   FUZZ_CASES=200000 scripts/check.sh   longer randomized (property) runs
 set -euo pipefail
 cd "$(dirname "$0")/.."
-source "$HOME/.cargo/env" 2>/dev/null || true
+if [ -f "$HOME/.cargo/env" ]; then source "$HOME/.cargo/env"; fi  # macOS bash 3.2 exits on a missing sourced file, even with || true
 step() { echo "==> $*"; }
 
 step "rustfmt";            cargo fmt --check
