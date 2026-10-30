@@ -16,8 +16,8 @@ cargo test              # 139 unit, migration, failure-injection and property te
 ```
 
 The version lives only in `Cargo.toml` (`version` + `[package.metadata.zclients]
-build`). Local builds sign with the "ZClients Local Signer" identity made by
-`../zport-swift/setup_signing_identity.sh`, so macOS treats every build as the
+build`). Local builds sign with the "ZClients Local Signer" identity made once per Mac by
+`scripts/setup-signing-identity.sh`, so macOS treats every build as the
 same app (camera/mic grants, Keychain access). `build.sh` never unlocks a
 keychain: unlock it yourself if codesign asks. Production releases (Developer
 ID, notarized) are `scripts/release.sh` — see `docs/RELEASE.md`.
@@ -97,7 +97,12 @@ Run the test app with its own home so nothing real is touched:
 `PDF Previews/` (one private folder per preview). Per-profile WebKit stores live in
 `~/Library/WebKit/com.zport.swift/WebsiteDataStore/<client UUID>`.
 
-## Going back to the Swift app
+## Going back to an earlier version
+
+The `backup/` folder is local only (git ignores it): `./build.sh` keeps each
+replaced app there on the Mac that built it. A fresh clone has none.
+
+### The Swift app
 
 Quit ZClients, then `rm -rf /Applications/ZClients.app && ditto backup/ZClients-Swift.app /Applications/ZClients.app`.
 Profiles and tabs carry over; the Swift app reads `clients.json` unchanged.

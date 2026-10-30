@@ -35,8 +35,8 @@ Read `README.md`, `docs/TESTING.md`, `docs/PRIVATE-API.md` and `docs/BACKLOG.md`
 ### Symptom (from the user, with screenshots)
 
 Zoho Analytics report editor:
-`https://analytics.zoho.com/workspace/3179446000000033003/edit/3179446000001615004`
-(Palma client). In Chrome, clicking the gear next to **View Mode** (top right)
+`https://analytics.zoho.com/workspace/<workspace id>/edit/<view id>`
+(a client's real report). In Chrome, clicking the gear next to **View Mode** (top right)
 slides in a **Settings** panel on the right (tabs General / Analysis / Zia
 Insights; sections Basic, Overview, Axis, Borders & Colors, Format, Threshold,
 Drill, Drill Actions) and the chart narrows. In ZClients the same click shows
@@ -84,7 +84,7 @@ panels, drawers and animations to behave as in Chrome.
       Does the Settings panel open?
    b. In ZClients, click once anywhere in the page first (so the window is
       active), then click the gear. Does it open now?
-2. Ask the user to sign in to Palma in **ZClients Test** (Developer Mode on so
+2. Ask the user to sign in to that client in **ZClients Test** (Developer Mode on so
    Web Inspector can attach; see `settings::web_inspector_allowed`). Never use
    the real app for this. In the Inspector console, before clicking the gear:
    ```js

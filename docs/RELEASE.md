@@ -24,6 +24,9 @@ writes both into Info.plist. Bump both for every build you install.
 
 * `./build.sh --test` — "ZClients Test", ad-hoc signed, never touches a
   keychain or real data. Use for every experiment.
+* `scripts/setup-signing-identity.sh` — once per Mac: creates the
+  "ZClients Local Signer" certificate in its own keychain (macOS asks for
+  that keychain's password; nothing stores it).
 * `./build.sh` — signs with the local "ZClients Local Signer" identity **only
   if its keychain is already unlocked**; the script never reads or passes a
   keychain password. Otherwise it signs ad hoc and says so. It asks before
