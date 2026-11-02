@@ -1833,7 +1833,7 @@ pub fn build() {
     address_icon.setContentTintColor(Some(&theme::secondary_text()));
     unsafe { address.setDelegate(Some(ProtocolObject::from_ref(&*actions()))) };
     let search = sym_button("magnifyingglass", "Google Search workspace", sel!(search:));
-    let meet = sym_button("video.fill", "Google Meet for this client", sel!(meet:));
+    let meet = sym_button("video.fill", "Start a Google Meet meeting for this client", sel!(meet:));
     let downloads_button = sym_button("arrow.down.circle", "Downloads (⌘⇧J)", sel!(downloads:));
     let plus = sym_button("plus", "New tab (⌘T)", sel!(newTab:));
     // Shown while any tab uses the camera or microphone; one click lists
@@ -3463,7 +3463,7 @@ fn build_menu() {
     key(&go, "Open Location", sel!(openLocation:), "l", cmd);
     key(&go, "Google Search", sel!(search:), "k", cmd);
     alt_key(&go, "Google Search ", sel!(search:), "k", cmd | NSEventModifierFlags::Option);
-    key(&go, "Google Meet", sel!(meet:), "m", cmd_shift);
+    key(&go, "New Google Meet Meeting", sel!(meet:), "m", cmd_shift);
     // Switching clients is the app's main job: all of it from the keyboard.
     go.addItem(&NSMenuItem::separatorItem(mtm));
     key(&go, "Switch to Client…", sel!(switchClient:), "o", cmd_shift);

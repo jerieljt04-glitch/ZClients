@@ -455,6 +455,10 @@ pub fn reopen_closed_tab() {
 }
 
 pub fn duplicate_tab() {
+    // ⌘D on a Meet tab is Meet's mute key, wherever the keyboard is.
+    if web::forward_meet_shortcut() {
+        return;
+    }
     let live = web::active_view().and_then(|v| unsafe { v.URL() }).and_then(|u| util::url_string(&u));
     mutate(ALL, |s| s.duplicate_active_tab(live));
 }
@@ -489,14 +493,18 @@ pub fn open_app(index: usize) {
     mutate_apply(ALL, |s| s.open_app(tab, app));
 }
 
-/// Meet for the profile in front. From the Search workspace (no profile of
-/// its own) the user picks which profile joins.
+/// The Meet button (⇧⌘M): an instant Google Meet meeting for the profile in
+/// front, or back to the call it is already in. From the Search workspace
+/// (no profile of its own) the user picks which profile hosts it.
 pub fn open_meet() {
-    if mutate(ALL, |s| s.open_google_meet()) {
+    let calling: Vec<Uuid> = web::tabs_in_calls().into_iter().map(|(_, tab, _, _)| tab).collect();
+    if let Some(effects) = mutate(ALL, |s| s.open_google_meet(&calling)) {
+        apply(effects);
         return;
     }
-    if let Some(client) = choose_profile("Open Google Meet in which client?") {
-        mutate(ALL, |s| s.open_google_meet_in(client));
+    if let Some(client) = choose_profile("Start a Google Meet meeting in which client?") {
+        let effects = mutate(ALL, |s| s.open_google_meet_in(client, &calling)).unwrap_or_default();
+        apply(effects);
     }
 }
 

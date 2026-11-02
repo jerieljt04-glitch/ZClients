@@ -968,27 +968,43 @@ impl Store {
         }
     }
 
-    /// Meet in the active client's own store, reusing an open Meet tab.
-    /// False when the active client is the Search workspace: Meet needs a
+    /// The Meet button: an instant Google Meet meeting in the active client's
+    /// own store. `calling` are the tabs with the camera or microphone on.
+    /// None when the active client is the Search workspace: Meet needs a
     /// real profile, and the caller asks which.
-    pub fn open_google_meet(&mut self) -> bool {
-        let Some(id) = self.active_client_id else { return false };
-        self.open_google_meet_in(id)
+    pub fn open_google_meet(&mut self, calling: &[Uuid]) -> Option<Vec<Effect>> {
+        let id = self.active_client_id?;
+        self.open_google_meet_in(id, calling)
     }
 
-    pub fn open_google_meet_in(&mut self, id: Uuid) -> bool {
-        let Some(c) = self.client_mut(id) else { return false };
-        if c.is_search() {
-            return false;
+    /// A tab of this client already in a meeting comes to the front (a
+    /// second meeting would take the camera and microphone from it).
+    /// Otherwise a new meeting starts at once, in this client's idle Meet
+    /// tab if it has one, else in a new tab.
+    pub fn open_google_meet_in(&mut self, id: Uuid, calling: &[Uuid]) -> Option<Vec<Effect>> {
+        if self.client(id)?.is_search() {
+            return None;
         }
         self.active_client_id = Some(id);
-        let Some(c) = self.client_mut(id) else { return false };
-        if let Some(t) = c.tabs.iter().find(|t| t.pdf_path.is_none() && t.parsed_url().is_some_and(|u| policy::is_google_meet(&u))) {
-            c.active_tab_id = Some(t.id);
-            return true;
+        let c = self.client_mut(id)?;
+        let meet_tabs: Vec<(Uuid, bool)> =
+            c.tabs.iter().filter(|t| t.pdf_path.is_none()).filter_map(|t| t.parsed_url().filter(policy::is_google_meet).map(|u| (t.id, policy::is_google_meet_call(&u)))).collect();
+        if let Some((tab, _)) = meet_tabs.iter().find(|(t, is_call)| *is_call && calling.contains(t)) {
+            c.active_tab_id = Some(*tab);
+            return Some(vec![]);
         }
-        self.add_tab(id, Some("https://meet.google.com/".into()), Some("Google Meet".into()), None, true);
-        true
+        let instant = policy::GOOGLE_MEET_INSTANT.to_string();
+        if let Some((tab, _)) = meet_tabs.iter().find(|(t, _)| !calling.contains(t)) {
+            let tab = *tab;
+            c.active_tab_id = Some(tab);
+            let effects = self.navigate_tab(tab, Some(instant), None);
+            if let Some(t) = self.find_tab_mut(tab) {
+                t.title = "Google Meet".into();
+            }
+            return Some(effects);
+        }
+        self.add_tab(id, Some(instant), Some("Google Meet".into()), None, true);
+        Some(vec![])
     }
 
     /// The profile a Search tab was started from, if it still exists.
@@ -1029,8 +1045,16 @@ impl Store {
         }
     }
 
+    /// A Google Meet tab is never duplicated: the copy would join the same
+    /// call a second time. ⌘D is Meet's own mute key, and WebKit hands it
+    /// back to the menu whenever Meet lets it pass (the Mac's microphone
+    /// turned down, focus in the toolbar), which used to open that copy.
     pub fn duplicate_active_tab(&mut self, live_url: Option<String>) -> Option<Uuid> {
         let (c, t) = self.active_tab()?;
+        let is_meet = |u: Option<&str>| u.and_then(policy::parse).is_some_and(|u| policy::is_google_meet(&u));
+        if is_meet(live_url.as_deref()) || is_meet(t.url.as_deref()) {
+            return None;
+        }
         if t.url.is_none() {
             return self.add_tab(c.id, None, None, None, true);
         }
@@ -1337,6 +1361,49 @@ mod tests {
     }
 
     #[test]
+    fn the_meet_button_starts_an_instant_meeting_but_never_a_second_call() {
+        let mut store = Store::default();
+        let client = store.add_client("Acme", "#111", None);
+        store.select_client(client);
+        let url_of_active = |s: &Store| s.active_tab().and_then(|(_, t)| t.url.clone());
+
+        // No Meet tab yet: a new tab straight into a new meeting.
+        assert!(store.open_google_meet(&[]).is_some());
+        assert_eq!(url_of_active(&store).as_deref(), Some(policy::GOOGLE_MEET_INSTANT));
+        let meet_tab = store.active_tab().map(|(_, t)| t.id).unwrap();
+        let tabs = store.client(client).unwrap().tabs.len();
+
+        // That tab is now in a meeting: pressing again brings it forward.
+        store.update_tab_meta(meet_tab, Some("https://meet.google.com/abc-defg-hij"), Some("Meet - abc-defg-hij"));
+        store.add_tab(client, Some("https://crm.zoho.com/".into()), None, None, true);
+        let effects = store.open_google_meet(&[meet_tab]).unwrap();
+        assert!(effects.is_empty());
+        assert_eq!(store.active_tab().map(|(_, t)| t.id), Some(meet_tab));
+        assert_eq!(url_of_active(&store).as_deref(), Some("https://meet.google.com/abc-defg-hij"));
+
+        // The call ended (camera and microphone off): the same tab starts a
+        // new meeting instead of opening another tab.
+        let effects = store.open_google_meet(&[]).unwrap();
+        assert!(matches!(effects.first(), Some(Effect::DropTab(t)) if *t == meet_tab));
+        assert_eq!(url_of_active(&store).as_deref(), Some(policy::GOOGLE_MEET_INSTANT));
+        assert_eq!(store.client(client).unwrap().tabs.len(), tabs + 1, "only the CRM tab was added");
+    }
+
+    #[test]
+    fn a_meet_tab_is_never_duplicated() {
+        let mut store = Store::default();
+        let client = store.add_client("Acme", "#111", None);
+        store.select_client(client);
+        store.add_tab(client, Some("https://meet.google.com/abc-defg-hij".into()), None, None, true);
+        let before = store.client(client).unwrap().tabs.len();
+        assert!(store.duplicate_active_tab(None).is_none());
+        assert!(store.duplicate_active_tab(Some("https://meet.google.com/abc-defg-hij?authuser=0".into())).is_none());
+        assert_eq!(store.client(client).unwrap().tabs.len(), before);
+        store.add_tab(client, Some("https://crm.zoho.com/crm/org1/tab/Leads".into()), None, None, true);
+        assert!(store.duplicate_active_tab(None).is_some(), "other pages still duplicate");
+    }
+
+    #[test]
     fn a_search_tab_on_a_zoho_page_stays_in_the_search_workspace() {
         let mut store = Store::default();
         store.ensure_search_client();
@@ -1426,8 +1493,8 @@ mod tests {
         let mut store = restored;
         store.delete_client(b);
         assert_eq!(store.search_origin(tab), None, "a deleted profile is never used");
-        assert!(!store.open_google_meet_in(GOOGLE_SEARCH_ID), "Meet never runs in the Search pseudo-profile");
-        assert!(store.open_google_meet_in(a));
+        assert!(store.open_google_meet_in(GOOGLE_SEARCH_ID, &[]).is_none(), "Meet never runs in the Search pseudo-profile");
+        assert!(store.open_google_meet_in(a, &[]).is_some());
     }
 
     #[test]

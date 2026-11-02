@@ -41,6 +41,8 @@ question with its first / last button and logs it.
 | `a11y` | Every toolbar/tab/sidebar control has a VoiceOver name; tabs are AXRadioButton/AXTabButton in an AXTabGroup with one selected; ←/→, Return, ⌥⇧→ work on the tab strip and focus stays there |
 | `address2` | Typed address text is dropped on tab switch and never navigates on page click; Esc restores; a Return for a tab no longer in front is dropped; Return on the same tab navigates |
 | `editor` | ⌘A, ⌘Z, ⇧⌘Z, Control-A and (2.4) ⌘S and ⌘F reach a code editor's own key handler (CodeMirror/Ace/Monaco/hidden-textarea editors such as Zoho's Deluge editor); ⌘S leaves the sidebar alone; the fixture leaves ⌘F unhandled, so the app's find bar opens (once) as the fallback; ⌘A in a plain text box still selects all. With `ZCLIENTS_REAL_KEYS=1` the test logs `SELFTEST EDITOR real keys now: …` and waits for posted keyboard events (the test app must be frontmost); simulated keys are unreliable here, real keys pass (2.4.0, 2026-10-31). |
+| `meetpopup` | With `ZCLIENTS_NO_EXTERNAL=1`: a window opened by a click in a Zoho page and then sent by script to `x-apple.systempreferences:` closes at once and the link is handed to System Settings (logged, not opened); one sent to a refused `http:` page closes too; the Meet button opens `meet.google.com/new`, Duplicate Tab leaves the Meet tab alone, the button again reuses the idle Meet tab (2.5.0). |
+| `logins` | Settings › Saved Logins lists each client's saved email with the password hidden; Save on a row writes the vault (made-up credentials; `ZCLIENTS_SNAPSHOT=<png>` saves a picture of the window) (2.5.0). |
 | `downloads` | PDF popups become tabs with viewer controls; hidden-frame and popup zips download; PDF attachments open as tabs; the PDF viewer's download button saves; (2.4) a downloaded PNG opens as a picture tab (`image/png`), an SVG stays a file; every file is quarantined |
 | `search` (2.1) | Google Search workspace: a Zoho page stays in the Search tab; example.com is blocked both by script and when typed (page kept, "can't be opened here" shown); a Meet link opens in a client, which comes to the front |
 | `stability` (2.0) | U6 closing a tab in a call asks; U1 a newer download leaves an item's key on the same file; S1 quitting with a download and a call asks (decline: both continue; accept: real quit path, partial file deleted); S2 a page whose WebContent process is killed twice shows "This page stopped working" instead of reloading |
@@ -87,6 +89,12 @@ slides in a Settings panel in Chrome, nothing in ZClients.
 ## Manual verification checklist (real app, real accounts)
 
 Run on the test app first; on the real app only after installing 2.0.0.
+
+**New in 2.5.0** (2026-11-02, owner's Meet report)
+- [ ] In a Meet call with the Mac's microphone turned down, press ⌘D: no second Meet tab appears (also with the address field focused, where ⌘D now reaches Meet as mute).
+- [ ] Meet's "Open Sound Settings" opens System Settings › Sound; no blank "Loading…" window is left behind.
+- [ ] The toolbar Meet button (⇧⌘M) starts a new meeting at once; pressed again during the call it brings the call's tab forward; after leaving the call it starts another meeting in the same tab.
+- [ ] Settings (⌘,) › Saved logins › Show Saved Logins… asks for Touch ID or the Mac password, then lists every client's email; Show reveals a password, Copy copies it, Save stores a changed one (it is filled on the next Zoho sign-in).
 
 **New in 2.4.0** (from the owner's real-account pass on 2026-10-31)
 - [ ] Deluge function editor (CRM › Setup › Functions): ⌘F opens the editor's own search, not the app's find bar; ⌘S saves the function and the client list stays put; ⌘/ comments a line.

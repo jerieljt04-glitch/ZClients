@@ -666,6 +666,91 @@ fn meet_test() {
     });
 }
 
+/// `ZCLIENTS_SELFTEST=meetpopup` (with ZCLIENTS_NO_EXTERNAL=1): Meet's
+/// "Open Sound Settings" (an empty window sent to a System Settings link)
+/// and an empty window sent somewhere refused both close instead of staying
+/// blank; the Meet button starts an instant meeting; Duplicate Tab leaves a
+/// Meet tab alone.
+fn meet_popup_test() {
+    let visible_windows = || NSApplication::sharedApplication(MainThreadMarker::new().unwrap()).windows().iter().filter(|w| w.isVisible()).count();
+    let loading_windows = visible_windows;
+    util::after(2.0, || {
+        app::add_client("Meet Popup Test", "#aa3355", None, app::LoginChange::Keep, Default::default());
+        app::address_entered("https://www.zoho.com/");
+    });
+    // The window opens from a click in the page, as Meet's does (a window
+    // a script opens by itself asks the user first).
+    let open_then_send = |target: &'static str| {
+        let js = format!(
+            "(() => {{ const b = Object.assign(document.body.appendChild(document.createElement('button')), {{textContent: 'open'}}); b.style.cssText = 'position:fixed;top:20px;left:20px;width:200px;height:30px;z-index:2147483647'; b.onclick = () => {{ const w = window.open('', '_blank', 'width=500,height=400'); window.__zcPopup = w ? 'opened' : 'refused'; if (w) setTimeout(() => {{ w.location.href = '{target}'; }}, 800); b.remove(); }}; return 'button ready'; }})()"
+        );
+        web::eval_active(&js, |r| util::log(format!("SELFTEST POPUP {r}")));
+        util::after(0.5, || click_page(60.0, 35.0, NSEventModifierFlags::empty()));
+        util::after(1.0, move || web::eval_active("(() => String(window.__zcPopup))()", move |r| util::log(format!("SELFTEST POPUP blank window for {target}: {r}"))));
+    };
+    util::after(12.0, move || {
+        report("loaded");
+        open_then_send("x-apple.systempreferences:com.apple.preference.sound?input");
+        for i in 1..=10 {
+            util::after(0.25 * i as f64, move || util::log(format!("SELFTEST POPUP t+{:.2}s visible windows={}", 0.25 * i as f64, visible_windows())));
+        }
+    });
+    util::after(15.0, move || {
+        report("after settings link");
+        util::log(format!("SELFTEST POPUP settings link: visible windows={} (want 1)", loading_windows()));
+        open_then_send("http://example.com/");
+    });
+    util::after(18.0, move || {
+        report("after refused page");
+        util::log(format!("SELFTEST POPUP refused page: visible windows={} (want 1)", loading_windows()));
+        app::open_meet();
+    });
+    util::after(19.0, || util::log(format!("SELFTEST MEET button opened: {}", active_url())));
+    util::after(26.0, || {
+        util::log(format!("SELFTEST MEET page now: {} — {}", active_url(), tab_summary()));
+        app::duplicate_tab();
+        util::after(1.0, || util::log(format!("SELFTEST MEET after Duplicate Tab: {}", tab_summary())));
+        util::after(1.2, || {
+            app::open_meet();
+            util::after(0.5, || util::log(format!("SELFTEST MEET button again (idle Meet tab reused): {}", tab_summary())));
+        });
+    });
+    util::after(30.0, || {
+        util::log("SELFTEST done");
+        app::quit_without_asking();
+    });
+}
+
+/// `ZCLIENTS_SELFTEST=logins`: Settings › Saved Logins lists every client
+/// with its saved login, and Save changes it (made-up test credentials).
+fn logins_test() {
+    util::after(1.0, || {
+        let login = crate::keychain::Login { email: "first@example.com".into(), password: "old-secret".into() };
+        app::add_client("Logins A", "#336699", None, app::LoginChange::Replace(login), Default::default());
+        app::add_client("Logins B", "#aa3355", None, app::LoginChange::Keep, Default::default());
+    });
+    util::after(2.0, || {
+        crate::privacy::show();
+        crate::logins::show();
+    });
+    util::after(3.0, || {
+        util::log(format!("SELFTEST LOGINS window: {}", crate::logins::describe_for_test()));
+        if let Some(path) = std::env::var_os("ZCLIENTS_SNAPSHOT") {
+            crate::logins::snapshot_for_test(&path.to_string_lossy());
+        }
+        crate::logins::edit_for_test(0, "first@example.com", "new-secret");
+    });
+    util::after(4.0, || {
+        let ids: Vec<uuid::Uuid> = app::store(|s| s.ordered().iter().filter(|c| !c.is_search()).map(|c| c.id).collect());
+        let saved: Vec<String> = ids.iter().map(|id| crate::keychain::read_login(*id).map(|l| format!("{} / {}", l.email, l.password)).unwrap_or_else(|| "none".into())).collect();
+        util::log(format!("SELFTEST LOGINS after Save: {}; vault now {saved:?}", crate::logins::describe_for_test()));
+    });
+    util::after(5.0, || {
+        util::log("SELFTEST done");
+        app::quit_without_asking();
+    });
+}
+
 fn pasteboard_text() -> String {
     NSPasteboard::generalPasteboard().stringForType(unsafe { NSPasteboardTypeString }).map(|s| s.to_string()).unwrap_or_default()
 }
@@ -1564,6 +1649,8 @@ pub fn start() {
         Ok("find") => return find_test(),
         Ok("memory") => return memory_test(),
         Ok("meet") => return meet_test(),
+        Ok("meetpopup") => return meet_popup_test(),
+        Ok("logins") => return logins_test(),
         Ok("address") => return address_test(),
         Ok("security") => return security_test(),
         Ok("address2") => return address_rules_test(),

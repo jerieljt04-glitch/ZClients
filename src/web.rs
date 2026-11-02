@@ -1316,6 +1316,16 @@ impl Coordinator {
         }
     }
 
+    /// A popup window that has shown nothing yet and that a script just
+    /// sent somewhere refused (or handed to another app): close it rather
+    /// than leave an empty "Loading…" window on screen. A link the user
+    /// clicked inside the popup never closes it; tabs are left alone.
+    fn close_blank_popup(&self, user_link: bool) {
+        if !user_link && self.ivars().popup_window.borrow().is_some() {
+            self.close_if_blank();
+        }
+    }
+
     fn state_changed(&self, web: &WKWebView) {
         if let Some(tab) = self.ivars().tab_id {
             app::web_state_changed(tab);
@@ -1386,6 +1396,17 @@ impl Coordinator {
             };
         }
 
+        // A System Settings pane (Meet's "Open Sound Settings"): opened in
+        // System Settings. Meet first opens an empty window and then sends
+        // it there; that window would otherwise stay blank ("Loading…").
+        if policy::is_system_settings_link(&url) {
+            if source_trusted || iv.popup_trusted {
+                open_externally(&url);
+            }
+            self.close_blank_popup(user_link);
+            return WKNavigationActionPolicy::Cancel;
+        }
+
         // mailto:, tel: and similar go to the Mac's own app: straight away
         // after a click in a page this app shows, otherwise only if the user
         // confirms. Never silently.
@@ -1402,6 +1423,7 @@ impl Coordinator {
             if open {
                 open_externally(&url);
             }
+            self.close_blank_popup(user_link);
             return WKNavigationActionPolicy::Cancel;
         }
 
@@ -1441,6 +1463,8 @@ impl Coordinator {
             iv.external_probe.set(true);
             return WKNavigationActionPolicy::Allow;
         }
+        // Nothing will ever show in a popup whose first page was refused.
+        self.close_blank_popup(user_link);
         WKNavigationActionPolicy::Cancel
     }
 
@@ -1563,6 +1587,14 @@ impl Coordinator {
         };
 
         if let Some(u) = &url {
+            // Meet's "Open Sound Settings" (the Mac's microphone is turned
+            // down): System Settings opens; no blank window is left behind.
+            if policy::is_system_settings_link(u) {
+                if source_trusted {
+                    open_externally(u);
+                }
+                return None;
+            }
             // Search workspace: a new window or tab for any other website
             // is refused like a link (no pop-up, no default browser).
             if iv.workspace == Workspace::GoogleSearch && policy::is_web_address(u) && policy::search_route(u) == policy::SearchRoute::Blocked {
@@ -1694,6 +1726,11 @@ impl Coordinator {
 }
 
 fn open_externally(url: &Url) {
+    // Self-tests check what would open without opening other apps.
+    if util::is_test_build() && std::env::var_os("ZCLIENTS_NO_EXTERNAL").is_some() {
+        util::log(format!("SELFTEST would open externally: {}:", url.scheme()));
+        return;
+    }
     if let Some(u) = util::ns_url(url.as_str()) {
         let mtm = MainThreadMarker::new().expect("main thread");
         let _ = mtm;
@@ -2271,19 +2308,34 @@ pub fn release(id: Uuid) {
     }
 }
 
+thread_local! {
+    /// The address each tab's last snapshot was taken on.
+    static SNAPSHOT_URL: RefCell<HashMap<Uuid, String>> = RefCell::new(HashMap::new());
+}
+
 pub fn save_state(id: Uuid) {
     let Some(view) = POOL.with_borrow(|p| p.live.get(&id).map(|l| l.view.clone())) else { return };
     let Some(url) = ns_str_url(unsafe { view.URL() }) else { return };
     let Some(state) = (unsafe { view.interactionState() }) else { return };
     if let Ok(data) = state.downcast::<NSData>() {
         tabstate::save(id, &url, &data.to_vec());
+        SNAPSHOT_URL.with_borrow_mut(|m| m.insert(id, url));
     }
 }
 
+/// The once-a-minute snapshot. Background tabs were snapshotted when they
+/// were last left (and a background tab cannot be scrolled), so only the
+/// tab in front and any tab whose page changed by itself are taken again:
+/// with many tabs awake this no longer serialises every tab's whole
+/// history each minute.
 pub fn save_all_states() {
-    let ids: Vec<Uuid> = POOL.with_borrow(|p| p.live.keys().copied().collect());
-    for id in ids {
-        save_state(id);
+    let (active, live): (Option<Uuid>, Vec<(Uuid, Option<String>)>) =
+        POOL.with_borrow(|p| (p.active, p.live.iter().map(|(id, l)| (*id, ns_str_url(unsafe { l.view.URL() }))).collect()));
+    for (id, url) in live {
+        let unchanged = SNAPSHOT_URL.with_borrow(|m| url.is_some() && m.get(&id) == url.as_ref());
+        if Some(id) == active || !unchanged {
+            save_state(id);
+        }
     }
 }
 
@@ -2359,6 +2411,7 @@ pub fn remove_data_store(id: Uuid, done: impl FnOnce(Result<(), String>) + 'stat
 /// A tab is gone for good (or closed): drop what the pool remembers about
 /// it, so nothing stale is applied if the id is ever seen again.
 pub fn forget_tab(tab: Uuid) {
+    SNAPSHOT_URL.with_borrow_mut(|m| m.remove(&tab));
     POOL.with_borrow_mut(|p| {
         p.opened_by_page.remove(&tab);
         p.crashes.remove(&tab);
@@ -2399,6 +2452,33 @@ pub fn set_active(id: Option<Uuid>) {
 
 pub fn active_view() -> Option<Retained<ZWebView>> {
     POOL.with_borrow(|p| p.active.and_then(|id| p.live.get(&id).map(|l| l.view.clone())))
+}
+
+/// ⌘D reached the Duplicate Tab command while a Google Meet tab is in
+/// front, with the keyboard somewhere other than the page (address field,
+/// toolbar, client list). The shortcut is Meet's mute: hand it to the page
+/// instead. True when it was handed over. If the page already had the
+/// keyboard (Meet let the key pass), nothing is resent, so this never loops.
+pub fn forward_meet_shortcut() -> bool {
+    let Some(mtm) = MainThreadMarker::new() else { return false };
+    let Some(event) = NSApplication::sharedApplication(mtm).currentEvent() else { return false };
+    if event.r#type() != objc2_app_kit::NSEventType::KeyDown || !is_key(&event, "d", objc2_app_kit::NSEventModifierFlags::Command) {
+        return false;
+    }
+    let Some(view) = active_view() else { return false };
+    if !ns_str_url(unsafe { view.URL() }).and_then(|u| policy::parse(&u)).is_some_and(|u| policy::is_google_meet(&u)) {
+        return false;
+    }
+    let Some(window) = view.window() else { return false };
+    let in_page = window.firstResponder().and_then(|r| r.downcast::<NSView>().ok()).is_some_and(|r| r.isDescendantOf(&view));
+    if in_page {
+        return false;
+    }
+    window.makeFirstResponder(Some(&view));
+    unsafe {
+        let _: () = msg_send![&*view, keyDown: &*event];
+    }
+    true
 }
 
 pub fn live_view(id: Uuid) -> Option<Retained<ZWebView>> {

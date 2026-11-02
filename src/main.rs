@@ -7,6 +7,7 @@ mod apps;
 mod cleanup;
 mod downloads;
 mod keychain;
+mod logins;
 mod model;
 mod picker;
 mod policy;

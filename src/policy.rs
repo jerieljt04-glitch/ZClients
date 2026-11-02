@@ -406,6 +406,28 @@ pub fn is_allowed_google_meet(url: &Url) -> bool {
     is_https(url) && (is_google_meet(url) || is_google_auth(url))
 }
 
+/// Google Meet's "start an instant meeting" address: Meet creates a new
+/// meeting and sends the tab straight into it.
+pub const GOOGLE_MEET_INSTANT: &str = "https://meet.google.com/new";
+
+/// A Meet meeting page (meet.google.com/abc-defg-hij), as opposed to Meet's
+/// home or landing page.
+pub fn is_google_meet_call(url: &Url) -> bool {
+    if !is_https(url) || host_lower(url).as_deref() != Some("meet.google.com") {
+        return false;
+    }
+    let code = url.path().trim_matches('/');
+    let parts: Vec<&str> = code.split('-').collect();
+    parts.len() == 3 && [3, 4, 3].iter().zip(&parts).all(|(n, p)| p.len() == *n && p.bytes().all(|b| b.is_ascii_lowercase()))
+}
+
+/// A link to a pane of the Mac's System Settings, as Google Meet's "Open
+/// Sound Settings" uses when macOS has the microphone turned down. WebKit
+/// cannot show it; it belongs to System Settings.
+pub fn is_system_settings_link(url: &Url) -> bool {
+    url.scheme().eq_ignore_ascii_case("x-apple.systempreferences")
+}
+
 pub fn is_allowed_google_search(url: &Url) -> bool {
     is_https(url) && (is_google_search(url) || is_allowed_google_meet(url))
 }
@@ -575,6 +597,36 @@ mod tests {
 
     fn u(s: &str) -> Url {
         parse(s).unwrap()
+    }
+
+    #[test]
+    fn meet_call_pages_are_told_apart_from_meet_home() {
+        for call in ["https://meet.google.com/tuq-iabd-onj", "https://meet.google.com/abc-defg-hij?authuser=1", "https://meet.google.com/abc-defg-hij/"] {
+            assert!(is_google_meet_call(&u(call)), "{call}");
+        }
+        for not_call in [
+            "https://meet.google.com/",
+            "https://meet.google.com/home",
+            "https://meet.google.com/new",
+            "https://meet.google.com/landing",
+            "https://meet.google.com/ABC-DEFG-HIJ",
+            "https://meet.google.com/abcd-efg-hij",
+            "http://meet.google.com/abc-defg-hij",
+            "https://meet.google.com.evil.net/abc-defg-hij",
+            "https://evil.net/abc-defg-hij",
+        ] {
+            assert!(!is_google_meet_call(&u(not_call)), "{not_call}");
+        }
+        assert!(is_google_meet(&u(GOOGLE_MEET_INSTANT)) && is_allowed_google_meet(&u(GOOGLE_MEET_INSTANT)));
+    }
+
+    #[test]
+    fn system_settings_links_are_recognised_and_nothing_else() {
+        assert!(is_system_settings_link(&u("x-apple.systempreferences:com.apple.preference.sound?input")));
+        assert!(is_system_settings_link(&u("x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")));
+        for other in ["https://meet.google.com/", "mailto:a@b.c", "file:///System/Applications/System%20Settings.app", "x-apple-helpviewer:foo"] {
+            assert!(!is_system_settings_link(&u(other)), "{other}");
+        }
     }
 
     fn req(url: &str, main: bool, gesture: bool) -> Request {

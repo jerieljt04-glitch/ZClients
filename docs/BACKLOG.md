@@ -36,3 +36,13 @@ Still open from the 2.0 backlog after 2.3.1: Log360 Cloud SA/SG/CN (waits on Zoh
 | Wi-Fi off/on did not reload | Done | The log of the owner's test showed "network is back" with no tab on the offline screen. Tabs whose page loaded or failed *during* the outage are now reloaded too; pages already open before it are left to Zoho (unsaved work). Load failures are now logged (domain + code). |
 | Light / dark setting | Done | Settings › Appearance: Same as the Mac / Light / Dark (`settings.appearance`, `theme::apply_appearance`). |
 | Quit during a download "does not work" | Not reproduced | `stability` self-test: ⌘Q asks "Quit and cancel 1 download?", Cancel keeps it, Quit deletes the partial file. The red close button hides the window by design (2.3.1) and asks nothing. Waiting for the owner's exact steps. |
+
+# 2.5.0 (owner's Meet report, 2026-11-02)
+
+| Item | Status | Notes |
+|---|---|---|
+| ⌘D in Meet duplicated the tab | Done | WebKit re-sends a key the page leaves unhandled to the menu bar; Meet leaves ⌘D unhandled when the Mac's microphone is turned down (its "unmute your mic" bubble), so File › Duplicate Tab ran. A Meet tab is never duplicated now (`Store::duplicate_active_tab`), and ⌘D with the keyboard outside the page is handed to Meet (`web::forward_meet_shortcut`, no resend loop). |
+| Blank "Loading…" window from Meet | Done | Meet's "Open Sound Settings" opens an empty window and sends it to `x-apple.systempreferences:`; the app refused that and the window stayed blank. System Settings links from a trusted page now open System Settings, and a popup that has shown nothing closes when a script sends it somewhere refused (`close_blank_popup`; a link the user clicks inside a popup never closes it). |
+| Meet button starts an instant meeting | Done | `meet.google.com/new`; a tab already in a call (camera/mic on) is brought forward instead; an idle Meet tab is reused. |
+| See/update every saved login | Done | Settings › Saved logins › Show Saved Logins… (`logins.rs`): LocalAuthentication (Touch ID / Mac password) first; per-client email, hidden password, Show/Copy (marked concealed)/Save; fields cleared on close. |
+| Performance / RAM | Small change | The minute timer re-snapshots only the front tab and tabs whose address changed. Nothing else changed: memory is the Zoho pages themselves (0.5–0.7 GB each, already capped and slept by Memory Saver). The remaining lever — sleeping unseen tabs sooner than 2 h (1 h under pressure) — trades memory for more "page reloaded when I came back", so it stays as is unless the owner asks. The 45 s cookie backup also stays: it catches cookie expiry the change observer cannot see. |

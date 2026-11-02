@@ -73,6 +73,11 @@ define_class!(
             }
         }
 
+        #[unsafe(method(showLogins:))]
+        fn show_logins(&self, _s: Option<&AnyObject>) {
+            crate::logins::show();
+        }
+
         #[unsafe(method(clearCookies:))]
         fn clear_cookies(&self, _s: Option<&AnyObject>) {
             clear_profile_data(true);
@@ -320,6 +325,11 @@ fn rebuild() {
     let profiles = profiles();
     let selected = SELECTED.get();
 
+    // ---- saved logins -------------------------------------------------------
+    b.heading("Saved logins");
+    b.row_with_button("Every client's saved Zoho email and password", "Show Saved Logins…", sel!(showLogins:), 0);
+    b.text("Look one up, or update it when a client's password changes. macOS asks for Touch ID or your Mac's password first.", true);
+
     // ---- profile ------------------------------------------------------------
     b.heading("Client");
     if profiles.is_empty() {
@@ -364,7 +374,7 @@ fn rebuild() {
         );
         match keychain::saved_login_email(id) {
             Some(email) => b.destructive_row(&format!("Saved login: {email}"), "Remove…", sel!(removeLogin:), 0),
-            None => b.text("Saved login: none. (Add one from the client's Customise sheet.)", true),
+            None => b.text("Saved login: none. (Add one in Saved Logins above, or from the client's Customise sheet.)", true),
         }
         b.destructive_row("Cookies (signs this client out of every site)", "Clear Cookies…", sel!(clearCookies:), 0);
         b.destructive_row("All website data: cookies, storage, cache, offline data", "Clear All…", sel!(clearAllData:), 0);
