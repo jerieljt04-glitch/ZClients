@@ -705,7 +705,14 @@ fn meet_popup_test() {
         util::log(format!("SELFTEST POPUP refused page: visible windows={} (want 1)", loading_windows()));
         app::open_meet();
     });
-    util::after(19.0, || util::log(format!("SELFTEST MEET button opened: {}", active_url())));
+    util::after(19.0, || util::log(format!("SELFTEST MEET button opened: {} — locked with Meet in front: {} (want true)", active_url(), app::meet_locked())));
+    util::after(24.0, || {
+        app::select_tab_index(0);
+        util::after(0.5, || {
+            util::log(format!("SELFTEST MEET locked with Zoho in front and no meeting page open: {} (want false)", app::meet_locked()));
+            app::select_tab_index(1);
+        });
+    });
     util::after(26.0, || {
         util::log(format!("SELFTEST MEET page now: {} — {}", active_url(), tab_summary()));
         app::duplicate_tab();

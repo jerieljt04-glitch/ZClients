@@ -410,13 +410,15 @@ pub fn is_allowed_google_meet(url: &Url) -> bool {
 /// meeting and sends the tab straight into it.
 pub const GOOGLE_MEET_INSTANT: &str = "https://meet.google.com/new";
 
-/// A Meet meeting page (meet.google.com/abc-defg-hij), as opposed to Meet's
-/// home or landing page.
+/// A Meet meeting page (meet.google.com/abc-defg-hij, or
+/// meet.google.com/meet/abc-defg-hij, where Meet's "new meeting" lands), as
+/// opposed to Meet's home or landing page.
 pub fn is_google_meet_call(url: &Url) -> bool {
     if !is_https(url) || host_lower(url).as_deref() != Some("meet.google.com") {
         return false;
     }
-    let code = url.path().trim_matches('/');
+    let path = url.path().trim_matches('/');
+    let code = path.strip_prefix("meet/").unwrap_or(path);
     let parts: Vec<&str> = code.split('-').collect();
     parts.len() == 3 && [3, 4, 3].iter().zip(&parts).all(|(n, p)| p.len() == *n && p.bytes().all(|b| b.is_ascii_lowercase()))
 }
@@ -601,13 +603,21 @@ mod tests {
 
     #[test]
     fn meet_call_pages_are_told_apart_from_meet_home() {
-        for call in ["https://meet.google.com/tuq-iabd-onj", "https://meet.google.com/abc-defg-hij?authuser=1", "https://meet.google.com/abc-defg-hij/"] {
+        for call in [
+            "https://meet.google.com/tuq-iabd-onj",
+            "https://meet.google.com/abc-defg-hij?authuser=1",
+            "https://meet.google.com/abc-defg-hij/",
+            "https://meet.google.com/meet/puw-zkac-gmm",
+        ] {
             assert!(is_google_meet_call(&u(call)), "{call}");
         }
         for not_call in [
             "https://meet.google.com/",
             "https://meet.google.com/home",
             "https://meet.google.com/new",
+            "https://meet.google.com/meet/new",
+            "https://meet.google.com/meet/",
+            "https://meet.google.com/x/abc-defg-hij",
             "https://meet.google.com/landing",
             "https://meet.google.com/ABC-DEFG-HIJ",
             "https://meet.google.com/abcd-efg-hij",

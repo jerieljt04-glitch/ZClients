@@ -90,6 +90,9 @@ slides in a Settings panel in Chrome, nothing in ZClients.
 
 Run on the test app first; on the real app only after installing 2.0.0.
 
+**New in 2.5.1** (2026-11-02)
+- [ ] With a Meet meeting open in any client (or any Meet page in front) the toolbar Meet button is greyed out and Go › New Google Meet Meeting (⇧⌘M) is disabled; close the meeting's tab (or switch to a Zoho tab with no meeting open) and both come back.
+
 **New in 2.5.0** (2026-11-02, owner's Meet report)
 - [ ] In a Meet call with the Mac's microphone turned down, press ⌘D: no second Meet tab appears (also with the address field focused, where ⌘D now reaches Meet as mute).
 - [ ] Meet's "Open Sound Settings" opens System Settings › Sound; no blank "Loading…" window is left behind.

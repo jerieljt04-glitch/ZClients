@@ -46,3 +46,9 @@ Still open from the 2.0 backlog after 2.3.1: Log360 Cloud SA/SG/CN (waits on Zoh
 | Meet button starts an instant meeting | Done | `meet.google.com/new`; a tab already in a call (camera/mic on) is brought forward instead; an idle Meet tab is reused. |
 | See/update every saved login | Done | Settings › Saved logins › Show Saved Logins… (`logins.rs`): LocalAuthentication (Touch ID / Mac password) first; per-client email, hidden password, Show/Copy (marked concealed)/Save; fields cleared on close. |
 | Performance / RAM | Small change | The minute timer re-snapshots only the front tab and tabs whose address changed. Nothing else changed: memory is the Zoho pages themselves (0.5–0.7 GB each, already capped and slept by Memory Saver). The remaining lever — sleeping unseen tabs sooner than 2 h (1 h under pressure) — trades memory for more "page reloaded when I came back", so it stays as is unless the owner asks. The 45 s cookie backup also stays: it catches cookie expiry the change observer cannot see. |
+
+# 2.5.1 (2026-11-02)
+
+| Item | Status | Notes |
+|---|---|---|
+| Meet button started a second meeting during a call | Done | Meet's instant meetings live at `meet.google.com/meet/<code>`, which `policy::is_google_meet_call` did not recognise, so the running call looked idle. Both forms are recognised now; the Meet button and ⇧⌘M are disabled while a meeting is open in any client (`web::open_meeting`: an awake Meet tab on a meeting page or using camera/mic) or a Meet page is in front (`app::meet_locked`); `app::open_meet` only brings an open meeting forward. |

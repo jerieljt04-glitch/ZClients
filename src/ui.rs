@@ -1084,6 +1084,8 @@ pub struct MenuContext {
     pub tabs: usize,
     pub clients: usize,
     pub real_clients: usize,
+    /// A Meet meeting is open, or a Meet page is in front: no new meeting.
+    pub meet_locked: bool,
 }
 
 impl MenuContext {
@@ -1103,6 +1105,7 @@ impl MenuContext {
             tabs,
             clients,
             real_clients,
+            meet_locked: app::meet_locked(),
         }
     }
 }
@@ -1119,6 +1122,7 @@ pub fn menu_enabled(action: &str, tag: isize, c: &MenuContext) -> bool {
         "selectTabN:" => (tag as usize) < c.tabs,
         "nextClient:" | "prevClient:" | "switchClient:" => c.clients > 1,
         "selectClientN:" => (tag as usize) < c.real_clients,
+        "meet:" => !c.meet_locked,
         _ => true,
     }
 }
@@ -1439,6 +1443,8 @@ struct Ui {
     tab_plus: Retained<NSButton>,
     tab_overflow: Retained<NSButton>,
     media_button: Retained<NSButton>,
+    /// The toolbar's Google Meet button; locked while a meeting is open.
+    meet_button: Retained<NSButton>,
     find: Retained<FlexView>,
     find_field: Retained<NSSearchField>,
     find_status: Retained<NSTextField>,
@@ -1924,7 +1930,8 @@ pub fn build() {
         home,
         address,
         address_icon,
-        right_buttons: vec![media_button.clone(), search, meet, downloads_button.clone(), plus],
+        right_buttons: vec![media_button.clone(), search, meet.clone(), downloads_button.clone(), plus],
+        meet_button: meet,
         downloads_button,
         tabs,
         drop_marker,
@@ -2401,6 +2408,7 @@ fn refresh_tabs() {
         });
     }
     let calls = web::tabs_in_calls();
+    refresh_meet_button();
     with_ui(|u| {
         u.tabs.setNeedsLayout(true);
         let hidden = calls.is_empty();
@@ -2418,6 +2426,20 @@ fn refresh_tabs() {
             u.media_button.setImage(symbol(if cam { "video.fill" } else { "mic.fill" }).as_deref());
             u.media_button.setToolTip(Some(&util::ns(&format!("{what} — click to see where or stop"))));
             set_ax_label(&u.media_button, what);
+        }
+    });
+}
+
+/// One meeting at a time: the Meet button is greyed out while a meeting is
+/// open in any client or a Meet page is in front. Runs with the tab strip
+/// (call state, tabs opened/closed) and the toolbar (tab switch, page change).
+fn refresh_meet_button() {
+    let locked = app::meet_locked();
+    with_ui(|u| {
+        if u.meet_button.isEnabled() == locked {
+            u.meet_button.setEnabled(!locked);
+            let tip = if locked { "A Google Meet meeting is already open — end it before starting another" } else { "Start a Google Meet meeting for this client" };
+            u.meet_button.setToolTip(Some(&util::ns(tip)));
         }
     });
 }
@@ -2549,6 +2571,7 @@ fn show_launcher(client: Uuid, name: &str) {
 }
 
 fn refresh_toolbar() {
+    refresh_meet_button();
     let info = app::store(|s| s.active_tab().map(|(c, t)| (c.color_hex.clone(), c.symbol_name.clone(), c.initials(), c.name.clone(), c.is_search(), t.id, t.url.clone())));
     let page = info.as_ref().and_then(|i| web::page_state(i.5));
     let active_downloads = downloads::active_count();
@@ -3548,6 +3571,8 @@ mod tests {
         assert!(menu_enabled("back:", 0, &search) && !menu_enabled("forward:", 0, &search));
         assert!(menu_enabled("selectTabN:", 2, &search) && !menu_enabled("selectTabN:", 3, &search));
         assert!(menu_enabled("newTab:", 0, &MenuContext::default()), "unlisted commands stay on");
+        assert!(menu_enabled("meet:", 0, &MenuContext::default()));
+        assert!(!menu_enabled("meet:", 0, &MenuContext { meet_locked: true, ..Default::default() }), "one meeting at a time");
     }
 
     #[test]

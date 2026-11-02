@@ -493,10 +493,26 @@ pub fn open_app(index: usize) {
     mutate_apply(ALL, |s| s.open_app(tab, app));
 }
 
+/// Is the Meet button locked? While a meeting is open in any client, or a
+/// Meet page is in front, a new meeting cannot be started (two meetings
+/// would fight over the camera and microphone).
+pub fn meet_locked() -> bool {
+    let front_is_meet = store(|s| s.active_tab().and_then(|(_, t)| t.parsed_url()).is_some_and(|u| policy::is_google_meet(&u)));
+    let live_front_is_meet =
+        web::active_view().and_then(|v| unsafe { v.URL() }).and_then(|u| util::url_string(&u)).and_then(|u| policy::parse(&u)).is_some_and(|u| policy::is_google_meet(&u));
+    front_is_meet || live_front_is_meet || web::open_meeting().is_some()
+}
+
 /// The Meet button (⇧⌘M): an instant Google Meet meeting for the profile in
 /// front, or back to the call it is already in. From the Search workspace
 /// (no profile of its own) the user picks which profile hosts it.
 pub fn open_meet() {
+    // One meeting at a time: with a meeting open anywhere (the button is
+    // locked then), this only brings that meeting forward.
+    if let Some((client, tab)) = web::open_meeting() {
+        show_tab(client, tab);
+        return;
+    }
     let calling: Vec<Uuid> = web::tabs_in_calls().into_iter().map(|(_, tab, _, _)| tab).collect();
     if let Some(effects) = mutate(ALL, |s| s.open_google_meet(&calling)) {
         apply(effects);

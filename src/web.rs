@@ -2485,6 +2485,28 @@ pub fn live_view(id: Uuid) -> Option<Retained<ZWebView>> {
     POOL.with_borrow(|p| p.live.get(&id).map(|l| l.view.clone()))
 }
 
+/// A Google Meet meeting open in any client: an awake tab on a meeting page,
+/// or a Meet tab using the camera or microphone. (client, tab), preferring
+/// a tab that is in the call.
+pub fn open_meeting() -> Option<(Uuid, Uuid)> {
+    POOL.with_borrow(|p| {
+        let mut on_meeting_page = None;
+        for (id, l) in &p.live {
+            let Some(url) = ns_str_url(unsafe { l.view.URL() }).and_then(|u| policy::parse(&u)) else { continue };
+            if !policy::is_google_meet(&url) {
+                continue;
+            }
+            if in_call(&l.view) {
+                return Some((l.view.ivars().client_id, *id));
+            }
+            if on_meeting_page.is_none() && policy::is_google_meet_call(&url) {
+                on_meeting_page = Some((l.view.ivars().client_id, *id));
+            }
+        }
+        on_meeting_page
+    })
+}
+
 pub fn live_tabs() -> HashSet<Uuid> {
     POOL.with_borrow(|p| p.live.keys().copied().collect())
 }
