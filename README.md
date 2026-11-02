@@ -100,39 +100,10 @@ Run the test app with its own home so nothing real is touched:
 
 ## Going back to an earlier version
 
-The `backup/` folder is local only (git ignores it): `./build.sh` keeps each
-replaced app there on the Mac that built it. A fresh clone has none.
-
-### The Swift app
-
-Quit ZClients, then `rm -rf /Applications/ZClients.app && ditto backup/ZClients-Swift.app /Applications/ZClients.app`.
-Profiles and tabs carry over; the Swift app reads `clients.json` unchanged.
-
-To go back to 1.0.0 (before folder downloads and PDF tabs):
-`rm -rf /Applications/ZClients.app && ditto backup/ZClients-1.0.0.app /Applications/ZClients.app`.
-
-To go back to 2.5.0 after installing 2.5.1 (no data changes):
-`rm -rf /Applications/ZClients.app && ditto backup/ZClients-2.5.0.app /Applications/ZClients.app`.
-
-To go back to 2.4.0 after installing 2.5.0 (no data changes):
-`rm -rf /Applications/ZClients.app && ditto backup/ZClients-2.4.0.app /Applications/ZClients.app`.
-
-To go back to 2.3.1 after installing 2.4.0 (no data changes; settings.json
-gains `appearance`, which 2.3.1 ignores; picture/video/audio tabs from 2.4
-show "This file is no longer available" in 2.3.1):
-`rm -rf /Applications/ZClients.app && ditto backup/ZClients-2.3.1.app /Applications/ZClients.app`.
-
-To go back to 2.3.0 after installing 2.3.1 (no data changes):
-`rm -rf /Applications/ZClients.app && ditto backup/ZClients-2.3.0.app /Applications/ZClients.app`.
-
-To go back to 2.2.0 after installing 2.3.0 (no data changes; settings.json
-gains `firstClickReachesPage`, which 2.2.0 ignores):
-`rm -rf /Applications/ZClients.app && ditto backup/ZClients-2.2.0.app /Applications/ZClients.app`.
-
-To go back to 1.5.0 after installing 2.0.0 (no data changes; see `docs/MIGRATION.md`):
-`rm -rf /Applications/ZClients.app && ditto backup/ZClients-1.5.0.app /Applications/ZClients.app`.
-
-To go back to 1.4.0 after installing 1.5.0:
-`rm -rf /Applications/ZClients.app && ditto backup/ZClients-1.4.0.app /Applications/ZClients.app`.
-Saved logins must then be re-entered (1.4.0 cannot read the 1.5 vault format);
-see `docs/MIGRATION.md`.
+The old app copies in `backup/` were deleted on 2026-11-02 at the owner's
+request (the earlier versions were less reliable). Every release is still
+tagged in git, so an older version can be rebuilt if it is ever needed:
+quit ZClients, then `git checkout v2.5.0 && ./build.sh` (any `vX.Y.Z` tag),
+and `git checkout master` afterwards. Profiles, tabs and saved logins carry
+over between versions. `./build.sh` keeps the app it replaces in `backup/`
+again from the next install on.
