@@ -19,6 +19,7 @@ HOME=$H ZCLIENTS_SELFTEST=a11y ZCLIENTS_ALERTS=decline "$APP"
 HOME=$H ZCLIENTS_SELFTEST=address2 "$APP"
 HOME=$H ZCLIENTS_SELFTEST=downloads ZCLIENTS_ALERTS=accept "$APP"
 HOME=$H ZCLIENTS_SELFTEST=search "$APP"
+HOME=$H ZCLIENTS_SELFTEST=merge ZCLIENTS_ALERTS=decline "$APP"   # Writer-style late window.open to http:// opens over https, no question
 HOME=$H ZCLIENTS_SELFTEST=print "$APP"
 HOME=$H ZCLIENTS_SELFTEST=window ZCLIENTS_ALERTS=accept "$APP"
 HOME=$H ZCLIENTS_SELFTEST=addressbar "$APP"       # logs the window number twice: screencapture -l <n>
@@ -89,6 +90,9 @@ slides in a Settings panel in Chrome, nothing in ZClients.
 ## Manual verification checklist (real app, real accounts)
 
 Run on the test app first; on the real app only after installing 2.0.0.
+
+**New in 2.5.2** (2026-11-03)
+- [ ] Zoho Writer › a merge template › Automate › Run merge (Merge as a new document): the merged document opens in a new tab or window with no "wants to open a pop-up window" question, and the Writer page keeps working while the merge runs.
 
 **New in 2.5.1** (2026-11-02)
 - [ ] With a Meet meeting open in any client (or any Meet page in front) the toolbar Meet button is greyed out and Go › New Google Meet Meeting (⇧⌘M) is disabled; close the meeting's tab (or switch to a Zoho tab with no meeting open) and both come back.

@@ -728,6 +728,45 @@ fn meet_popup_test() {
     });
 }
 
+/// `ZCLIENTS_SELFTEST=merge` (with `ZCLIENTS_ALERTS=decline`): Zoho
+/// Writer's mail merge opens its result window seconds after the click,
+/// with an http:// address. A Zoho page doing that gets the page over https
+/// without any question: as a tab (plain window.open) and as a popup window
+/// (an empty window sent there), which must stay open.
+fn merge_test() {
+    let visible_windows = || NSApplication::sharedApplication(MainThreadMarker::new().unwrap()).windows().iter().filter(|w| w.isVisible()).count();
+    util::after(2.0, || {
+        app::add_client("Merge Test", "#336699", None, app::LoginChange::Keep, Default::default());
+        app::address_entered("https://www.zoho.com/");
+    });
+    util::after(12.0, move || {
+        report("loaded");
+        util::log(format!("SELFTEST MERGE before: {} visible windows={}", tab_summary(), visible_windows()));
+        web::eval_active(
+            "(() => { setTimeout(() => { window.__zcMerge = window.open('http://www.zoho.com/writer/') ? 'opened' : 'refused'; }, 100); return 'tab without a click'; })()",
+            |r| util::log(format!("SELFTEST MERGE {r}")),
+        );
+    });
+    util::after(17.0, move || {
+        util::log(format!("SELFTEST MERGE as a tab: {} (want a 2nd tab on https://www.zoho.com/writer/)", tab_summary()));
+        app::select_tab_index(0);
+    });
+    util::after(18.0, move || {
+        web::eval_active(
+            "(() => { setTimeout(() => { const w = window.open('', '_blank', 'width=500,height=400'); window.__zcMerge = w ? 'opened' : 'refused'; if (w) setTimeout(() => { w.location.href = 'http://www.zoho.com/crm/'; }, 800); }, 100); return 'popup without a click'; })()",
+            |r| util::log(format!("SELFTEST MERGE {r}")),
+        );
+    });
+    util::after(23.0, move || {
+        web::eval_active("(() => String(window.__zcMerge))()", |r| util::log(format!("SELFTEST MERGE popup: {r} (want opened)")));
+        util::log(format!("SELFTEST MERGE popup window still open: visible windows={} (want 2)", visible_windows()));
+    });
+    util::after(25.0, || {
+        util::log("SELFTEST done");
+        app::quit_without_asking();
+    });
+}
+
 /// `ZCLIENTS_SELFTEST=logins`: Settings › Saved Logins lists every client
 /// with its saved login, and Save changes it (made-up test credentials).
 fn logins_test() {
@@ -965,7 +1004,9 @@ fn security_test() {
     util::after(13.0, || {
         let before = tab_count();
         web::eval_active("(() => { window.open('https://www.zoho.com/crm/'); return 'window.open without a click'; })()", |r| util::log(format!("SELFTEST SEC {r}")));
-        util::after(2.0, move || util::log(format!("SELFTEST SEC popup without gesture: tabs {before} -> {}", tab_count())));
+        // Allowed since 2.5.2 for first-party Zoho pages (Writer's merge
+        // opens its result late); widgets and other pages still need a click.
+        util::after(2.0, move || util::log(format!("SELFTEST SEC first-party Zoho popup without gesture: tabs {before} -> {} (want +1)", tab_count())));
     });
     util::after(16.0, || {
         let before = downloads::with_items(|v| v.len());
@@ -1657,6 +1698,7 @@ pub fn start() {
         Ok("memory") => return memory_test(),
         Ok("meet") => return meet_test(),
         Ok("meetpopup") => return meet_popup_test(),
+        Ok("merge") => return merge_test(),
         Ok("logins") => return logins_test(),
         Ok("address") => return address_test(),
         Ok("security") => return security_test(),

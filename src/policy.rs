@@ -342,6 +342,11 @@ pub fn decide(cap: Capability, r: &Request) -> Decision {
                 Decision::Deny
             }
         }
+        // Zoho's own apps open their result windows when server work ends
+        // (Writer's mail merge, report exports), long after the click that
+        // started it. Only first-party Zoho hosts get this; widgets and
+        // other pages still need a click.
+        Capability::Popup if !r.user_gesture && is_first_party_zoho(origin) => Decision::Allow,
         Capability::Download | Capability::ExternalLink | Capability::Popup => {
             if !r.displayable() {
                 // An outside page (OAuth provider, ad frame) never acts on
@@ -372,6 +377,25 @@ fn host_in<S: AsRef<str>>(host: &str, domains: &[S]) -> bool {
 /// injected cleartext response can never be treated as a trusted page.
 pub fn is_https(url: &Url) -> bool {
     url.scheme() == "https"
+}
+
+/// A Zoho app itself (crm.zoho.com, writer.zoho.eu, …): never a widget,
+/// partner or user-content host.
+pub fn is_first_party_zoho(origin: &Origin) -> bool {
+    origin.scheme == "https" && origin.port == 443 && host_in(&origin.host.trim_end_matches('.').to_ascii_lowercase(), ZOHO_DOMAINS)
+}
+
+/// The https address for a cleartext link to a Zoho host. Some Zoho
+/// services hand back http:// links (Writer's merged documents); Zoho only
+/// redirects them to https, so that is what gets loaded. None for anything
+/// else, including explicit ports.
+pub fn upgrade_zoho_http(url: &Url) -> Option<Url> {
+    if url.scheme() != "http" || url.port().is_some() || !url.username().is_empty() || url.password().is_some() {
+        return None;
+    }
+    let mut upgraded = url.clone();
+    upgraded.set_scheme("https").ok()?;
+    is_zoho_family(&upgraded).then_some(upgraded)
 }
 
 /// Zoho plus every Zoho-owned host widgets are served from.
@@ -765,10 +789,37 @@ mod tests {
     fn downloads_popups_and_deep_links_need_a_gesture_or_consent() {
         for cap in [Capability::Download, Capability::Popup, Capability::ExternalLink] {
             assert_eq!(decide(cap, &req("https://crm.zoho.com/", true, true)), Decision::Allow);
-            assert_eq!(decide(cap, &req("https://crm.zoho.com/", true, false)), Decision::Prompt, "{cap:?} without a click asks");
+            let no_click = if cap == Capability::Popup { Decision::Allow } else { Decision::Prompt };
+            assert_eq!(decide(cap, &req("https://crm.zoho.com/", true, false)), no_click, "{cap:?} without a click");
+            assert_eq!(decide(cap, &req("https://x.zappsusercontent.com/", true, false)), Decision::Prompt, "{cap:?} from a widget without a click asks");
             assert_eq!(decide(cap, &req("https://ads.example.com/", true, false)), Decision::Deny, "{cap:?} outside page, no click");
             assert_eq!(decide(cap, &req("https://ads.example.com/", true, true)), Decision::Prompt, "{cap:?} outside page asks even after a click");
             assert_eq!(decide(cap, &req("http://crm.zoho.com/", true, true)), Decision::Deny, "{cap:?} over cleartext");
+        }
+    }
+
+    #[test]
+    fn first_party_zoho_pages_open_windows_without_a_recent_click() {
+        // Writer's mail merge opens the merged document once the server is done.
+        assert_eq!(decide(Capability::Popup, &req("https://writer.zoho.com/writer/open/x", true, false)), Decision::Allow);
+        assert_eq!(decide(Capability::Popup, &req("https://analytics.zoho.eu/", false, false)), Decision::Allow);
+        // Widgets, Meet and outside pages still need a click (or are refused).
+        assert_eq!(decide(Capability::Popup, &req("https://x.zappsusercontent.com/", false, false)), Decision::Prompt);
+        assert_eq!(decide(Capability::Popup, &req("https://meet.google.com/abc-defg-hij", true, false)), Decision::Prompt);
+        assert_eq!(decide(Capability::Popup, &req("https://ads.example.com/", true, false)), Decision::Deny);
+        assert_eq!(decide(Capability::Popup, &req("https://writer.zoho.com.evil.net/", true, false)), Decision::Deny);
+        // Only pop-ups: downloads and app links without a click still ask.
+        assert_eq!(decide(Capability::Download, &req("https://writer.zoho.com/", true, false)), Decision::Prompt);
+        assert_eq!(decide(Capability::ExternalLink, &req("https://crm.zoho.com/", true, false)), Decision::Prompt);
+    }
+
+    #[test]
+    fn cleartext_zoho_links_become_https() {
+        let up = upgrade_zoho_http(&u("http://writer.zoho.com/writer/open/abc?x=1#y")).unwrap();
+        assert_eq!(up.as_str(), "https://writer.zoho.com/writer/open/abc?x=1#y");
+        assert!(upgrade_zoho_http(&u("http://WRITER.Zoho.EU/")).is_some());
+        for s in ["https://writer.zoho.com/", "http://example.com/", "http://writer.zoho.com:8080/", "http://a:b@writer.zoho.com/", "http://zoho.com.evil.net/", "ftp://writer.zoho.com/"] {
+            assert!(upgrade_zoho_http(&u(s)).is_none(), "{s}");
         }
     }
 

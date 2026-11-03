@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Bool, ProtocolObject};
-use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
+use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAlert, NSAlertStyle, NSApplication, NSBackingStoreType, NSEvent, NSMenu, NSMenuItem, NSOpenPanel, NSResponder, NSTextField, NSUserInterfaceItemIdentification, NSView,
     NSWindow, NSWindowDelegate, NSWindowStyleMask, NSWorkspace,
@@ -1347,6 +1347,21 @@ impl Coordinator {
         let source_trusted = self.trusted_opt(unsafe { action.sourceFrame() });
         let user_link = unsafe { action.navigationType() } == WKNavigationType::LinkActivated;
 
+        // http:// to a Zoho host (Writer hands its merged documents out that
+        // way): load the https page Zoho would redirect to. Refusing it left
+        // the merge's new window to close itself at once.
+        if let Some(https) = policy::upgrade_zoho_http(&url) {
+            let is_get = unsafe { action.request() }.HTTPMethod().is_none_or(|m| m.to_string().eq_ignore_ascii_case("GET"));
+            if is_get && let Some(nsurl) = NSURL::URLWithString(&util::ns(https.as_str())) {
+                util::log(format!("cleartext Zoho address loaded over https ({})", https.host_str().unwrap_or_default()));
+                let web = web.retain();
+                util::later(move || unsafe {
+                    web.loadRequest(&NSURLRequest::requestWithURL(&nsurl));
+                });
+                return WKNavigationActionPolicy::Cancel;
+            }
+        }
+
         // The Search workspace roams Google Search and opens Zoho pages in
         // place, in its own cookie store; Meet becomes a tab of a real
         // client; any other website is blocked (never handed to the
@@ -1464,6 +1479,7 @@ impl Coordinator {
             return WKNavigationActionPolicy::Allow;
         }
         // Nothing will ever show in a popup whose first page was refused.
+        util::log(format!("{} refused {}:{}", if iv.popup_window.borrow().is_some() { "popup page" } else { "page" }, url.scheme(), url.host_str().unwrap_or_default()));
         self.close_blank_popup(user_link);
         WKNavigationActionPolicy::Cancel
     }
@@ -1555,9 +1571,10 @@ impl Coordinator {
 
     fn open_window(&self, web: &WKWebView, cfg: &WKWebViewConfiguration, action: &WKNavigationAction, features: &WKWindowFeatures) -> Option<Retained<WKWebView>> {
         let iv = self.ivars();
-        let mtm = self.mtm();
         let text = ns_str_url(unsafe { action.request() }.URL()).unwrap_or_default();
-        let url = policy::parse(&text);
+        // An http:// link to a Zoho host is treated as the https page Zoho
+        // redirects it to (Writer's mail merge opens its result that way).
+        let url = policy::parse(&text).map(|u| policy::upgrade_zoho_http(&u).unwrap_or(u));
         let source_trusted = self.trusted_opt(unsafe { action.sourceFrame() });
         let user_link = unsafe { action.navigationType() } == WKNavigationType::LinkActivated;
         let sized = unsafe { features.width().is_some() || features.height().is_some() };
@@ -1570,8 +1587,13 @@ impl Coordinator {
         let source = unsafe { action.sourceFrame() };
         let source_request = request_for(web, source.as_deref(), iv.workspace);
         // Background tabs and pages without a recent click do not get new
-        // windows on their own; a page the app shows may ask.
-        let popup_ok = |what: &str| -> bool {
+        // windows on their own. Zoho's own apps may (policy); for any other
+        // page the window is refused now and the user is asked afterwards.
+        // Never ask inside this callback: the page is paused until it
+        // returns, and an app-modal alert here froze the page (and, once
+        // hidden behind a window or on another Space, the whole app).
+        let replay = url.clone().filter(|u| policy::is_https(u) && is_get);
+        let popup_ok = |what: &'static str| -> bool {
             if !is_foreground(web, iv.tab_id) {
                 util::log("window.open from a background page refused");
                 return false;
@@ -1580,7 +1602,11 @@ impl Coordinator {
                 Decision::Allow => true,
                 Decision::Prompt if source_trusted => {
                     let who = source_request.origin.as_ref().map(Origin::display).unwrap_or_default();
-                    confirm(&format!("{} — {who} wants to open {what}", profile_name(iv.client_id)), "It was not opened by a click in the page.", "Allow")
+                    match replay.clone() {
+                        Some(u) => self.offer_blocked_popup(web, who, what, u),
+                        None => util::log(format!("pop-up without a click refused ({who})")),
+                    }
+                    false
                 }
                 _ => false,
             }
@@ -1642,9 +1668,16 @@ impl Coordinator {
         if !source_trusted || iv.depth >= MAX_POPUP_DEPTH || !popup_ok("a pop-up window") {
             return None;
         }
-        let w = unsafe { features.width() }.map(|n| n.doubleValue()).unwrap_or(980.0).clamp(320.0, 1600.0);
-        let h = unsafe { features.height() }.map(|n| n.doubleValue()).unwrap_or(720.0).clamp(240.0, 1200.0);
-        let rect = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(w, h));
+        let w = unsafe { features.width() }.map(|n| n.doubleValue()).unwrap_or(980.0);
+        let h = unsafe { features.height() }.map(|n| n.doubleValue()).unwrap_or(720.0);
+        Some(Retained::into_super(self.new_popup_window(cfg, w, h)))
+    }
+
+    /// A popup window holding a web view made with `cfg`, shown in front.
+    fn new_popup_window(&self, cfg: &WKWebViewConfiguration, w: f64, h: f64) -> Retained<ZWebView> {
+        let iv = self.ivars();
+        let mtm = self.mtm();
+        let rect = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(w.clamp(320.0, 1600.0), h.clamp(240.0, 1200.0)));
         let window = unsafe {
             NSWindow::initWithContentRect_styleMask_backing_defer(
                 NSWindow::alloc(mtm),
@@ -1668,7 +1701,32 @@ impl Coordinator {
         window.makeKeyAndOrderFront(None);
         *coord.ivars().popup_window.borrow_mut() = Some(window);
         POOL.with_borrow_mut(|p| p.popups.push((coord, popup.clone())));
-        Some(Retained::into_super(popup))
+        popup
+    }
+
+    /// A page the app shows tried to open `url` without a click and was
+    /// refused. Once the page has carried on, ask whether to open it after
+    /// all: as a tab when the app shows it, otherwise in a popup window
+    /// (without `window.opener`, which only a live window.open can give).
+    fn offer_blocked_popup(&self, web: &WKWebView, who: String, what: &'static str, url: Url) {
+        util::log(format!("pop-up without a click refused; asking afterwards ({who})"));
+        let iv = self.ivars();
+        let (client, ws, opener) = (iv.client_id, iv.workspace, iv.tab_id);
+        let me = self.retain();
+        let web = web.retain();
+        util::later(move || {
+            let title = format!("{} — {who} tried to open {what}", profile_name(client));
+            if !confirm(&title, &format!("It was not opened by a click in the page, so it was blocked.\n\n{}", url.as_str()), "Open It") {
+                return;
+            }
+            if opener.is_some() && policy::is_allowed_web(&url, ws) {
+                app::open_new_tab_from_page(client, ws, url, opener, false);
+            } else if let Some(nsurl) = NSURL::URLWithString(&util::ns(url.as_str())) {
+                let cfg = unsafe { web.configuration() };
+                let popup = me.new_popup_window(&cfg, 980.0, 720.0);
+                unsafe { popup.loadRequest(&NSURLRequest::requestWithURL(&nsurl)) };
+            }
+        });
     }
 
     /// The request behind a response that is a file: the file's own origin
