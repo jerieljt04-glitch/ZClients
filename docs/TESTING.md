@@ -91,6 +91,9 @@ slides in a Settings panel in Chrome, nothing in ZClients.
 
 Run on the test app first; on the real app only after installing 2.0.0.
 
+**New in 2.5.3** (2026-11-15)
+- [ ] A client whose Zoho Desk is on its own domain (support.palmaholding.com/agent/…) opens inside ZClients, not in the default browser; so does a `<portal>.zohodesk.com` address. An ordinary outside website still opens in the default browser.
+
 **New in 2.5.2** (2026-11-03)
 - [ ] Zoho Writer › a merge template › Automate › Run merge (Merge as a new document): the merged document opens in a new tab or window with no "wants to open a pop-up window" question, and the Writer page keeps working while the merge runs.
 
