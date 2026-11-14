@@ -63,6 +63,15 @@ fn content_domains() -> &'static [String] {
     })
 }
 
+/// Zoho Desk help centres and agent portals some organisations use instead
+/// of desk.zoho.*: `<portal>.zohodesk.<dc suffix>` (zohodesk.com, .eu, .in,
+/// .com.au, .jp, .ca, .sa, .uk, .com.cn, .ae, .sg — all checked live with a
+/// valid certificate 2026-11-14).
+fn desk_domains() -> &'static [String] {
+    static D: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    D.get_or_init(|| per_dc("zohodesk"))
+}
+
 /// Data centres where Log360 Cloud does not answer (checked 2026-10-26:
 /// no HTTPS service at log360cloud.manageengine.<sa|sg|com.cn>). Not
 /// trusted until Zoho runs it there.
@@ -398,9 +407,132 @@ pub fn upgrade_zoho_http(url: &Url) -> Option<Url> {
     is_zoho_family(&upgraded).then_some(upgraded)
 }
 
-/// Zoho plus every Zoho-owned host widgets are served from.
+/// Zoho plus every Zoho-owned host widgets are served from, and an
+/// organisation's own domain for a Zoho app (see `is_zoho_hosted`).
 pub fn is_zoho_family(url: &Url) -> bool {
-    is_https(url) && host_lower(url).is_some_and(|h| host_in(&h, ZOHO_DOMAINS) || host_in(&h, widget_domains()) || host_in(&h, content_domains()) || host_in(&h, partner_domains()))
+    is_https(url)
+        && host_lower(url).is_some_and(|h| {
+            host_in(&h, ZOHO_DOMAINS)
+                || host_in(&h, desk_domains())
+                || host_in(&h, widget_domains())
+                || host_in(&h, content_domains())
+                || host_in(&h, partner_domains())
+                || (url.port().is_none() && matches!(url.host(), Some(url::Host::Domain(_))) && is_zoho_hosted(&h))
+        })
+}
+
+/// Where Zoho serves organisations' own domains from. A company's Desk at
+/// support.palmaholding.com is a DNS alias (CNAME) of desk.cs.zohohost.com;
+/// other regions end in zohohost.<region> or a Zoho data centre's own
+/// domain (zoho.jp, zoho.sg). Checked live 2026-11-14.
+fn hosting_domains() -> &'static [String] {
+    static D: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    D.get_or_init(|| per_dc("zohohost"))
+}
+
+/// Is `cname` (a host's final DNS name) one of Zoho's servers?
+pub fn is_zoho_hosting_name(cname: &str) -> bool {
+    let c = cname.trim_end_matches('.').to_ascii_lowercase();
+    host_in(&c, hosting_domains()) || host_in(&c, ZOHO_DOMAINS)
+}
+
+/// Answers kept for the life of the app; a lookup that failed or timed out
+/// is retried after this long.
+const HOSTED_RETRY: std::time::Duration = std::time::Duration::from_secs(30);
+#[cfg_attr(test, allow(dead_code))]
+const HOSTED_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1500);
+
+type HostedCache = std::sync::Mutex<std::collections::HashMap<String, (bool, Option<std::time::Instant>)>>;
+
+fn hosted_cache() -> &'static HostedCache {
+    static C: std::sync::OnceLock<HostedCache> = std::sync::OnceLock::new();
+    C.get_or_init(Default::default)
+}
+
+/// An organisation's own address for a Zoho app (a Desk portal on its own
+/// domain): the host's DNS name leads to Zoho's servers. Zoho only serves
+/// such a domain over https once the organisation has set it up there, so
+/// the page is Zoho's. Looked up once per host (cached), at most
+/// `HOSTED_TIMEOUT` of waiting.
+fn is_zoho_hosted(host: &str) -> bool {
+    if !host.contains('.') {
+        return false;
+    }
+    if let Some((answer, failed_at)) = hosted_cache().lock().ok().and_then(|c| c.get(host).copied()) {
+        match failed_at {
+            Some(t) if t.elapsed() >= HOSTED_RETRY => {}
+            _ => return answer,
+        }
+    }
+    let (answer, failed) = match canonical_name(host) {
+        Some(cname) => (is_zoho_hosting_name(&cname), false),
+        None => (false, true),
+    };
+    if let Ok(mut c) = hosted_cache().lock() {
+        c.insert(host.to_string(), (answer, failed.then(std::time::Instant::now)));
+    }
+    if answer {
+        crate::util::log(format!("{host} is served by Zoho (own domain)"));
+    }
+    answer
+}
+
+#[cfg(test)]
+fn canonical_name(host: &str) -> Option<String> {
+    // Tests never touch the network; they name their answers here.
+    match host {
+        "support.example-desk.com" => Some("desk.cs.zohohost.com".into()),
+        "help.example-au.com" => Some("zs-au1-lczhost-h2.zohohost.com.au".into()),
+        _ => Some(host.into()),
+    }
+}
+
+/// The host's final DNS name (the end of its CNAME chain), from the system
+/// resolver on a helper thread so a slow network costs at most
+/// `HOSTED_TIMEOUT`.
+#[cfg(not(test))]
+fn canonical_name(host: &str) -> Option<String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let name = std::ffi::CString::new(host).ok()?;
+    std::thread::Builder::new()
+        .name("zoho-host-lookup".into())
+        .spawn(move || {
+            let _ = tx.send(resolve_canonical(&name));
+        })
+        .ok()?;
+    rx.recv_timeout(HOSTED_TIMEOUT).ok().flatten()
+}
+
+#[cfg(not(test))]
+fn resolve_canonical(name: &std::ffi::CStr) -> Option<String> {
+    use std::ffi::{c_char, c_int, c_void};
+    // struct addrinfo as macOS lays it out (<netdb.h>).
+    #[repr(C)]
+    struct AddrInfo {
+        ai_flags: c_int,
+        ai_family: c_int,
+        ai_socktype: c_int,
+        ai_protocol: c_int,
+        ai_addrlen: u32,
+        ai_canonname: *mut c_char,
+        ai_addr: *mut c_void,
+        ai_next: *mut AddrInfo,
+    }
+    unsafe extern "C" {
+        fn getaddrinfo(node: *const c_char, service: *const c_char, hints: *const AddrInfo, res: *mut *mut AddrInfo) -> c_int;
+        fn freeaddrinfo(res: *mut AddrInfo);
+    }
+    const AI_CANONNAME: c_int = 0x2;
+    const SOCK_STREAM: c_int = 1;
+    let hints = AddrInfo { ai_flags: AI_CANONNAME, ai_family: 0, ai_socktype: SOCK_STREAM, ai_protocol: 0, ai_addrlen: 0, ai_canonname: std::ptr::null_mut(), ai_addr: std::ptr::null_mut(), ai_next: std::ptr::null_mut() };
+    let mut res: *mut AddrInfo = std::ptr::null_mut();
+    if unsafe { getaddrinfo(name.as_ptr(), std::ptr::null(), &hints, &mut res) } != 0 || res.is_null() {
+        return None;
+    }
+    let cname = unsafe { (*res).ai_canonname };
+    let out = (!cname.is_null()).then(|| unsafe { std::ffi::CStr::from_ptr(cname) }.to_string_lossy().into_owned());
+    unsafe { freeaddrinfo(res) };
+    out
 }
 
 pub fn is_zoho_widget(url: &Url) -> bool {
@@ -883,6 +1015,21 @@ mod tests {
         }
         assert_eq!(dc_suffix("zohocloud.ca"), "ca");
         assert_eq!(dc_suffix("zoho.com.au"), "com.au");
+        assert!(is_allowed_web(&u("https://acme.zohodesk.com/portal/en/home"), Workspace::Zoho));
+        assert!(is_allowed_web(&u("https://acme.zohodesk.eu/agent/acme/acme/tickets"), Workspace::Zoho));
+        assert!(is_allowed_web(&u("https://acme.zohodesk.ca/"), Workspace::Zoho));
+        assert!(!is_allowed_web(&u("https://zohodesk.com.evil.net/"), Workspace::Zoho));
+        // An organisation's own domain for its Desk, aliased to Zoho's servers.
+        assert!(is_allowed_web(&u("https://support.example-desk.com/agent/x/y/tickets/list/open-cases"), Workspace::Zoho));
+        assert!(is_allowed_web(&u("https://help.example-au.com/"), Workspace::Zoho));
+        assert!(!is_allowed_web(&u("http://support.example-desk.com/"), Workspace::Zoho));
+        assert!(!is_allowed_web(&u("https://support.example-desk.com:8443/"), Workspace::Zoho));
+        assert!(!is_allowed_web(&u("https://www.example.com/"), Workspace::Zoho));
+        assert!(is_zoho_hosting_name("desk.cs.zohohost.com."));
+        assert!(is_zoho_hosting_name("zs-sg-dca-lczhost.zoho.sg"));
+        assert!(!is_zoho_hosting_name("zohohost.com.evil.net"));
+        assert!(!is_zoho_hosting_name("e6858.dsce9.akamaiedge.net"));
+        assert!(!is_allowed_web(&u("http://acme.zohodesk.com/"), Workspace::Zoho));
         assert!(is_allowed_web(&u("https://log360cloud.manageengine.uk/"), Workspace::Zoho));
         assert!(!is_allowed_web(&u("https://log360cloud.manageengine.sa/"), Workspace::Zoho), "not served there");
         assert!(!is_allowed_web(&u("https://zappsusercontent.ae.evil.net/"), Workspace::Zoho));
