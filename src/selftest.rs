@@ -1801,25 +1801,6 @@ pub fn start() {
     });
 }
 
-#[cfg(test)]
-mod tests {
-    use super::parity_failures;
-
-    #[test]
-    fn parity_passes_only_one_click_that_finished_every_animation() {
-        let good = serde_json::json!({"clicks": 1, "blurred": false, "transitionend": 320, "widthTransitionend": 320, "animationend": 320, "waapi": 320, "tween": 330, "rafPerSec": 31, "panel": "none", "hasFocus": true});
-        assert!(parity_failures(&good, true).is_empty());
-        assert_eq!(parity_failures(&good, false), vec!["rafPerSec=Some(31.0) (need ≥ 55)"], "30 fps only passes in Low Power Mode");
-        let swallowed = serde_json::json!({"clicks": 0, "blurred": false, "panel": "matrix(1, 0, 0, 1, 300, 0)", "hasFocus": true});
-        let fails = parity_failures(&swallowed, true);
-        assert!(fails.contains(&"clicks=0".to_string()) && fails.iter().any(|f| f.starts_with("panel transform")));
-        let mut slow = good.clone();
-        slow["transitionend"] = 1200.into();
-        slow["blurred"] = true.into();
-        assert_eq!(parity_failures(&slow, true), vec!["transitionend=Some(1200.0)", "blur fired"]);
-    }
-}
-
 fn r26_client() -> Option<uuid::Uuid> {
     // The newest one: earlier runs leave theirs in the test app's data.
     app::store(|s| s.clients.iter().rev().find(|c| c.name == "R26").map(|c| c.id))
@@ -1896,7 +1877,9 @@ fn release26_test() {
             util::log(format!("SELFTEST R26 document {name}: tab {}", tab.is_some()));
             util::after(6.0, move || {
                 util::log(format!("SELFTEST R26 document {name} shows {}", active_url()));
-                web::eval_active("(document.body ? document.body.innerText : '').replace(/\\s+/g, ' ').slice(0, 120)", move |r| util::log(format!("SELFTEST R26 document text: {r}")));
+                web::eval_active("(document.body ? document.body.innerText : '').replace(/\\s+/g, ' ').slice(0, 120)", move |r| {
+                    util::log(format!("SELFTEST R26 document text: {r}"))
+                });
             });
         });
     }
@@ -1957,4 +1940,23 @@ fn page_keys_test() {
         util::log("SELFTEST done");
         app::quit_without_asking();
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parity_failures;
+
+    #[test]
+    fn parity_passes_only_one_click_that_finished_every_animation() {
+        let good = serde_json::json!({"clicks": 1, "blurred": false, "transitionend": 320, "widthTransitionend": 320, "animationend": 320, "waapi": 320, "tween": 330, "rafPerSec": 31, "panel": "none", "hasFocus": true});
+        assert!(parity_failures(&good, true).is_empty());
+        assert_eq!(parity_failures(&good, false), vec!["rafPerSec=Some(31.0) (need ≥ 55)"], "30 fps only passes in Low Power Mode");
+        let swallowed = serde_json::json!({"clicks": 0, "blurred": false, "panel": "matrix(1, 0, 0, 1, 300, 0)", "hasFocus": true});
+        let fails = parity_failures(&swallowed, true);
+        assert!(fails.contains(&"clicks=0".to_string()) && fails.iter().any(|f| f.starts_with("panel transform")));
+        let mut slow = good.clone();
+        slow["transitionend"] = 1200.into();
+        slow["blurred"] = true.into();
+        assert_eq!(parity_failures(&slow, true), vec!["transitionend=Some(1200.0)", "blur fired"]);
+    }
 }

@@ -491,9 +491,12 @@ fn is_zoho_hosted(host: &str) -> bool {
     }
 }
 
+/// Work waiting for each host's answer.
+type Waiters = std::collections::HashMap<String, Vec<Box<dyn FnOnce()>>>;
+
 thread_local! {
     /// Work waiting for a host's answer (main thread only).
-    static HOSTED_WAITERS: std::cell::RefCell<std::collections::HashMap<String, Vec<Box<dyn FnOnce()>>>> = std::cell::RefCell::new(Default::default());
+    static HOSTED_WAITERS: std::cell::RefCell<Waiters> = std::cell::RefCell::new(Default::default());
 }
 
 /// Run `then` once it is known whether `url` is served by Zoho: at once
@@ -624,7 +627,16 @@ fn resolve_canonical(name: &std::ffi::CStr) -> Option<String> {
     }
     const AI_CANONNAME: c_int = 0x2;
     const SOCK_STREAM: c_int = 1;
-    let hints = AddrInfo { ai_flags: AI_CANONNAME, ai_family: 0, ai_socktype: SOCK_STREAM, ai_protocol: 0, ai_addrlen: 0, ai_canonname: std::ptr::null_mut(), ai_addr: std::ptr::null_mut(), ai_next: std::ptr::null_mut() };
+    let hints = AddrInfo {
+        ai_flags: AI_CANONNAME,
+        ai_family: 0,
+        ai_socktype: SOCK_STREAM,
+        ai_protocol: 0,
+        ai_addrlen: 0,
+        ai_canonname: std::ptr::null_mut(),
+        ai_addr: std::ptr::null_mut(),
+        ai_next: std::ptr::null_mut(),
+    };
     let mut res: *mut AddrInfo = std::ptr::null_mut();
     if unsafe { getaddrinfo(name.as_ptr(), std::ptr::null(), &hints, &mut res) } != 0 || res.is_null() {
         return None;
@@ -871,7 +883,14 @@ mod tests {
     #[test]
     fn navigation_waits_only_for_hosts_dns_must_decide() {
         assert!(hosted_candidate(&u("https://support.example-desk.com/x")).is_some());
-        for s in ["https://crm.zoho.com/", "https://acme.zohodesk.eu/", "http://support.example-desk.com/", "https://support.example-desk.com:8443/", "https://10.0.0.1/", "https://localhost/"] {
+        for s in [
+            "https://crm.zoho.com/",
+            "https://acme.zohodesk.eu/",
+            "http://support.example-desk.com/",
+            "https://support.example-desk.com:8443/",
+            "https://10.0.0.1/",
+            "https://localhost/",
+        ] {
             assert!(hosted_candidate(&u(s)).is_none(), "{s}");
         }
         let ran = std::rc::Rc::new(std::cell::Cell::new(false));
@@ -1080,7 +1099,14 @@ mod tests {
         let up = upgrade_zoho_http(&u("http://writer.zoho.com/writer/open/abc?x=1#y")).unwrap();
         assert_eq!(up.as_str(), "https://writer.zoho.com/writer/open/abc?x=1#y");
         assert!(upgrade_zoho_http(&u("http://WRITER.Zoho.EU/")).is_some());
-        for s in ["https://writer.zoho.com/", "http://example.com/", "http://writer.zoho.com:8080/", "http://a:b@writer.zoho.com/", "http://zoho.com.evil.net/", "ftp://writer.zoho.com/"] {
+        for s in [
+            "https://writer.zoho.com/",
+            "http://example.com/",
+            "http://writer.zoho.com:8080/",
+            "http://a:b@writer.zoho.com/",
+            "http://zoho.com.evil.net/",
+            "ftp://writer.zoho.com/",
+        ] {
             assert!(upgrade_zoho_http(&u(s)).is_none(), "{s}");
         }
     }

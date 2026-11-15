@@ -446,7 +446,12 @@ fn rebuild() {
     // ---- keyboard ---------------------------------------------------------
     b.heading("Keyboard & mouse");
     b.checkbox("Control-A selects all (as on Windows); off: start of line", settings::get(|s| s.control_a_selects_all), sel!(toggleSetting:), 1);
-    b.checkbox("Web pages get keyboard shortcuts first (Zoho Writer, Sheet, Gmail…); the app keeps ⌘T, ⌘W, ⌘Q, tab switching, ⌃S and copy/paste", settings::get(|s| s.page_owns_editor_shortcuts), sel!(toggleSetting:), 2);
+    b.checkbox(
+        "Web pages get keyboard shortcuts first (Zoho Writer, Sheet, Gmail…); the app keeps ⌘T, ⌘W, ⌘Q, tab switching, ⌃S and copy/paste",
+        settings::get(|s| s.page_owns_editor_shortcuts),
+        sel!(toggleSetting:),
+        2,
+    );
     b.text("The app's own versions stay available: Toggle Sidebar ⌃S, Google Search ⌥⌘K, Download Current Page ⌥⌘S, Duplicate Tab from the File menu.", true);
     b.checkbox("Clicks in an inactive window go to the page", settings::get(|s| s.first_click_reaches_page), sel!(toggleSetting:), 4);
     b.text("Off: the first click only brings ZClients to the front, as in Safari.", true);

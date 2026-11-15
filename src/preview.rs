@@ -201,7 +201,13 @@ pub fn mime_allows_preview(mime: Option<&str>) -> bool {
         Some(m) => {
             matches!(
                 m.as_str(),
-                "" | "application/pdf" | "application/x-pdf" | "application/octet-stream" | "binary/octet-stream" | "application/download" | "application/force-download" | "application/zip"
+                "" | "application/pdf"
+                    | "application/x-pdf"
+                    | "application/octet-stream"
+                    | "binary/octet-stream"
+                    | "application/download"
+                    | "application/force-download"
+                    | "application/zip"
             ) || is_document_mime(&m)
                 || ((m.starts_with("image/") || m.starts_with("video/") || m.starts_with("audio/")) && !m.contains("svg"))
         }

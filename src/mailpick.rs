@@ -120,11 +120,7 @@ pub fn build() -> Retained<NSView> {
     title.setFrame(rect(0.0, 0.0, WIDTH, 40.0));
     column.addSubview(&title);
     y += 44.0;
-    let hint = ui::text(
-        "Your work email, signed in separately from every client. Links in your messages open here, any website.",
-        theme::Text::Body,
-        theme::Weight::Regular,
-    );
+    let hint = ui::text("Your work email, signed in separately from every client. Links in your messages open here, any website.", theme::Text::Body, theme::Weight::Regular);
     hint.setTextColor(Some(&theme::secondary_text()));
     hint.setFrame(rect(0.0, y, WIDTH, 40.0));
     if let Some(cell) = hint.cell() {

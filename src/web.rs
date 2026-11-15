@@ -1805,7 +1805,13 @@ impl Coordinator {
             // (an organisation's own domain, first visit): decide when it
             // comes, as a tab if it is Zoho, else as an outside link. This
             // callback must answer now, so the page gets no window object.
-            if iv.workspace != Workspace::Mail && is_get && source_trusted && iv.tab_id.is_some() && policy::zoho_answer_pending(u) && (user_link || recent_gesture(web, GESTURE_WINDOW)) {
+            if iv.workspace != Workspace::Mail
+                && is_get
+                && source_trusted
+                && iv.tab_id.is_some()
+                && policy::zoho_answer_pending(u)
+                && (user_link || recent_gesture(web, GESTURE_WINDOW))
+            {
                 let (client, ws, u2, opener) = (iv.client_id, iv.workspace, u.clone(), iv.tab_id);
                 policy::when_zoho_known(u, move || {
                     if policy::is_allowed_web(&u2, ws) {
@@ -3095,7 +3101,18 @@ fn start_download(view: &WKWebView, url: &NSURL) {
 /// view).
 fn download_in_hidden_view(client: Uuid, url: Retained<NSURL>) {
     let mtm = MainThreadMarker::new().expect("main thread");
-    let ws = app::store(|s| s.client(client).map(|c| if c.is_search() { Workspace::GoogleSearch } else if c.is_mail() { Workspace::Mail } else { Workspace::Zoho })).unwrap_or(Workspace::Zoho);
+    let ws = app::store(|s| {
+        s.client(client).map(|c| {
+            if c.is_search() {
+                Workspace::GoogleSearch
+            } else if c.is_mail() {
+                Workspace::Mail
+            } else {
+                Workspace::Zoho
+            }
+        })
+    })
+    .unwrap_or(Workspace::Zoho);
     let (view, store, store_id, new_store) = POOL.with_borrow_mut(|p| {
         let (store_id, store, new_store) = data_store(p, client, ws);
         let bridge = bridge(p, mtm);

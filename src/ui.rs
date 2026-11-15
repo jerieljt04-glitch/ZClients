@@ -1687,7 +1687,13 @@ pub(crate) fn client_row(c: &model::Client, width: f64, selected: bool) -> Retai
         bar.setAccessibilityElement(false);
         row.addSubview(&bar);
     }
-    let sym = if c.is_search() { Some("magnifyingglass") } else if c.is_mail() { Some("envelope.fill") } else { c.symbol_name.as_deref() };
+    let sym = if c.is_search() {
+        Some("magnifyingglass")
+    } else if c.is_mail() {
+        Some("envelope.fill")
+    } else {
+        c.symbol_name.as_deref()
+    };
     let b = badge(&c.color_hex, sym, &c.initials(), BADGE);
     b.setFrame(rect(PAD, (H - BADGE) / 2.0, BADGE, BADGE));
     row.addSubview(&b);
@@ -1702,7 +1708,8 @@ pub(crate) fn client_row(c: &model::Client, width: f64, selected: bool) -> Retai
     } else if c.is_mail() {
         "Your work email".to_string()
     } else {
-        format!("{n} tab{}", if n == 1 { "" } else { "s" }) };
+        format!("{n} tab{}", if n == 1 { "" } else { "s" })
+    };
     let sub = text(&sub_text, theme::Text::Footnote, theme::Weight::Regular);
     sub.setTextColor(Some(&theme::secondary_text()));
     sub.setFrame(rect(x, theme::GRID * 6.0 - 1.0, width - x - theme::GRID * 2.0, 16.0));
@@ -2609,7 +2616,25 @@ fn show_launcher(client: Uuid, name: &str) {
 fn refresh_toolbar() {
     refresh_meet_button();
     // 1: the Search workspace, 2: the Email workspace, 0: a client.
-    let info = app::store(|s| s.active_tab().map(|(c, t)| (c.color_hex.clone(), c.symbol_name.clone(), c.initials(), c.name.clone(), if c.is_search() { 1u8 } else if c.is_mail() { 2 } else { 0 }, t.id, t.url.clone())));
+    let info = app::store(|s| {
+        s.active_tab().map(|(c, t)| {
+            (
+                c.color_hex.clone(),
+                c.symbol_name.clone(),
+                c.initials(),
+                c.name.clone(),
+                if c.is_search() {
+                    1u8
+                } else if c.is_mail() {
+                    2
+                } else {
+                    0
+                },
+                t.id,
+                t.url.clone(),
+            )
+        })
+    });
     let page = info.as_ref().and_then(|i| web::page_state(i.5));
     let active_downloads = downloads::active_count();
     with_ui(|u| {

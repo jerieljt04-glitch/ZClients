@@ -464,7 +464,13 @@ impl Store {
         }
         for c in &mut self.clients {
             if c.tabs.is_empty() {
-                c.tabs.push(if c.is_search() { search_tab(GOOGLE_SEARCH_HOME) } else if c.is_mail() { mail_tab() } else { Tab::default() });
+                c.tabs.push(if c.is_search() {
+                    search_tab(GOOGLE_SEARCH_HOME)
+                } else if c.is_mail() {
+                    mail_tab()
+                } else {
+                    Tab::default()
+                });
             }
             for t in &mut c.tabs {
                 // Older builds saved the sign-in form as "where the user
@@ -840,7 +846,15 @@ impl Store {
         let search = c.is_search();
         let mail = c.is_mail();
         let url = url.or_else(|| search.then(|| GOOGLE_SEARCH_HOME.to_string()));
-        let title = title.unwrap_or_else(|| if search { "Google Search".into() } else if mail { MAIL_TITLE.into() } else { default_title() });
+        let title = title.unwrap_or_else(|| {
+            if search {
+                "Google Search".into()
+            } else if mail {
+                MAIL_TITLE.into()
+            } else {
+                default_title()
+            }
+        });
         // Every tab of the Email workspace is a Mail tab (its own sign-ins).
         let workspace = if mail { Some(Workspace::Mail) } else { workspace.or(search.then_some(Workspace::GoogleSearch)).filter(|w| *w != Workspace::Mail) };
         let tab = Tab { url, title, workspace, ..Tab::default() };
@@ -888,7 +902,13 @@ impl Store {
         let Some(i) = c.tabs.iter().position(|t| t.id == tab_id) else { return vec![] };
         let tab = c.tabs.remove(i);
         if c.tabs.is_empty() {
-            let t = if c.is_search() { search_tab(GOOGLE_SEARCH_HOME) } else if c.is_mail() { mail_tab() } else { Tab::default() };
+            let t = if c.is_search() {
+                search_tab(GOOGLE_SEARCH_HOME)
+            } else if c.is_mail() {
+                mail_tab()
+            } else {
+                Tab::default()
+            };
             c.active_tab_id = Some(t.id);
             c.tabs.push(t);
         } else if c.active_tab_id == Some(tab_id) {
@@ -933,7 +953,13 @@ impl Store {
             title: normalized_page_title(Some(title)).unwrap_or_else(|| "PDF".into()),
             pdf_path: Some(pdf_path.to_string()),
             pdf_source_url: source_url,
-            workspace: if c.is_search() { Some(Workspace::GoogleSearch) } else if c.is_mail() { Some(Workspace::Mail) } else { None },
+            workspace: if c.is_search() {
+                Some(Workspace::GoogleSearch)
+            } else if c.is_mail() {
+                Some(Workspace::Mail)
+            } else {
+                None
+            },
             ..Tab::default()
         };
         let id = tab.id;
@@ -985,7 +1011,13 @@ impl Store {
             effects.push(Effect::RemoveFile(p));
         }
         t.pdf_source_url = None;
-        t.title = if url.is_some() { fallback_title(url.as_deref()) } else if in_mail { MAIL_TITLE.into() } else { default_title() };
+        t.title = if url.is_some() {
+            fallback_title(url.as_deref())
+        } else if in_mail {
+            MAIL_TITLE.into()
+        } else {
+            default_title()
+        };
         t.url = url;
         t.workspace = workspace;
         effects
