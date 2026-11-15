@@ -114,6 +114,7 @@ proptest! {
     fn profiles_round_trip(names in prop::collection::vec("\\PC{0,30}", 1..6), urls in prop::collection::vec(any_url(), 0..6)) {
         let mut store = crate::model::Store::default();
         store.ensure_search_client();
+        store.ensure_mail_client();
         for n in &names {
             let id = store.add_client(n, "#123456", None);
             for u in &urls {

@@ -38,6 +38,19 @@ pub const EDITOR_HOOK: &str = r#"
     report(isCodeEditor(e.target));
   }, true);
   document.addEventListener('focusout', function (e) { if (!e.relatedTarget) { report(false); } }, true);
+  // Every ⌘/⌃ key the page let pass (did not preventDefault), checked once
+  // the event has gone through all of the page's handlers: the app then
+  // runs its own command for it (see `web::page_owned_shortcut`). The key
+  // name only; never text.
+  window.addEventListener('keydown', function (e) {
+    if (!e.metaKey && !e.ctrlKey) { return; }
+    var k = (e.key || '').toLowerCase();
+    if (k.length > 12) { return; }
+    setTimeout(function () {
+      if (e.defaultPrevented) { return; }
+      try { window.webkit.messageHandlers.zcEditor.postMessage({ passed: k }); } catch (x) {}
+    }, 0);
+  }, true);
   // Bubble phase on the window: after the editor's own handlers.
   window.addEventListener('keydown', function (e) {
     if (!e.metaKey || e.ctrlKey || e.altKey || e.defaultPrevented || !isCodeEditor(document.activeElement)) { return; }

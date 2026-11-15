@@ -94,7 +94,8 @@ fn user_agent_suffix(version: Option<&str>) -> String {
 /// The Search workspace keeps its own cookie store, derived from the client
 /// id the same way the Swift build did so existing Search sessions carry over.
 pub fn store_identifier(client: Uuid, workspace: Workspace) -> Uuid {
-    if workspace == Workspace::Zoho {
+    // The Email workspace has a system id of its own, which is its store.
+    if workspace == Workspace::Zoho || workspace == Workspace::Mail {
         return client;
     }
     let mut b = *client.as_bytes();
@@ -130,6 +131,13 @@ pub struct ZWebIvars {
     code_editor: Cell<bool>,
     /// The last real key press or click in this page (see `recent_gesture`).
     last_input: Cell<Option<Instant>>,
+    /// The page address when the user last typed, pasted or deleted text in
+    /// it. While the tab is still on that address it may hold unsaved work,
+    /// so Memory Saver leaves it awake (see `has_unsaved_typing`).
+    typed_at: RefCell<Option<String>>,
+    /// A ⌘/⌃ shortcut handed to the page first, and whether the app's own
+    /// command has since run for it (once the page let it pass).
+    page_key: RefCell<Option<(Retained<NSEvent>, Instant, bool)>>,
 }
 
 define_class!(
@@ -159,6 +167,12 @@ define_class!(
         #[unsafe(method(performKeyEquivalent:))]
         fn perform_key_equivalent(&self, event: &NSEvent) -> bool {
             self.note_input();
+            if is_key(event, "v", objc2_app_kit::NSEventModifierFlags::Command)
+                || is_key(event, "x", objc2_app_kit::NSEventModifierFlags::Command)
+                || is_key(event, "v", objc2_app_kit::NSEventModifierFlags::Command | objc2_app_kit::NSEventModifierFlags::Shift)
+            {
+                self.note_typing();
+            }
             // Control+A selects all too, the way it does in browsers on
             // Windows (on a Mac it would only move to the start of a line).
             // A setting turns this back into the Mac behaviour.
@@ -189,13 +203,34 @@ define_class!(
                 }
                 return true.into();
             }
-            let on_meet = ns_str_url(unsafe { self.URL() }).and_then(|u| policy::parse(&u)).is_some_and(|u| policy::is_google_meet(&u));
+            let here = ns_str_url(unsafe { self.URL() }).and_then(|u| policy::parse(&u));
+            let on_meet = here.as_ref().is_some_and(policy::is_google_meet);
+            // Pages get their shortcuts first (Zoho Writer's ⌘L, ⌘R, ⌘K...).
+            // WebKit never hands back a key the page leaves alone, so the
+            // page's script reports it (`scripts::EDITOR_HOOK`, "passed") and
+            // the app's command runs then, once. Only https pages carry that
+            // script; PDF and file tabs keep the menu first.
+            let flags = event.modifierFlags();
+            let combo = flags.intersects(objc2_app_kit::NSEventModifierFlags::Command | objc2_app_kit::NSEventModifierFlags::Control);
+            let chars = event.charactersIgnoringModifiers().map(|c| c.to_string()).unwrap_or_default();
+            if combo && here.as_ref().is_some_and(policy::is_https) && page_owned_shortcut(&chars, flags, on_meet, settings::get(|s| s.page_owns_editor_shortcuts)) {
+                let resent = self.ivars().page_key.borrow().as_ref().is_some_and(|(e, _, _)| same_key_event(e, event));
+                if resent {
+                    // WebKit handed the same press back: the page let it pass.
+                    return self.run_passed_shortcut(None).into();
+                }
+                *self.ivars().page_key.borrow_mut() = Some((event.retain(), Instant::now(), false));
+                return unsafe { msg_send![super(self), performKeyEquivalent: event] };
+            }
             menu_first(event, on_meet) || unsafe { msg_send![super(self), performKeyEquivalent: event] }
         }
 
         #[unsafe(method(keyDown:))]
         fn key_down(&self, event: &NSEvent) {
             self.note_input();
+            if changes_text(event) {
+                self.note_typing();
+            }
             unsafe {
                 let _: () = msg_send![super(self), keyDown: event];
             }
@@ -251,11 +286,39 @@ define_class!(
     }
 );
 
-/// App shortcuts that are also common editor shortcuts in web apps (Zoho
-/// Sheet fill-down ⌘D, Writer save ⌘S, insert link ⌘K, save as ⇧⌘S). While
-/// a page has the keyboard they go to the page; the app's own commands keep
-/// their always-available alternatives (⌃S, ⌥⌘K, ⌥⌘S, menus).
-pub fn page_owned_shortcut(chars: &str, mods: objc2_app_kit::NSEventModifierFlags, on_meet: bool, page_owns_editor_keys: bool) -> bool {
+/// The same physical key press (WebKit re-sending an event it was given).
+fn same_key_event(a: &NSEvent, b: &NSEvent) -> bool {
+    a.timestamp() == b.timestamp() && a.keyCode() == b.keyCode() && a.modifierFlags() == b.modifierFlags()
+}
+
+/// A key press that changes text: a character, Delete/Backspace, Return or
+/// Tab, without ⌘ or ⌃ (arrows, Esc and function keys only move around).
+fn changes_text(event: &NSEvent) -> bool {
+    use objc2_app_kit::NSEventModifierFlags as M;
+    if event.modifierFlags().intersects(M::Command | M::Control) {
+        return false;
+    }
+    let chars = event.characters().map(|c| c.to_string()).unwrap_or_default();
+    chars.chars().any(|c| !c.is_control() && !('\u{F700}'..='\u{F8FF}').contains(&c)) || matches!(event.keyCode(), 51 | 117 | 36 | 76 | 48)
+}
+
+/// The user typed on this page and it has not moved on since (saving a
+/// Zoho record changes the address). Such a tab may hold a half-written
+/// record, reply or document: it is not put to sleep, which would reload
+/// it and lose that text.
+fn has_unsaved_typing(view: &ZWebView) -> bool {
+    let typed = view.ivars().typed_at.borrow();
+    typed.is_some() && *typed == ns_str_url(unsafe { view.URL() })
+}
+
+/// Shortcuts a page with the keyboard gets first (setting on, the
+/// default): everything except `app_reserved_shortcut`. Zoho Writer's
+/// alignment (⌘L, ⌘R, ⌘E, ⌘J), find and replace (⌘F), link (⌘K), print
+/// (⌘P) and the rest reach the page, as in Chrome. When the page leaves a
+/// key unhandled, WebKit hands it back to the menu bar, so the app's own
+/// command still runs on pages that do not use that key. With the setting
+/// off, only Meet's ⌘D (mute) goes to the page first.
+pub fn page_owned_shortcut(chars: &str, mods: objc2_app_kit::NSEventModifierFlags, on_meet: bool, pages_first: bool) -> bool {
     use objc2_app_kit::NSEventModifierFlags as M;
     let held = mods & (M::Command | M::Shift | M::Option | M::Control);
     let key = chars.to_ascii_lowercase();
@@ -264,7 +327,39 @@ pub fn page_owned_shortcut(chars: &str, mods: objc2_app_kit::NSEventModifierFlag
     if on_meet && held == M::Command && key == "d" {
         return true;
     }
-    page_owns_editor_keys && ((held == M::Command && matches!(key.as_str(), "d" | "s" | "k")) || (held == M::Command | M::Shift && key == "s"))
+    pages_first && !app_reserved_shortcut(chars, mods)
+}
+
+/// Keys the app keeps even while a page has the keyboard, as browsers do:
+/// quitting, hiding and minimising; new, closed and reopened tabs and
+/// clients; switching tabs and clients; the sidebar (⌃S) and full screen;
+/// and the clipboard, Select All and Undo/Redo, which the Edit menu runs as
+/// WebKit's own commands on the page (the page still gets its copy, paste
+/// and undo events).
+pub fn app_reserved_shortcut(chars: &str, mods: objc2_app_kit::NSEventModifierFlags) -> bool {
+    use objc2_app_kit::NSEventModifierFlags as M;
+    let held = mods & (M::Command | M::Shift | M::Option | M::Control);
+    let key = chars.to_ascii_lowercase();
+    let k = key.as_str();
+    let digit = k.len() == 1 && k.as_bytes()[0].is_ascii_digit() && k != "0";
+    let (left, right, up, down) = ("\u{F702}", "\u{F703}", "\u{F700}", "\u{F701}");
+    if held == M::Command {
+        matches!(k, "q" | "w" | "t" | "h" | "m" | "," | "`" | "a" | "c" | "v" | "x" | "z") || digit
+    } else if held == M::Command | M::Shift {
+        matches!(k, "t" | "n" | "z" | "v" | "[" | "]" | "{" | "}")
+    } else if held == M::Command | M::Option {
+        k == "h" || digit || k == left || k == right
+    } else if held == M::Command | M::Shift | M::Option {
+        k == "v"
+    } else if held == M::Control || held == M::Control | M::Shift {
+        k == "s" || k == "\t" || k == "\u{19}"
+    } else if held == M::Command | M::Control {
+        matches!(k, "f" | "s" | "t") || k == up || k == down
+    } else if held == M::Command | M::Control | M::Option {
+        k == left || k == right
+    } else {
+        false
+    }
 }
 
 /// Shortcuts a focused code editor handles itself (CodeMirror, Ace, Monaco,
@@ -382,6 +477,30 @@ impl ZWebView {
         self.ivars().last_input.set(Some(Instant::now()));
     }
 
+    /// The page let the shortcut it was handed first pass (`key` as the page
+    /// named it, or None when WebKit itself handed the press back): run the
+    /// app's command for it, at most once per press, and only for a press
+    /// from the last 2 s.
+    fn run_passed_shortcut(&self, key: Option<&str>) -> bool {
+        let event = {
+            let mut slot = self.ivars().page_key.borrow_mut();
+            let Some((event, at, done)) = slot.as_mut() else { return false };
+            let named = event.charactersIgnoringModifiers().map(|c| c.to_string().to_lowercase()).unwrap_or_default();
+            if *done || at.elapsed() > Duration::from_secs(2) || key.is_some_and(|k| k != named && !(k.len() > 1 && named.len() == 1)) {
+                return false;
+            }
+            *done = true;
+            event.clone()
+        };
+        let Some(mtm) = MainThreadMarker::new() else { return false };
+        NSApplication::sharedApplication(mtm).mainMenu().is_some_and(|m| m.performKeyEquivalent(&event))
+    }
+
+    /// The user changed text on this page (typed, pasted, cut, deleted).
+    fn note_typing(&self) {
+        *self.ivars().typed_at.borrow_mut() = ns_str_url(unsafe { self.URL() });
+    }
+
     fn client_world(&self) -> Retained<WKContentWorld> {
         unsafe { WKContentWorld::defaultClientWorld(self.mtm()) }
     }
@@ -396,6 +515,8 @@ fn new_zweb(mtm: MainThreadMarker, frame: NSRect, cfg: &WKWebViewConfiguration, 
         last_click: Cell::new(None),
         code_editor: Cell::new(false),
         last_input: Cell::new(None),
+        typed_at: RefCell::new(None),
+        page_key: RefCell::new(None),
     });
     let web: Retained<ZWebView> = unsafe { msg_send![super(this), initWithFrame: frame, configuration: cfg] };
     unsafe {
@@ -539,6 +660,13 @@ define_class!(
             let request = request_for(web, Some(&frame), web.ivars().workspace);
             if name == scripts::EDITOR_HANDLER {
                 if policy::decide(Capability::Bridge, &request) == Decision::Allow {
+                    if let Some(key) = get("passed") {
+                        let web = web.retain();
+                        util::later(move || {
+                            web.run_passed_shortcut(Some(&key));
+                        });
+                        return;
+                    }
                     match get("unhandled").as_deref() {
                         // The editor has no find of its own: the app's.
                         Some(key @ ("f" | "g" | "shift+g")) => {
@@ -647,11 +775,24 @@ define_class!(
     unsafe impl WKNavigationDelegate for Coordinator {
         #[unsafe(method(webView:decidePolicyForNavigationAction:decisionHandler:))]
         fn decide_action(&self, web: &WKWebView, action: &WKNavigationAction, handler: &block2::DynBlock<dyn Fn(WKNavigationActionPolicy)>) {
+            // A main-frame page on a host whose DNS answer (is it Zoho on an
+            // organisation's own domain?) is still coming: decide once it
+            // is in. WebKit waits; the app does not.
+            if let Some(u) = self.pending_main_frame_url(unsafe { action.targetFrame() }.map(|f| unsafe { f.isMainFrame() }).unwrap_or(true), unsafe { action.request() }.URL()) {
+                let (me, web, action, handler) = (self.retain(), web.retain(), action.retain(), handler.copy());
+                policy::when_zoho_known(&u, move || handler.call((me.action_policy(&web, &action),)));
+                return;
+            }
             handler.call((self.action_policy(web, action),));
         }
 
         #[unsafe(method(webView:decidePolicyForNavigationResponse:decisionHandler:))]
         fn decide_response(&self, web: &WKWebView, response: &WKNavigationResponse, handler: &block2::DynBlock<dyn Fn(WKNavigationResponsePolicy)>) {
+            if let Some(u) = self.pending_main_frame_url(unsafe { response.isForMainFrame() }, unsafe { response.response() }.URL()) {
+                let (me, web, response, handler) = (self.retain(), web.retain(), response.retain(), handler.copy());
+                policy::when_zoho_known(&u, move || handler.call((me.response_policy(&web, &response),)));
+                return;
+            }
             handler.call((self.response_policy(web, response),));
         }
 
@@ -670,6 +811,7 @@ define_class!(
             // could stay routed as editor keys on the next page.
             if let Some(z) = web.downcast_ref::<ZWebView>() {
                 z.ivars().code_editor.set(false);
+                z.ivars().typed_at.replace(None);
             }
             if let Some(tab) = self.ivars().tab_id {
                 ui::clear_load_error(tab);
@@ -1023,6 +1165,8 @@ pub enum LoadError {
     Crashed,
     /// A PDF tab whose preview copy is missing or no longer a valid PDF.
     PdfMissing,
+    /// macOS could not make a preview of a Word/Excel/PowerPoint/CSV file.
+    PreviewFailed,
     /// The tab's saved address is not one this app shows any more.
     NotAllowed,
     /// The Google Search workspace opens only Google Search and Zoho pages.
@@ -1333,6 +1477,15 @@ impl Coordinator {
         let _ = web;
     }
 
+    /// A main-frame address whose "served by Zoho?" answer is still being
+    /// looked up. The Email workspace shows every site, so it never waits.
+    fn pending_main_frame_url(&self, main: bool, url: Option<Retained<NSURL>>) -> Option<Url> {
+        if !main || self.ivars().workspace == Workspace::Mail {
+            return None;
+        }
+        url.and_then(|u| util::url_string(&u)).and_then(|s| policy::parse(&s)).filter(policy::zoho_answer_pending)
+    }
+
     fn action_policy(&self, web: &WKWebView, action: &WKNavigationAction) -> WKNavigationActionPolicy {
         let iv = self.ivars();
         let main = unsafe { action.targetFrame() }.map(|f| unsafe { f.isMainFrame() }).unwrap_or(true);
@@ -1446,7 +1599,13 @@ impl Coordinator {
         if url.scheme() == "file" {
             // Only this tab's own PDF, nothing else on disk.
             let own = iv.tab_id.and_then(|t| app::store(|s| s.find_tab(t).and_then(|t| t.pdf_path.clone())));
-            let ok = url.to_file_path().is_ok_and(|p| own.is_some_and(|o| std::path::Path::new(&o) == p));
+            // (A Word/Excel/CSV tab shows Quick Look's page of its file.)
+            let ok = url.to_file_path().is_ok_and(|p| {
+                own.is_some_and(|o| {
+                    let o = std::path::Path::new(&o);
+                    o == p || (crate::preview::kind_by_name(o) == Some(crate::preview::Kind::Document) && crate::preview::rendered_page(o).as_deref() == Some(p.as_path()))
+                })
+            });
             return if ok { WKNavigationActionPolicy::Allow } else { WKNavigationActionPolicy::Cancel };
         }
 
@@ -1593,8 +1752,14 @@ impl Coordinator {
         // returns, and an app-modal alert here froze the page (and, once
         // hidden behind a window or on another Space, the whole app).
         let replay = url.clone().filter(|u| policy::is_https(u) && is_get);
+        let in_front = is_foreground(web, iv.tab_id);
+        // Zoho's own apps finish work in the background (a Writer merge, a
+        // report export) and then open the result. Refusing that because
+        // the user had moved to another tab lost the result without a word:
+        // it now opens as a tab behind the one in front.
+        let zoho_source = source_request.origin.as_ref().is_some_and(policy::is_first_party_zoho);
         let popup_ok = |what: &'static str| -> bool {
-            if !is_foreground(web, iv.tab_id) {
+            if !in_front && !zoho_source {
                 util::log("window.open from a background page refused");
                 return false;
             }
@@ -1636,15 +1801,35 @@ impl Coordinator {
                 unsafe { web.startDownloadUsingRequest_completionHandler(&request, &block) };
                 return None;
             }
+            // A host whose "served by Zoho?" answer is still being looked up
+            // (an organisation's own domain, first visit): decide when it
+            // comes, as a tab if it is Zoho, else as an outside link. This
+            // callback must answer now, so the page gets no window object.
+            if iv.workspace != Workspace::Mail && is_get && source_trusted && iv.tab_id.is_some() && policy::zoho_answer_pending(u) && (user_link || recent_gesture(web, GESTURE_WINDOW)) {
+                let (client, ws, u2, opener) = (iv.client_id, iv.workspace, u.clone(), iv.tab_id);
+                policy::when_zoho_known(u, move || {
+                    if policy::is_allowed_web(&u2, ws) {
+                        app::open_new_tab_from_page(client, ws, u2, opener, false);
+                    } else if ws == Workspace::Zoho {
+                        open_externally(&u2);
+                    }
+                });
+                return None;
+            }
             // ⌘-click, target=_blank and plain window.open(url) to a page
-            // this app shows: a new tab, like any browser.
-            if policy::is_allowed_web(u, iv.workspace) && !sized && is_get && iv.tab_id.is_some() {
+            // this app shows: a new tab, like any browser. From a page that
+            // is not in front (see `zoho_source`), a sized pop-up too: as a
+            // tab behind the current one rather than a window over it.
+            if policy::is_allowed_web(u, iv.workspace) && (!sized || !in_front) && is_get && iv.tab_id.is_some() {
                 if !popup_ok("a new tab") {
                     return None;
                 }
                 // Zoho opens most links from its own click handlers with
                 // window.open; ⌘ held for that click means a background tab.
-                let background = new_tab_click(web, action) && !wants_front(web, action);
+                let background = !in_front || (new_tab_click(web, action) && !wants_front(web, action));
+                if !in_front {
+                    util::log("a page not in front opened a window: added as a background tab");
+                }
                 let (client, ws, u, opener) = (iv.client_id, iv.workspace, u.clone(), iv.tab_id);
                 util::later(move || app::open_new_tab_from_page(client, ws, u, opener, background));
                 return None;
@@ -1998,6 +2183,39 @@ fn load_tab(view: &ZWebView, tab: &Tab) {
         let file = std::path::Path::new(path);
         let root = util::pdf_previews_dir();
         match (crate::preview::validate(file), crate::preview::preview_dir_of(&root, file)) {
+            // Word, Excel, PowerPoint, CSV: Quick Look's page of it, made
+            // once in the background, shown with scripts off; WebKit may
+            // read only that page's folder.
+            (Ok(crate::preview::Kind::Document), Some(_)) => {
+                let page = crate::preview::rendered_page(file);
+                if let Some(page) = page.filter(|p| p.is_file())
+                    && let Some(folder) = page.parent()
+                {
+                    let page_url = NSURL::fileURLWithPath(&util::ns(&page.to_string_lossy()));
+                    let folder = NSURL::fileURLWithPath(&util::ns(&folder.to_string_lossy()));
+                    unsafe { view.loadFileURL_allowingReadAccessToURL(&page_url, &folder) };
+                    return;
+                }
+                let (tab_id, file) = (tab.id, file.to_path_buf());
+                let started = std::thread::Builder::new().name("document-preview".into()).spawn(move || {
+                    let result = crate::preview::render_document(&file).map(|_| ()).map_err(|e| e.to_string());
+                    util::on_main(move || match result {
+                        Ok(()) => {
+                            if let (Some(view), Some(tab)) = (live_view(tab_id), app::store(|s| s.find_tab(tab_id).cloned())) {
+                                load_tab(&view, &tab);
+                            }
+                        }
+                        Err(e) => {
+                            util::log(format!("document preview failed: {e}"));
+                            ui::show_load_error(tab_id, LoadError::PreviewFailed, None);
+                        }
+                    });
+                });
+                if started.is_err() {
+                    explain_blank(tab.id, LoadError::PreviewFailed, None);
+                }
+                return;
+            }
             (Ok(_), Some(dir)) => {
                 let file = NSURL::fileURLWithPath(&util::ns(path));
                 let dir = NSURL::fileURLWithPath(&util::ns(&dir.to_string_lossy()));
@@ -2022,6 +2240,10 @@ fn load_tab(view: &ZWebView, tab: &Tab) {
         let data = NSData::with_bytes(&state);
         unsafe { view.setInteractionState(Some(&data)) };
         return;
+    }
+    if let Some(u) = policy::parse(url).filter(|u| ws != Workspace::Mail && policy::zoho_answer_pending(u)) {
+        let (view, tab) = (view.retain(), tab.clone());
+        return policy::when_zoho_known(&u, move || load_tab(&view, &tab));
     }
     let allowed = policy::parse(url).is_some_and(|u| policy::is_allowed_web(&u, ws));
     // A bare regional app address (a tab last left on its sign-in page)
@@ -2106,7 +2328,11 @@ fn idle_limit(pressure: usize) -> Duration {
 pub fn sleep_idle_tabs() {
     let victims: Vec<Uuid> = POOL.with_borrow(|p| {
         let limit = idle_limit(p.pressure);
-        p.live.iter().filter(|(id, l)| Some(**id) != p.active && !in_call(&l.view) && p.shown.get(*id).is_some_and(|t| t.elapsed() > limit)).map(|(id, _)| *id).collect()
+        p.live
+            .iter()
+            .filter(|(id, l)| Some(**id) != p.active && !in_call(&l.view) && !has_unsaved_typing(&l.view) && p.shown.get(*id).is_some_and(|t| t.elapsed() > limit))
+            .map(|(id, _)| *id)
+            .collect()
     });
     for id in victims {
         sleep_tab(id);
@@ -2324,7 +2550,12 @@ fn enforce_cap() {
 
 fn enforce_cap_keeping(keep: Option<Uuid>) {
     loop {
-        let victim = POOL.with_borrow(|p| pick_victim(&p.lru, p.live.len(), p.max_live, p.active, keep, |id| p.live.get(&id).is_some_and(|l| in_call(&l.view))));
+        // Unsaved typing keeps a tab awake over the cap, except when macOS
+        // is critically short of memory (then the Mac itself comes first).
+        let critical = POOL.with_borrow(|p| p.pressure & PRESSURE_CRITICAL != 0);
+        let victim = POOL.with_borrow(|p| {
+            pick_victim(&p.lru, p.live.len(), p.max_live, p.active, keep, |id| p.live.get(&id).is_some_and(|l| in_call(&l.view) || (!critical && has_unsaved_typing(&l.view))))
+        });
         match victim {
             Some(id) => sleep_tab(id),
             None => break,
@@ -2864,7 +3095,7 @@ fn start_download(view: &WKWebView, url: &NSURL) {
 /// view).
 fn download_in_hidden_view(client: Uuid, url: Retained<NSURL>) {
     let mtm = MainThreadMarker::new().expect("main thread");
-    let ws = if app::store(|s| s.client(client).is_some_and(|c| c.is_search())) { Workspace::GoogleSearch } else { Workspace::Zoho };
+    let ws = app::store(|s| s.client(client).map(|c| if c.is_search() { Workspace::GoogleSearch } else if c.is_mail() { Workspace::Mail } else { Workspace::Zoho })).unwrap_or(Workspace::Zoho);
     let (view, store, store_id, new_store) = POOL.with_borrow_mut(|p| {
         let (store_id, store, new_store) = data_store(p, client, ws);
         let bridge = bridge(p, mtm);
@@ -2887,7 +3118,14 @@ fn download_in_hidden_view(client: Uuid, url: Retained<NSURL>) {
 pub fn download_current() {
     // A PDF tab already has the file: save a copy under its own name.
     if let Some((path, title)) = app::store(|s| s.active_tab().and_then(|(_, t)| Some((t.pdf_path.clone()?, t.title.clone())))) {
-        downloads::save_copy(std::path::Path::new(&path), &downloads::pdf_name(&title));
+        // A PDF under the tab's title; any other preview (picture, Word,
+        // Excel...) under its own file name, never renamed to .pdf.
+        let path = std::path::Path::new(&path);
+        let name = match crate::preview::kind_by_name(path) {
+            Some(crate::preview::Kind::Pdf) | None => downloads::pdf_name(&title),
+            Some(_) => path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| downloads::pdf_name(&title)),
+        };
+        downloads::save_copy(path, &name);
         return;
     }
     let Some(v) = active_view() else { return };
@@ -2918,15 +3156,50 @@ mod tests {
     }
 
     #[test]
-    fn pages_keep_their_editor_shortcuts_and_meet_keeps_cmd_d() {
+    fn pages_get_shortcuts_first_except_the_apps_own() {
         use objc2_app_kit::NSEventModifierFlags as M;
         assert!(page_owned_shortcut("d", M::Command, true, false), "Meet mute, whatever the setting");
-        assert!(page_owned_shortcut("s", M::Command, false, true), "Writer save");
-        assert!(page_owned_shortcut("K", M::Command, false, true), "insert link");
-        assert!(page_owned_shortcut("s", M::Command | M::Shift, false, true));
+        // Zoho Writer: save, link, alignment, find, print, styles.
+        for (k, m) in [
+            ("s", M::Command),
+            ("K", M::Command),
+            ("l", M::Command),
+            ("r", M::Command),
+            ("e", M::Command),
+            ("j", M::Command),
+            ("f", M::Command),
+            ("p", M::Command),
+            ("b", M::Command),
+            ("d", M::Command),
+            ("s", M::Command | M::Shift),
+            ("l", M::Command | M::Shift),
+            ("7", M::Command | M::Shift),
+            ("1", M::Command | M::Option | M::Shift),
+            ("0", M::Command),
+        ] {
+            assert!(page_owned_shortcut(k, m, false, true), "{k} {m:?} goes to the page first");
+        }
         assert!(!page_owned_shortcut("s", M::Command, false, false), "setting off: the app's ⌘S");
-        for (k, m) in [("t", M::Command), ("w", M::Command), ("l", M::Command), ("r", M::Command), ("v", M::Command), ("1", M::Command), ("s", M::Command | M::Control)] {
-            assert!(!page_owned_shortcut(k, m, true, true), "browser shortcut {k} stays with the app");
+        for (k, m) in [
+            ("t", M::Command),
+            ("w", M::Command),
+            ("q", M::Command),
+            ("v", M::Command),
+            ("c", M::Command),
+            ("a", M::Command),
+            ("z", M::Command),
+            ("Z", M::Command | M::Shift),
+            ("1", M::Command),
+            ("9", M::Command),
+            ("3", M::Command | M::Option),
+            ("T", M::Command | M::Shift),
+            ("}", M::Command | M::Shift),
+            ("s", M::Control),
+            ("\t", M::Control),
+            ("s", M::Command | M::Control),
+            ("f", M::Command | M::Control),
+        ] {
+            assert!(!page_owned_shortcut(k, m, true, true), "{k} {m:?} stays with the app");
         }
     }
 

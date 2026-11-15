@@ -237,7 +237,7 @@ fn authenticate(reason: &str, done: impl FnOnce(bool) + 'static) {
 
 /// Real clients in sidebar order, with their saved login if any.
 fn clients() -> Vec<(Uuid, String)> {
-    app::store(|s| s.ordered().iter().filter(|c| !c.is_search()).map(|c| (c.id, c.name.clone())).collect())
+    app::store(|s| s.ordered().iter().filter(|c| !c.is_system()).map(|c| (c.id, c.name.clone())).collect())
 }
 
 fn open_window() {

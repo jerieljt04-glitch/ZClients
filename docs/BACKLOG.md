@@ -52,3 +52,14 @@ Still open from the 2.0 backlog after 2.3.1: Log360 Cloud SA/SG/CN (waits on Zoh
 | Item | Status | Notes |
 |---|---|---|
 | Meet button started a second meeting during a call | Done | Meet's instant meetings live at `meet.google.com/meet/<code>`, which `policy::is_google_meet_call` did not recognise, so the running call looked idle. Both forms are recognised now; the Meet button and ⇧⌘M are disabled while a meeting is open in any client (`web::open_meeting`: an awake Meet tab on a meeting page or using camera/mic) or a Meet page is in front (`app::meet_locked`); `app::open_meet` only brings an open meeting forward. |
+
+# 2.6.0 (2026-11-15)
+
+| Item | Status | Notes |
+|---|---|---|
+| Unsaved typing lost when Memory Saver slept a tab | Done | A tab typed in (keys, paste, cut, delete) and still on that address is never slept for idleness, nor for the awake-tab cap unless macOS reports critical pressure (`web::has_unsaved_typing`). Selftest `release26`. |
+| Background tab's window silently refused | Done | A first-party Zoho page not in front opens its window as a background tab (`zoho_source`, open_window); other pages are still refused. |
+| DNS check could freeze the window | Done | `policy::when_zoho_known`: the lookup runs on a helper thread; navigation decisions (WebKit allows answering later), tab loads and new windows wait for it; nothing blocks the main thread (1.5 s cap). |
+| Word / Excel / PowerPoint / CSV in a tab | Done | `preview::Kind::Document`; Quick Look (`qlmanage -p -o`) renders `rendered/Preview.html` once, shown with a no-script CSP and read access to that folder only. The tab keeps the original for Download. |
+| Page shortcuts first | Done | Every ⌘/⌃ key goes to an https page first except `web::app_reserved_shortcut`. WebKit does NOT hand unused keys back (verified with real keys), so EDITOR_HOOK reports `passed` keys and the app runs its command once (`run_passed_shortcut`). PDF/file tabs keep the menu first. Real-key selftest `pagekeys`. |
+| Email workspace | Done | Pinned row `model::MAIL_ID`, `Workspace::Mail` (store = its id); any http(s) site allowed there; chooser `mailpick.rs`. Older builds cannot read a clients.json with the Email row (unknown enum value): they show the "damaged file" dialog, which keeps the file. Roll back by removing that row first. |

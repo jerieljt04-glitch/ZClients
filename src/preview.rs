@@ -1,4 +1,5 @@
-//! File previews (PDFs, images, video, audio): validation and private storage.
+//! File previews (PDFs, images, video, audio, and Word / Excel / PowerPoint
+//! / CSV documents): validation and private storage.
 //!
 //! A file is only shown when its first bytes say what it is (`%PDF-`, a
 //! JPEG/PNG/GIF/WebP/HEIC... signature, an MP4/QuickTime/MP3/WAV header), it
@@ -45,7 +46,7 @@ impl std::fmt::Display for PreviewError {
             PreviewError::Missing => "the file is gone",
             PreviewError::NotRegularFile => "it is not a plain file",
             PreviewError::TooLarge => "it is larger than 200 MB",
-            PreviewError::NotPreviewable => "it is not a PDF, picture, video or audio file",
+            PreviewError::NotPreviewable => "it is not a PDF, picture, video, audio or Office/CSV file",
             PreviewError::WrongExtension => "its name does not match its contents",
             PreviewError::Io(_) => "it could not be read",
         })
@@ -59,6 +60,11 @@ pub enum Kind {
     Image,
     Video,
     Audio,
+    /// Word, Excel, PowerPoint or CSV. WebKit cannot show these; macOS Quick
+    /// Look turns the file into a page (see `render_document`), which the
+    /// tab shows with scripts blocked. The tab keeps the original file, so
+    /// Download saves the real document.
+    Document,
 }
 
 impl Kind {
@@ -70,6 +76,7 @@ impl Kind {
             Kind::Image => &["jpg", "jpeg", "png", "gif", "webp", "bmp", "tif", "tiff", "heic", "heif", "avif"],
             Kind::Video => &["mp4", "m4v", "mov"],
             Kind::Audio => &["mp3", "m4a", "aac", "wav"],
+            Kind::Document => &["docx", "xlsx", "pptx", "doc", "xls", "ppt", "csv"],
         }
     }
 
@@ -80,6 +87,7 @@ impl Kind {
             Kind::Image => "picture",
             Kind::Video => "video",
             Kind::Audio => "audio",
+            Kind::Document => "document",
         }
     }
 }
@@ -141,7 +149,36 @@ pub fn format_of(head: &[u8]) -> Option<Format> {
     if head.starts_with(b"ID3") || (head.len() >= 2 && head[0] == 0xFF && head[1] & 0xE0 == 0xE0 && head[1] & 0x06 != 0 && head[1] < 0xFE) {
         return fmt(Kind::Audio, "mp3");
     }
+    // Word/Excel/PowerPoint 2007+ are ZIP packages; 97-2003 are OLE
+    // compound files. Which one is decided by the name (`doc_family`).
+    if head.starts_with(b"PK\x03\x04") {
+        return fmt(Kind::Document, "docx");
+    }
+    if head.starts_with(&[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1]) {
+        return fmt(Kind::Document, "doc");
+    }
+    // CSV: plain text (no NUL or other binary control bytes), not markup,
+    // with a separator or line break in its first bytes.
+    if !head.is_empty()
+        && head.iter().all(|b| *b >= 0x20 || matches!(b, b'\t' | b'\n' | b'\r'))
+        && head.iter().find(|b| !b.is_ascii_whitespace()) != Some(&b'<')
+        && head.iter().any(|b| matches!(b, b',' | b';' | b'\t' | b'\n'))
+    {
+        return fmt(Kind::Document, "csv");
+    }
     None
+}
+
+/// Which byte family a document extension needs: ZIP (docx/xlsx/pptx),
+/// OLE (doc/xls/ppt) or text (csv). A ZIP named .xls, or text named .docx,
+/// is not shown.
+fn doc_family(ext: &str) -> Option<&'static str> {
+    match ext {
+        "docx" | "xlsx" | "pptx" => Some("docx"),
+        "doc" | "xls" | "ppt" => Some("doc"),
+        "csv" => Some("csv"),
+        _ => None,
+    }
 }
 
 fn extension_of(path: &Path) -> Option<String> {
@@ -152,7 +189,7 @@ fn extension_of(path: &Path) -> Option<String> {
 /// passed [`validate`] (their name matches their bytes); used for labels.
 pub fn kind_by_name(path: &Path) -> Option<Kind> {
     let ext = extension_of(path)?;
-    [Kind::Pdf, Kind::Image, Kind::Video, Kind::Audio].into_iter().find(|k| k.extensions().contains(&ext.as_str()))
+    [Kind::Pdf, Kind::Image, Kind::Video, Kind::Audio, Kind::Document].into_iter().find(|k| k.extensions().contains(&ext.as_str()))
 }
 
 /// Is the response's MIME type consistent with something a preview shows?
@@ -164,8 +201,9 @@ pub fn mime_allows_preview(mime: Option<&str>) -> bool {
         Some(m) => {
             matches!(
                 m.as_str(),
-                "" | "application/pdf" | "application/x-pdf" | "application/octet-stream" | "binary/octet-stream" | "application/download" | "application/force-download"
-            ) || ((m.starts_with("image/") || m.starts_with("video/") || m.starts_with("audio/")) && !m.contains("svg"))
+                "" | "application/pdf" | "application/x-pdf" | "application/octet-stream" | "binary/octet-stream" | "application/download" | "application/force-download" | "application/zip"
+            ) || is_document_mime(&m)
+                || ((m.starts_with("image/") || m.starts_with("video/") || m.starts_with("audio/")) && !m.contains("svg"))
         }
     }
 }
@@ -173,7 +211,13 @@ pub fn mime_allows_preview(mime: Option<&str>) -> bool {
 /// Does the MIME type say this is something a preview shows?
 pub fn mime_is_previewable(mime: Option<&str>) -> bool {
     let m = mime.map(|m| m.split(';').next().unwrap_or("").trim().to_ascii_lowercase()).unwrap_or_default();
-    m == "application/pdf" || ((m.starts_with("image/") || m.starts_with("video/") || m.starts_with("audio/")) && !m.contains("svg"))
+    m == "application/pdf" || is_document_mime(&m) || ((m.starts_with("image/") || m.starts_with("video/") || m.starts_with("audio/")) && !m.contains("svg"))
+}
+
+/// Word, Excel, PowerPoint and CSV as servers label them.
+fn is_document_mime(m: &str) -> bool {
+    m.starts_with("application/vnd.openxmlformats-officedocument.")
+        || matches!(m, "application/msword" | "application/vnd.ms-excel" | "application/vnd.ms-powerpoint" | "text/csv" | "application/csv" | "text/comma-separated-values")
 }
 
 /// Open `path` without following a final symlink and check it is a regular
@@ -206,6 +250,7 @@ pub fn sniff(path: &Path) -> Result<(std::fs::File, Format), PreviewError> {
 pub fn open_validated(path: &Path) -> Result<(std::fs::File, Format), PreviewError> {
     let (f, format) = sniff(path)?;
     match extension_of(path) {
+        Some(ext) if format.kind == Kind::Document && doc_family(&ext) != doc_family(format.ext) => Err(PreviewError::WrongExtension),
         Some(ext) if format.kind.extensions().contains(&ext.as_str()) => Ok((f, format)),
         _ => Err(PreviewError::WrongExtension),
     }
@@ -235,7 +280,8 @@ pub fn preview_file_name(name: &str, format: Format) -> String {
         return crate::downloads::pdf_name(name);
     }
     let name = crate::downloads::safe_filename(name);
-    if extension_of(Path::new(&name)).is_some_and(|e| format.kind.extensions().contains(&e.as_str())) { name } else { format!("{name}.{}", format.ext) }
+    let fits = |e: &str| if format.kind == Kind::Document { doc_family(e) == doc_family(format.ext) } else { format.kind.extensions().contains(&e) };
+    if extension_of(Path::new(&name)).is_some_and(|e| fits(&e)) { name } else { format!("{name}.{}", format.ext) }
 }
 
 /// Copy a file whose bytes are a preview kind into its own new preview
@@ -297,6 +343,83 @@ pub fn remove_preview(root: &Path, file: &Path) {
     }
 }
 
+/// Where a document's page lives: `<preview folder>/rendered/Preview.html`.
+pub fn rendered_page(file: &Path) -> Option<PathBuf> {
+    Some(file.parent()?.join("rendered").join("Preview.html"))
+}
+
+/// Scripts, outside requests and forms are off in a document's page: it is
+/// Quick Look's rendering of the file, styles and pictures only.
+const DOCUMENT_CSP: &str = r#"<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline' file:; img-src file: data:; font-src file: data:; media-src file:; form-action 'none'">"#;
+
+/// Put the content policy first in the page, before anything it loads.
+pub fn with_csp(html: &str) -> String {
+    let lower = html.to_ascii_lowercase();
+    match lower.find("<head>") {
+        Some(i) => format!("{}{DOCUMENT_CSP}{}", &html[..i + 6], &html[i + 6..]),
+        None => format!("{DOCUMENT_CSP}{html}"),
+    }
+}
+
+/// Turn a validated document into a page with macOS Quick Look (the same
+/// renderer Finder's preview uses), next to it in its own preview folder.
+/// Blocking (up to 30 s): call off the main thread. Returns the page.
+pub fn render_document(file: &Path) -> Result<PathBuf, PreviewError> {
+    let (_, format) = open_validated(file)?;
+    if format.kind != Kind::Document {
+        return Err(PreviewError::NotPreviewable);
+    }
+    let page = rendered_page(file).ok_or(PreviewError::Missing)?;
+    if page.is_file() {
+        return Ok(page);
+    }
+    let dir = file.parent().ok_or(PreviewError::Missing)?;
+    let work = dir.join(format!(".render-{}", uuid::Uuid::new_v4().simple()));
+    std::fs::create_dir(&work).map_err(|e| PreviewError::Io(e.to_string()))?;
+    let _ = std::fs::set_permissions(&work, std::fs::Permissions::from_mode(0o700));
+    let result = (|| {
+        let mut child = std::process::Command::new("/usr/bin/qlmanage")
+            .arg("-p")
+            .arg("-o")
+            .arg(&work)
+            .arg(file)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|e| PreviewError::Io(e.to_string()))?;
+        let started = std::time::Instant::now();
+        loop {
+            if child.try_wait().map_err(|e| PreviewError::Io(e.to_string()))?.is_some() {
+                break;
+            }
+            if started.elapsed() > std::time::Duration::from_secs(30) {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(PreviewError::Io("Quick Look took too long".into()));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        // Quick Look writes `<name>.qlpreview/Preview.html` plus its pictures.
+        let bundle = std::fs::read_dir(&work)
+            .map_err(|e| PreviewError::Io(e.to_string()))?
+            .flatten()
+            .map(|e| e.path())
+            .find(|p| p.extension().is_some_and(|e| e == "qlpreview") && p.join("Preview.html").is_file())
+            .ok_or(PreviewError::NotPreviewable)?;
+        let html = std::fs::read_to_string(bundle.join("Preview.html")).map_err(|e| PreviewError::Io(e.to_string()))?;
+        std::fs::write(bundle.join("Preview.html"), with_csp(&html)).map_err(|e| PreviewError::Io(e.to_string()))?;
+        let target = page.parent().ok_or(PreviewError::Missing)?;
+        // A half-made one from an earlier try goes first.
+        let _ = std::fs::remove_dir_all(target);
+        std::fs::rename(&bundle, target).map_err(|e| PreviewError::Io(e.to_string()))?;
+        let _ = std::fs::set_permissions(target, std::fs::Permissions::from_mode(0o700));
+        Ok(page.clone())
+    })();
+    let _ = std::fs::remove_dir_all(&work);
+    result
+}
+
 /// Delete every preview no tab refers to. Returns how many were removed.
 pub fn prune(root: &Path, keep: &HashSet<PathBuf>) -> usize {
     let keep_dirs: HashSet<PathBuf> = keep.iter().filter_map(|f| preview_dir_of(root, f)).collect();
@@ -333,6 +456,45 @@ pub fn migrate_flat(root: &Path, file: &Path, name: &str) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn office_and_csv_files_are_documents_only_with_a_matching_name() {
+        use std::io::Write;
+        let root = std::env::temp_dir().join(format!("zc-doc-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&root).unwrap();
+        let write = |name: &str, bytes: &[u8]| {
+            let p = root.join(name);
+            std::fs::File::create(&p).unwrap().write_all(bytes).unwrap();
+            p
+        };
+        let zip = b"PK\x03\x04\x14\x00\x06\x00rest-of-a-package";
+        let ole = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1, 0, 0, 0, 0];
+        assert_eq!(validate(&write("Report.xlsx", zip)), Ok(Kind::Document));
+        assert_eq!(validate(&write("Letter.docx", zip)), Ok(Kind::Document));
+        assert_eq!(validate(&write("Old.xls", &ole)), Ok(Kind::Document));
+        assert_eq!(validate(&write("Leads.csv", b"Name,Amount\nAcme,10\n")), Ok(Kind::Document));
+        assert_eq!(validate(&write("Archive.zip", zip)), Err(PreviewError::WrongExtension), "a plain zip is not a document");
+        assert_eq!(validate(&write("Fake.xls", zip)), Err(PreviewError::WrongExtension), "zip bytes, old-format name");
+        assert_eq!(validate(&write("Fake.docx", b"just, some text here")), Err(PreviewError::WrongExtension));
+        assert_eq!(validate(&write("Page.csv", b"<html><script>x</script>")), Err(PreviewError::NotPreviewable), "markup is not CSV");
+        assert_eq!(validate(&write("notes.txt", b"hello, there")), Err(PreviewError::WrongExtension));
+        assert_eq!(kind_by_name(Path::new("a/b/Report.XLSX")), Some(Kind::Document));
+        assert_eq!(preview_file_name("Report.xlsx", format_of(zip).unwrap()), "Report.xlsx");
+        assert_eq!(preview_file_name("export", format_of(zip).unwrap()), "export.docx");
+        assert!(mime_is_previewable(Some("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")));
+        assert!(mime_allows_preview(Some("text/csv; charset=utf-8")));
+        assert!(!mime_allows_preview(Some("text/html")));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn document_pages_get_a_no_script_policy_first() {
+        let html = with_csp("<html><head><title>t</title><script>alert(1)</script></head><body></body></html>");
+        let csp = html.find("Content-Security-Policy").unwrap();
+        assert!(csp < html.find("<title>").unwrap() && csp < html.find("<script>").unwrap());
+        assert!(html.contains("default-src 'none'"));
+        assert!(with_csp("<p>no head</p>").starts_with("<meta http-equiv=\"Content-Security-Policy\""));
+    }
+
     use super::*;
 
     fn scratch() -> PathBuf {
@@ -486,7 +648,8 @@ mod tests {
         assert_eq!(k(b"ID3\x04\0\0\0\0\0\0"), Some((Kind::Audio, "mp3")));
         assert_eq!(k(&[0xFF, 0xFB, 0x90, 0x44]), Some((Kind::Audio, "mp3")));
         assert_eq!(k(PDF), Some((Kind::Pdf, "pdf")));
-        for not in [&b"<svg xmlns='http://www.w3.org/2000/svg'>"[..], b"<html>", &[0xFF, 0xFE, b'h', 0], b"PK\x03\x04", b"", b"%PD"] {
+        assert_eq!(k(b"PK\x03\x04"), Some((Kind::Document, "docx")), "a ZIP package: a document only if its name says so");
+        for not in [&b"<svg xmlns='http://www.w3.org/2000/svg'>"[..], b"<html>", &[0xFF, 0xFE, b'h', 0], b"", b"%PD"] {
             assert_eq!(format_of(not), None, "{not:?}");
         }
     }

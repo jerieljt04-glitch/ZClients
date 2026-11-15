@@ -787,7 +787,7 @@ fn logins_test() {
         crate::logins::edit_for_test(0, "first@example.com", "new-secret");
     });
     util::after(4.0, || {
-        let ids: Vec<uuid::Uuid> = app::store(|s| s.ordered().iter().filter(|c| !c.is_search()).map(|c| c.id).collect());
+        let ids: Vec<uuid::Uuid> = app::store(|s| s.ordered().iter().filter(|c| !c.is_system()).map(|c| c.id).collect());
         let saved: Vec<String> = ids.iter().map(|id| crate::keychain::read_login(*id).map(|l| format!("{} / {}", l.email, l.password)).unwrap_or_else(|| "none".into())).collect();
         util::log(format!("SELFTEST LOGINS after Save: {}; vault now {saved:?}", crate::logins::describe_for_test()));
     });
@@ -1712,6 +1712,8 @@ pub fn start() {
         Ok("window") => return window_test(),
         Ok("announce") => return announce_test(),
         Ok("addressbar") => return address_bar_test(),
+        Ok("release26") => return release26_test(),
+        Ok("pagekeys") => return page_keys_test(),
         Ok(_) => {}
         Err(_) => return,
     }
@@ -1816,4 +1818,143 @@ mod tests {
         slow["blurred"] = true.into();
         assert_eq!(parity_failures(&slow, true), vec!["transitionend=Some(1200.0)", "blur fired"]);
     }
+}
+
+fn r26_client() -> Option<uuid::Uuid> {
+    // The newest one: earlier runs leave theirs in the test app's data.
+    app::store(|s| s.clients.iter().rev().find(|c| c.name == "R26").map(|c| c.id))
+}
+
+fn r26_tabs() -> Vec<(uuid::Uuid, Option<String>, bool)> {
+    let live = web::live_tabs();
+    app::store(|s| r26_client().and_then(|id| s.client(id)).map(|c| c.tabs.iter().map(|t| (t.id, t.url.clone(), live.contains(&t.id))).collect())).unwrap_or_default()
+}
+
+/// `ZCLIENTS_SELFTEST=release26` (with ZCLIENTS_IDLE_SECS=3,
+/// ZCLIENTS_NO_EXTERNAL=1 and ZCLIENTS_DOC_SAMPLES=<a.csv>:<b.xlsx>...):
+/// unsaved typing keeps a tab awake through Memory Saver; a Zoho page in
+/// the background opens its window as a background tab; an organisation's
+/// own Zoho domain opens in the client; the Email workspace opens any site;
+/// Word/Excel/CSV files open as document tabs.
+fn release26_test() {
+    util::after(2.0, || {
+        app::add_client("R26", "#336655", None, app::LoginChange::Keep, Default::default());
+        app::address_entered("https://www.zoho.com/");
+    });
+    util::after(7.0, || app::address_entered_in_new_tab("https://www.zoho.com/crm/"));
+    util::after(11.0, || app::address_entered_in_new_tab("https://www.zoho.com/books/"));
+    // Tab A: type into a box, and leave a window.open for 6 s later.
+    util::after(16.0, || {
+        app::select_tab_index(0);
+        util::after(1.0, || {
+            web::eval_active(
+                "(() => { const i = document.body.appendChild(document.createElement('input')); i.id = 'zc-r26'; i.style.cssText = 'position:fixed;top:10px;left:10px;z-index:2147483647'; i.focus(); setTimeout(() => window.open('https://www.zoho.com/mail/', '_blank'), 6000); return 'focused ' + (document.activeElement === i); })()",
+                |r| util::log(format!("SELFTEST R26 tab A: {r}")),
+            );
+            if let Some(v) = web::active_view() {
+                ui::focus_view(&v);
+            }
+            util::after(0.8, || {
+                for c in ["h", "i"] {
+                    press(c, 4, NSEventModifierFlags::empty());
+                }
+                web::eval_active("document.getElementById('zc-r26').value", |r| util::log(format!("SELFTEST R26 typed into tab A: {r}")));
+            });
+        });
+    });
+    // To tab B before the window opens: tab A is now in the background.
+    util::after(19.0, || app::select_tab_index(1));
+    util::after(28.0, || {
+        let tabs = r26_tabs();
+        let mail = tabs.iter().any(|(_, u, _)| u.as_deref().is_some_and(|u| u.contains("zoho.com/mail")));
+        util::log(format!("SELFTEST R26 background window opened as a tab: {mail}; front tab still {}", active_url()));
+        web::sleep_idle_tabs();
+        let tabs = r26_tabs();
+        let a = tabs.first().map(|t| t.2);
+        let c = tabs.iter().find(|(_, u, _)| u.as_deref().is_some_and(|u| u.contains("/books"))).map(|t| t.2);
+        util::log(format!("SELFTEST R26 after Memory Saver: tab A (typed) awake={a:?}, books tab (not typed) awake={c:?}"));
+    });
+    util::after(31.0, || app::address_entered_in_new_tab("https://support.palmaholding.com/"));
+    util::after(40.0, || util::log(format!("SELFTEST R26 own-domain Desk shown in the client: {}", active_url())));
+    util::after(42.0, || {
+        app::open_mail();
+        let state = app::store(|s| s.active_tab().map(|(c, t)| (c.is_mail(), t.url.clone(), t.effective_workspace())));
+        util::log(format!("SELFTEST R26 Email row: {state:?}"));
+        util::after(1.0, || app::open_in_active_tab(url::Url::parse("https://www.example.com/").unwrap()));
+    });
+    util::after(50.0, || {
+        let state = app::store(|s| s.active_tab().map(|(c, t)| (c.is_mail(), t.effective_workspace())));
+        util::log(format!("SELFTEST R26 any site in Email: {} {state:?}", active_url()));
+    });
+    let samples: Vec<String> = std::env::var("ZCLIENTS_DOC_SAMPLES").unwrap_or_default().split(':').filter(|s| !s.is_empty()).map(str::to_string).collect();
+    let n = samples.len();
+    for (i, path) in samples.into_iter().enumerate() {
+        util::after(52.0 + i as f64 * 8.0, move || {
+            let p = std::path::PathBuf::from(&path);
+            let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let tab = r26_client().and_then(|c| app::open_downloaded_preview(c, &p, &name, None));
+            util::log(format!("SELFTEST R26 document {name}: tab {}", tab.is_some()));
+            util::after(6.0, move || {
+                util::log(format!("SELFTEST R26 document {name} shows {}", active_url()));
+                web::eval_active("(document.body ? document.body.innerText : '').replace(/\\s+/g, ' ').slice(0, 120)", move |r| util::log(format!("SELFTEST R26 document text: {r}")));
+            });
+        });
+    }
+    util::after(60.0 + n as f64 * 8.0, || {
+        util::log("SELFTEST done");
+        app::quit_without_asking();
+    });
+}
+
+/// `ZCLIENTS_SELFTEST=pagekeys ZCLIENTS_REAL_KEYS=1`: a Writer-like page
+/// handles ⌘L ⌘R ⌘E ⌘P ⌘F ⌘K itself (the app must not also act); ⌘= is
+/// not the page's (WebKit hands it back: the app zooms); ⌘T stays the
+/// app's. Keys come from outside (System Events) at ~13 s.
+fn page_keys_test() {
+    util::after(2.0, || {
+        app::add_client("Page Keys", "#553366", None, app::LoginChange::Keep, Default::default());
+        app::address_entered("https://www.zoho.com/");
+    });
+    util::after(10.0, || {
+        web::eval_active(
+            r#"(() => { try {
+            const ed = document.body.appendChild(document.createElement('div'));
+            ed.contentEditable = 'true';
+            ed.style.cssText = 'position:fixed;top:10px;left:10px;width:400px;height:80px;background:#fff;border:1px solid #888;z-index:2147483647';
+            ed.textContent = 'Writer-like document';
+            window.__zcKeys = [];
+            ed.addEventListener('keydown', e => { if (e.metaKey) { const k = e.key.toLowerCase(); window.__zcKeys.push((e.shiftKey ? 'shift+' : '') + 'cmd+' + k); if ('lrepfk'.includes(k)) { e.preventDefault(); } } });
+            ed.focus();
+            return 'editor focused: ' + (document.activeElement === ed);
+        } catch (e) { return 'setup error: ' + e; } })()"#,
+            |r| util::log(format!("SELFTEST PAGEKEYS {r}")),
+        );
+        if let Some(v) = web::active_view() {
+            ui::focus_view(&v);
+        }
+    });
+    util::after(12.0, || {
+        let zoom = web::active_view().map(|v| unsafe { v.pageZoom() }).unwrap_or(0.0);
+        util::log(format!("SELFTEST PAGEKEYS real keys now: cmd+l cmd+r cmd+e cmd+p cmd+f cmd+k cmd+= cmd+t (pid {}) zoom={zoom:.2} tabs={}", std::process::id(), tab_count()));
+    });
+    util::after(26.0, || {
+        // ⌘T (last) opened a new tab in front: read the page's own tab.
+        let first = app::store(|s| s.active_client().and_then(|c| c.tabs.first().map(|t| t.id)));
+        if let Some(t) = first {
+            web::eval_in_tab_async(t, "return JSON.stringify(window.__zcKeys)", |r| util::log(format!("SELFTEST PAGEKEYS page received: {r}")));
+        }
+        let zoom = first.and_then(web::live_view).map(|v| unsafe { v.pageZoom() }).unwrap_or(0.0);
+        let page_url = first.and_then(web::page_state).map(|p| p.url).unwrap_or_default();
+        let search = app::store(|s| s.active_client().is_some_and(|c| c.is_search()));
+        util::log(format!(
+            "SELFTEST PAGEKEYS after: address {} find bar={} page zoom={zoom:.2} tabs={} search in front={search} page url={page_url}",
+            ui::address_state(),
+            ui::find_visible(),
+            tab_count(),
+        ));
+    });
+    util::after(29.0, || {
+        util::log("SELFTEST done");
+        app::quit_without_asking();
+    });
 }

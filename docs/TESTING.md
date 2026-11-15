@@ -91,6 +91,13 @@ slides in a Settings panel in Chrome, nothing in ZClients.
 
 Run on the test app first; on the real app only after installing 2.0.0.
 
+**New in 2.6.0** (2026-11-15)
+- [ ] Zoho Writer: ⌘L / ⌘R / ⌘E / ⌘J align, ⌘K inserts a link, ⌘F opens Writer's own find, ⌘P Writer's print — the app does nothing extra. On an ordinary page ⌘R still reloads, ⌘L still goes to the address bar, ⌘= zooms. ⌘T, ⌘W, ⌘Q, ⌘1–9, ⌃Tab, ⌃S and copy/paste always stay with the app. (Settings › Keyboard turns it off.)
+- [ ] The pinned Email row (under Google Search; Go › Email, ⇧⌘E) offers Gmail, Outlook, Zoho Mail, Yahoo, iCloud or any address; sign in once; a link in a message to any website opens inside Email. Client pages and Search still never show outside sites.
+- [ ] Type in a CRM form, leave the tab for over 2 h (1 h when memory is low): it is not reloaded; the text is still there.
+- [ ] Start a Writer merge or a report export, switch to another tab: the result appears as a new tab behind the current one.
+- [ ] A downloaded .docx / .xlsx / .pptx / .csv opens as a tab you can read; Download Current Page saves the original file.
+
 **New in 2.5.3** (2026-11-15)
 - [ ] A client whose Zoho Desk is on its own domain (support.palmaholding.com/agent/…) opens inside ZClients, not in the default browser; so does a `<portal>.zohodesk.com` address. An ordinary outside website still opens in the default browser.
 

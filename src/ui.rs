@@ -485,7 +485,7 @@ define_class!(
             let (kind, index) = (self.ivars().kind, self.ivars().index);
             util::ns(&match kind {
                 T_SWATCH => format!("{} colour", model::PROFILE_COLORS.get(index).map(|c| c.0).unwrap_or("Client")),
-                _ => app::store(|s| s.active_client().map(|c| if c.is_search() { "Google Search workspace".to_string() } else { format!("Client {}, customise", c.name) })).unwrap_or_default(),
+                _ => app::store(|s| s.active_client().map(|c| if c.is_search() { "Google Search workspace".to_string() } else if c.is_mail() { "Email workspace".to_string() } else { format!("Client {}, customise", c.name) })).unwrap_or_default(),
             })
         }
 
@@ -555,6 +555,7 @@ define_class!(
         #[unsafe(method(zcToggleSidebar:))] fn a_sidebar(&self, _s: Option<&AnyObject>) { toggle_sidebar(); }
         #[unsafe(method(search:))] fn a_search(&self, _s: Option<&AnyObject>) { app::open_search(""); }
         #[unsafe(method(meet:))] fn a_meet(&self, _s: Option<&AnyObject>) { app::open_meet(); }
+        #[unsafe(method(email:))] fn a_email(&self, _s: Option<&AnyObject>) { app::open_mail(); }
         /// Commands that have nothing to act on are greyed out instead of
         /// silently doing nothing (Back on the launcher, Print in the
         /// Search workspace's empty tab, Customise for Search...).
@@ -1039,7 +1040,7 @@ define_class!(
             let row = with_ui(|u| u.table.clickedRow()).unwrap_or(-1);
             let Some(id) = row_client(row) else { return };
             MENU_CLIENT.set(Some(id));
-            let search = id == model::GOOGLE_SEARCH_ID;
+            let search = id == model::GOOGLE_SEARCH_ID || id == model::MAIL_ID;
             if !search {
                 add_item(menu, "Customise…", sel!(clientCustomise:), "", 0);
                 menu.addItem(&NSMenuItem::separatorItem(mtm()));
@@ -1092,7 +1093,7 @@ impl MenuContext {
     fn now() -> MenuContext {
         let (tab, url, real_client, tabs, clients, real_clients) = app::store(|s| {
             let (tab, url) = s.active_tab().map(|(_, t)| (Some(t.id), t.url.is_some())).unwrap_or((None, false));
-            let real = s.active_client().is_some_and(|c| !c.is_search());
+            let real = s.active_client().is_some_and(|c| !c.is_system());
             let tabs = s.active_client().map_or(0, |c| c.tabs.len());
             (tab, url, real, tabs, s.clients.len(), s.client_ids_in_order().len())
         });
@@ -1186,6 +1187,10 @@ fn load_error_text(kind: web::LoadError, url: Option<&str>) -> (String, String) 
                 "Its preview copy was removed or is damaged. Download it again from where you found it.".into()
             },
         ),
+        web::LoadError::PreviewFailed => (
+            "This document can't be shown here".into(),
+            "macOS couldn't make a preview of it. The file is in your Downloads folder: open it there with Word, Excel, Numbers or Pages.".into(),
+        ),
         web::LoadError::NotAllowed => {
             ("This address can't be opened in ZClients".into(), format!("ZClients only shows Zoho and Google Meet pages. {host} can open in your default browser instead."))
         }
@@ -1245,6 +1250,7 @@ pub fn error_actions(kind: web::LoadError, url: Option<&str>) -> (ErrorAction, O
     match kind {
         E::PdfMissing if https => (ErrorAction::Redownload, Some(ErrorAction::CloseTab)),
         E::PdfMissing => (ErrorAction::CloseTab, None),
+        E::PreviewFailed => (ErrorAction::TryAgain, Some(ErrorAction::CloseTab)),
         E::NotAllowed if https => (ErrorAction::OpenInBrowser, Some(ErrorAction::CloseTab)),
         E::NotAllowed => (ErrorAction::CloseTab, None),
         // Deliberately no Open in Browser: the Search workspace sends
@@ -1358,7 +1364,7 @@ pub fn pick_profile(question: &str, profiles: &[(Uuid, String)]) -> Option<Uuid>
 
 fn drag_writer(row: NSInteger) -> Option<Retained<ProtocolObject<dyn NSPasteboardWriting>>> {
     let id = row_client(row)?;
-    if id == model::GOOGLE_SEARCH_ID || is_filtering() {
+    if id == model::GOOGLE_SEARCH_ID || id == model::MAIL_ID || is_filtering() {
         return None;
     }
     let item = NSPasteboardItem::new();
@@ -1681,7 +1687,7 @@ pub(crate) fn client_row(c: &model::Client, width: f64, selected: bool) -> Retai
         bar.setAccessibilityElement(false);
         row.addSubview(&bar);
     }
-    let sym = if c.is_search() { Some("magnifyingglass") } else { c.symbol_name.as_deref() };
+    let sym = if c.is_search() { Some("magnifyingglass") } else if c.is_mail() { Some("envelope.fill") } else { c.symbol_name.as_deref() };
     let b = badge(&c.color_hex, sym, &c.initials(), BADGE);
     b.setFrame(rect(PAD, (H - BADGE) / 2.0, BADGE, BADGE));
     row.addSubview(&b);
@@ -1691,7 +1697,12 @@ pub(crate) fn client_row(c: &model::Client, width: f64, selected: bool) -> Retai
     name.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
     row.addSubview(&name);
     let n = c.tabs.len();
-    let sub_text = if c.is_search() { "Independent search".to_string() } else { format!("{n} tab{}", if n == 1 { "" } else { "s" }) };
+    let sub_text = if c.is_search() {
+        "Independent search".to_string()
+    } else if c.is_mail() {
+        "Your work email".to_string()
+    } else {
+        format!("{n} tab{}", if n == 1 { "" } else { "s" }) };
     let sub = text(&sub_text, theme::Text::Footnote, theme::Weight::Regular);
     sub.setTextColor(Some(&theme::secondary_text()));
     sub.setFrame(rect(x, theme::GRID * 6.0 - 1.0, width - x - theme::GRID * 2.0, 16.0));
@@ -2229,7 +2240,7 @@ fn refresh_sidebar() {
     let filter = with_ui(|u| u.filter.borrow().clone()).unwrap_or_default();
     let (rows, active, count) = app::store(|s| {
         let rows: Vec<Uuid> = s.ordered().iter().filter(|c| filter.is_empty() || c.name.to_lowercase().contains(&filter)).map(|c| c.id).collect();
-        let count = s.clients.iter().filter(|c| !c.is_search()).count();
+        let count = s.clients.iter().filter(|c| !c.is_system()).count();
         (rows, s.active_client_id, count)
     });
     let selected = active.and_then(|a| rows.iter().position(|r| *r == a));
@@ -2512,7 +2523,11 @@ fn refresh_content() {
     };
     if tab.url.is_none() {
         web::set_active(None);
-        show_launcher(client, &name);
+        if client == model::MAIL_ID {
+            show_mail_chooser(client);
+        } else {
+            show_launcher(client, &name);
+        }
         return;
     }
     web::set_active(Some(tab.id));
@@ -2548,6 +2563,27 @@ fn refresh_content() {
     });
 }
 
+/// A new tab of the Email workspace: choose a webmail instead of a Zoho app.
+fn show_mail_chooser(client: Uuid) {
+    let current = with_ui(|u| u.launcher.borrow().as_ref().map(|(c, v)| (*c, v.clone()))).flatten();
+    if let Some((c, v)) = &current {
+        let shown = with_ui(|u| unsafe { v.superview() }.is_some_and(|s| Retained::as_ptr(&s) == Retained::as_ptr(&u.content))).unwrap_or(false);
+        if *c == client && shown {
+            return;
+        }
+    }
+    let view = crate::mailpick::build();
+    with_ui(|u| {
+        for v in u.content.subviews().iter() {
+            v.removeFromSuperview();
+        }
+        view.setFrame(u.content.bounds());
+        view.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable);
+        u.content.addSubview(&view);
+        u.launcher.replace(Some((client, view.clone())));
+    });
+}
+
 fn show_launcher(client: Uuid, name: &str) {
     let current = with_ui(|u| u.launcher.borrow().as_ref().map(|(c, v)| (*c, v.clone()))).flatten();
     if let Some((c, v)) = &current {
@@ -2572,7 +2608,8 @@ fn show_launcher(client: Uuid, name: &str) {
 
 fn refresh_toolbar() {
     refresh_meet_button();
-    let info = app::store(|s| s.active_tab().map(|(c, t)| (c.color_hex.clone(), c.symbol_name.clone(), c.initials(), c.name.clone(), c.is_search(), t.id, t.url.clone())));
+    // 1: the Search workspace, 2: the Email workspace, 0: a client.
+    let info = app::store(|s| s.active_tab().map(|(c, t)| (c.color_hex.clone(), c.symbol_name.clone(), c.initials(), c.name.clone(), if c.is_search() { 1u8 } else if c.is_mail() { 2 } else { 0 }, t.id, t.url.clone())));
     let page = info.as_ref().and_then(|i| web::page_state(i.5));
     let active_downloads = downloads::active_count();
     with_ui(|u| {
@@ -2592,14 +2629,23 @@ fn refresh_toolbar() {
             let chip = tile(T_CHIP, 0, rect(0.0, 9.0, text_w + 38.0, 28.0));
             set_layer_color(&chip, &theme::chip_fill(), 14.0);
             // Outlined in the client's colour, next to its badge.
-            set_layer_border(&chip, &util::color(if *search { theme::SEARCH_BLUE } else { hex.as_str() }), 1.0);
+            set_layer_border(&chip, &util::color(if *search == 1 { theme::SEARCH_BLUE } else { hex.as_str() }), 1.0);
             let size = theme::TOOLBAR_CHIP_BADGE;
-            let b = badge(hex, if *search { Some("magnifyingglass") } else { sym.as_deref() }, initials, size);
+            let sym = match search {
+                1 => Some("magnifyingglass"),
+                2 => Some("envelope.fill"),
+                _ => sym.as_deref(),
+            };
+            let b = badge(hex, sym, initials, size);
             b.setFrame(rect(6.0, (theme::ICON_BUTTON - size) / 2.0, size, size));
             chip.addSubview(&b);
             l.setFrame(rect(30.0, 5.0, text_w, 18.0));
             chip.addSubview(&l);
-            chip.setToolTip(Some(&util::ns(if *search { "Independent Google Search workspace" } else { "Customise this client" })));
+            chip.setToolTip(Some(&util::ns(match search {
+                1 => "Independent Google Search workspace",
+                2 => "Email workspace: your webmail, signed in separately from every client",
+                _ => "Customise this client",
+            })));
             u.toolbar.addSubview(&chip);
             u.chip.replace(Some(chip));
         }
@@ -2929,7 +2975,7 @@ fn run_find(backwards: bool) {
 }
 
 fn customise_active() {
-    if let Some(id) = app::store(|s| s.active_client().filter(|c| !c.is_search()).map(|c| c.id)) {
+    if let Some(id) = app::store(|s| s.active_client().filter(|c| !c.is_system()).map(|c| c.id)) {
         show_client_sheet(Some(id));
     }
 }
@@ -3047,7 +3093,7 @@ pub fn show_client_sheet(client: Option<Uuid>) {
         return;
     }
     let mtm = mtm();
-    let existing = client.and_then(|id| app::store(|s| s.client(id).filter(|c| !c.is_search()).cloned()));
+    let existing = client.and_then(|id| app::store(|s| s.client(id).filter(|c| !c.is_system()).cloned()));
     if client.is_some() && existing.is_none() {
         return;
     }
@@ -3487,6 +3533,7 @@ fn build_menu() {
     key(&go, "Google Search", sel!(search:), "k", cmd);
     alt_key(&go, "Google Search ", sel!(search:), "k", cmd | NSEventModifierFlags::Option);
     key(&go, "New Google Meet Meeting", sel!(meet:), "m", cmd_shift);
+    key(&go, "Email", sel!(email:), "e", cmd_shift);
     // Switching clients is the app's main job: all of it from the keyboard.
     go.addItem(&NSMenuItem::separatorItem(mtm));
     key(&go, "Switch to Client…", sel!(switchClient:), "o", cmd_shift);

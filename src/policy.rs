@@ -439,8 +439,9 @@ pub fn is_zoho_hosting_name(cname: &str) -> bool {
 /// Answers kept for the life of the app; a lookup that failed or timed out
 /// is retried after this long.
 const HOSTED_RETRY: std::time::Duration = std::time::Duration::from_secs(30);
+/// Longest a page waits for the answer before it is treated as "not Zoho".
 #[cfg_attr(test, allow(dead_code))]
-const HOSTED_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1500);
+const HOSTED_TIMEOUT: f64 = 1.5;
 
 type HostedCache = std::sync::Mutex<std::collections::HashMap<String, (bool, Option<std::time::Instant>)>>;
 
@@ -449,32 +450,147 @@ fn hosted_cache() -> &'static HostedCache {
     C.get_or_init(Default::default)
 }
 
+/// The cached answer for `host`; None when unknown (never asked, or a
+/// failed lookup old enough to retry).
+fn hosted_answer(host: &str) -> Option<bool> {
+    let (answer, failed_at) = hosted_cache().lock().ok()?.get(host).copied()?;
+    match failed_at {
+        Some(t) if t.elapsed() >= HOSTED_RETRY => None,
+        _ => Some(answer),
+    }
+}
+
+/// A host whose Zoho-ness only DNS can tell: https, default port, a
+/// domain name with a dot, and on none of the fixed lists.
+fn hosted_candidate(url: &Url) -> Option<String> {
+    if !is_https(url) || url.port().is_some() || !matches!(url.host(), Some(url::Host::Domain(_))) {
+        return None;
+    }
+    let h = host_lower(url)?;
+    let listed = host_in(&h, ZOHO_DOMAINS) || host_in(&h, desk_domains()) || host_in(&h, widget_domains()) || host_in(&h, content_domains()) || host_in(&h, partner_domains());
+    (h.contains('.') && !listed).then_some(h)
+}
+
 /// An organisation's own address for a Zoho app (a Desk portal on its own
 /// domain): the host's DNS name leads to Zoho's servers. Zoho only serves
 /// such a domain over https once the organisation has set it up there, so
-/// the page is Zoho's. Looked up once per host (cached), at most
-/// `HOSTED_TIMEOUT` of waiting.
+/// the page is Zoho's. Never waits: an unknown host starts a lookup in the
+/// background and counts as "not Zoho" until it is answered (see
+/// `when_zoho_known`, which navigation uses so the first visit waits).
 fn is_zoho_hosted(host: &str) -> bool {
     if !host.contains('.') {
         return false;
     }
-    if let Some((answer, failed_at)) = hosted_cache().lock().ok().and_then(|c| c.get(host).copied()) {
-        match failed_at {
-            Some(t) if t.elapsed() >= HOSTED_RETRY => {}
-            _ => return answer,
+    match hosted_answer(host) {
+        Some(answer) => answer,
+        None => {
+            start_lookup(host.to_string());
+            // Tests answer at once; the app's answer comes later.
+            hosted_answer(host).unwrap_or(false)
         }
     }
-    let (answer, failed) = match canonical_name(host) {
-        Some(cname) => (is_zoho_hosting_name(&cname), false),
+}
+
+thread_local! {
+    /// Work waiting for a host's answer (main thread only).
+    static HOSTED_WAITERS: std::cell::RefCell<std::collections::HashMap<String, Vec<Box<dyn FnOnce()>>>> = std::cell::RefCell::new(Default::default());
+}
+
+/// Run `then` once it is known whether `url` is served by Zoho: at once
+/// when that is already known (or does not depend on DNS), otherwise when
+/// the background lookup answers (at most `HOSTED_TIMEOUT` later). Main
+/// thread only. Nothing blocks the app while it waits.
+pub fn when_zoho_known(url: &Url, then: impl FnOnce() + 'static) {
+    let Some(host) = hosted_candidate(url).filter(|h| hosted_answer(h).is_none()) else { return then() };
+    let first = HOSTED_WAITERS.with_borrow_mut(|w| {
+        let list = w.entry(host.clone()).or_default();
+        list.push(Box::new(then));
+        list.len() == 1
+    });
+    if first {
+        start_lookup(host);
+    }
+}
+
+/// Is a lookup for `url`'s host still under way?
+pub fn zoho_answer_pending(url: &Url) -> bool {
+    hosted_candidate(url).is_some_and(|h| hosted_answer(&h).is_none())
+}
+
+fn record_hosted(host: &str, cname: Option<String>) {
+    let (answer, failed) = match cname {
+        Some(c) => (is_zoho_hosting_name(&c), false),
         None => (false, true),
     };
     if let Ok(mut c) = hosted_cache().lock() {
+        // A late failure never overwrites a real answer.
+        if failed && c.get(host).is_some_and(|(_, f)| f.is_none()) {
+            return;
+        }
         c.insert(host.to_string(), (answer, failed.then(std::time::Instant::now)));
     }
     if answer {
         crate::util::log(format!("{host} is served by Zoho (own domain)"));
     }
-    answer
+}
+
+/// The lookup finished or timed out: record it and run whatever waited.
+#[cfg_attr(test, allow(dead_code))]
+fn finish_lookup(host: &str, cname: Option<String>, timed_out: bool) {
+    if !timed_out || hosted_answer(host).is_none() {
+        record_hosted(host, cname);
+    }
+    let waiting = HOSTED_WAITERS.with_borrow_mut(|w| w.remove(host)).unwrap_or_default();
+    for f in waiting {
+        f();
+    }
+}
+
+#[cfg(not(test))]
+thread_local! {
+    static IN_FLIGHT: std::cell::RefCell<std::collections::HashSet<String>> = std::cell::RefCell::new(Default::default());
+}
+
+/// Tests answer at once from `canonical_name` (no network).
+#[cfg(test)]
+fn start_lookup(host: String) {
+    record_hosted(&host, canonical_name(&host));
+    let waiting = HOSTED_WAITERS.with_borrow_mut(|w| w.remove(&host)).unwrap_or_default();
+    for f in waiting {
+        f();
+    }
+}
+
+/// Resolve on a helper thread; the answer comes back to the main thread.
+/// A timer gives up after `HOSTED_TIMEOUT` so a slow network never holds a
+/// page for long.
+#[cfg(not(test))]
+fn start_lookup(host: String) {
+    if !IN_FLIGHT.with_borrow_mut(|f| f.insert(host.clone())) {
+        return;
+    }
+    let Ok(name) = std::ffi::CString::new(host.clone()) else {
+        IN_FLIGHT.with_borrow_mut(|f| f.remove(&host));
+        return finish_lookup(&host, None, false);
+    };
+    let h = host.clone();
+    let spawned = std::thread::Builder::new().name("zoho-host-lookup".into()).spawn(move || {
+        let cname = resolve_canonical(&name);
+        crate::util::on_main(move || {
+            IN_FLIGHT.with_borrow_mut(|f| f.remove(&h));
+            finish_lookup(&h, cname, false);
+        });
+    });
+    if spawned.is_err() {
+        IN_FLIGHT.with_borrow_mut(|f| f.remove(&host));
+        return finish_lookup(&host, None, false);
+    }
+    crate::util::after(HOSTED_TIMEOUT, move || {
+        if HOSTED_WAITERS.with_borrow(|w| w.contains_key(&host)) {
+            crate::util::log(format!("no DNS answer for {host} in time; treated as an outside site"));
+            finish_lookup(&host, None, true);
+        }
+    });
 }
 
 #[cfg(test)]
@@ -485,22 +601,6 @@ fn canonical_name(host: &str) -> Option<String> {
         "help.example-au.com" => Some("zs-au1-lczhost-h2.zohohost.com.au".into()),
         _ => Some(host.into()),
     }
-}
-
-/// The host's final DNS name (the end of its CNAME chain), from the system
-/// resolver on a helper thread so a slow network costs at most
-/// `HOSTED_TIMEOUT`.
-#[cfg(not(test))]
-fn canonical_name(host: &str) -> Option<String> {
-    let (tx, rx) = std::sync::mpsc::channel();
-    let name = std::ffi::CString::new(host).ok()?;
-    std::thread::Builder::new()
-        .name("zoho-host-lookup".into())
-        .spawn(move || {
-            let _ = tx.send(resolve_canonical(&name));
-        })
-        .ok()?;
-    rx.recv_timeout(HOSTED_TIMEOUT).ok().flatten()
 }
 
 #[cfg(not(test))]
@@ -590,8 +690,13 @@ pub fn is_allowed_google_search(url: &Url) -> bool {
     is_https(url) && (is_google_search(url) || is_allowed_google_meet(url))
 }
 
-/// May this URL be shown as a page in a tab of `workspace`?
+/// May this URL be shown as a page in a tab of `workspace`? The Email
+/// workspace opens any website its messages link to (like a browser);
+/// clients and Search keep to Zoho (and Google).
 pub fn is_allowed_web(url: &Url, workspace: Workspace) -> bool {
+    if workspace == Workspace::Mail {
+        return is_web_address(url) && url.host_str().is_some();
+    }
     if is_zoho_family(url) || is_allowed_google_meet(url) {
         return true;
     }
@@ -751,6 +856,31 @@ pub fn page_key(url: &Url) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_email_workspace_opens_any_website_but_clients_and_search_do_not() {
+        for s in ["https://mail.google.com/mail/u/0/", "https://outlook.office.com/mail/", "https://www.example.com/article", "http://old-site.example.org/"] {
+            assert!(is_allowed_web(&u(s), Workspace::Mail), "{s}");
+        }
+        assert!(!is_allowed_web(&u("mailto:a@b.com"), Workspace::Mail));
+        assert!(!is_allowed_web(&u("file:///etc/passwd"), Workspace::Mail));
+        assert!(!is_allowed_web(&u("https://www.example.com/article"), Workspace::Zoho));
+        assert!(!is_allowed_web(&u("https://www.example.com/article"), Workspace::GoogleSearch));
+        assert_eq!(search_route(&u("https://www.example.com/")), SearchRoute::Blocked);
+    }
+
+    #[test]
+    fn navigation_waits_only_for_hosts_dns_must_decide() {
+        assert!(hosted_candidate(&u("https://support.example-desk.com/x")).is_some());
+        for s in ["https://crm.zoho.com/", "https://acme.zohodesk.eu/", "http://support.example-desk.com/", "https://support.example-desk.com:8443/", "https://10.0.0.1/", "https://localhost/"] {
+            assert!(hosted_candidate(&u(s)).is_none(), "{s}");
+        }
+        let ran = std::rc::Rc::new(std::cell::Cell::new(false));
+        let r = ran.clone();
+        when_zoho_known(&u("https://help.example-au.com/"), move || r.set(true));
+        assert!(ran.get());
+        assert!(!zoho_answer_pending(&u("https://help.example-au.com/")));
+    }
+
     use super::*;
 
     fn u(s: &str) -> Url {

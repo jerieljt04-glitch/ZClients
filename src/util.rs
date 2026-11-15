@@ -61,6 +61,24 @@ pub fn later(f: impl FnOnce() + 'static) {
     after(0.0, f);
 }
 
+/// Run `f` on the main thread, from any thread (the main dispatch queue,
+/// which the main run loop serves in its common modes).
+pub fn on_main(f: impl FnOnce() + Send + 'static) {
+    unsafe extern "C" {
+        static _dispatch_main_q: std::ffi::c_void;
+        fn dispatch_async_f(queue: *const std::ffi::c_void, context: *mut std::ffi::c_void, work: extern "C" fn(*mut std::ffi::c_void));
+    }
+    type Job = Box<dyn FnOnce() + Send>;
+    extern "C" fn run(context: *mut std::ffi::c_void) {
+        // SAFETY: `context` is the Box<Job> leaked below, run exactly once.
+        let job = unsafe { Box::from_raw(context.cast::<Job>()) };
+        job();
+    }
+    let job: Box<Job> = Box::new(Box::new(f));
+    // SAFETY: the main queue is a process-lifetime static; `run` frees `job`.
+    unsafe { dispatch_async_f(&raw const _dispatch_main_q, Box::into_raw(job).cast(), run) };
+}
+
 pub fn every(secs: f64, f: impl Fn() + 'static) -> Retained<NSTimer> {
     let block = RcBlock::new(move |_t: NonNull<NSTimer>| f());
     // SAFETY: as above, main run loop only.

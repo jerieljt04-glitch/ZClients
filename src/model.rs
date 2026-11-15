@@ -21,6 +21,10 @@ const REFERENCE_DATE_OFFSET: f64 = 978_307_200.0;
 pub const GOOGLE_SEARCH_ID: Uuid = Uuid::from_bytes([0x47, 0x53, 0x45, 0x41, 0x52, 0x43, 0x48, 0x21, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01]);
 pub const GOOGLE_SEARCH_HOME: &str = "https://www.google.com/";
 const GOOGLE_BLUE: &str = "#4285f4";
+/// The pinned Email workspace ("EMAIL" + a fixed tail): its id is also its
+/// WebKit data store, separate from every client's and from Search's.
+pub const MAIL_ID: Uuid = Uuid::from_bytes([0x45, 0x4d, 0x41, 0x49, 0x4c, 0x21, 0x21, 0x21, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02]);
+const MAIL_COLOR: &str = "#d97706";
 
 pub fn now_reference() -> f64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0) - REFERENCE_DATE_OFFSET
@@ -58,12 +62,16 @@ mod upper_uuid {
 pub enum Workspace {
     Zoho,
     GoogleSearch,
+    /// The Email workspace: the user's webmail (Gmail, Outlook, Zoho Mail…)
+    /// and any website its messages link to.
+    Mail,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 #[serde(rename_all = "camelCase")]
 pub enum ClientKind {
     GoogleSearch,
+    Mail,
 }
 
 fn default_title() -> String {
@@ -112,7 +120,7 @@ impl Tab {
 
     pub fn display_title(&self) -> String {
         if self.url.is_none() {
-            return "New Tab".into();
+            return if self.workspace == Some(Workspace::Mail) { MAIL_TITLE.into() } else { "New Tab".into() };
         }
         normalized_page_title(Some(&self.title)).unwrap_or_else(|| fallback_title(self.url.as_deref()))
     }
@@ -223,6 +231,16 @@ impl Client {
 
     pub fn is_search(&self) -> bool {
         self.kind == Some(ClientKind::GoogleSearch)
+    }
+
+    pub fn is_mail(&self) -> bool {
+        self.kind == Some(ClientKind::Mail)
+    }
+
+    /// The pinned Search or Email row, not a real client: never renamed,
+    /// deleted, moved, numbered or offered as a profile.
+    pub fn is_system(&self) -> bool {
+        self.is_search() || self.is_mail()
     }
 
     pub fn active_tab(&self) -> Option<&Tab> {
@@ -446,7 +464,7 @@ impl Store {
         }
         for c in &mut self.clients {
             if c.tabs.is_empty() {
-                c.tabs.push(if c.is_search() { search_tab(GOOGLE_SEARCH_HOME) } else { Tab::default() });
+                c.tabs.push(if c.is_search() { search_tab(GOOGLE_SEARCH_HOME) } else if c.is_mail() { mail_tab() } else { Tab::default() });
             }
             for t in &mut c.tabs {
                 // Older builds saved the sign-in form as "where the user
@@ -466,6 +484,7 @@ impl Store {
             }
         }
         self.ensure_search_client();
+        self.ensure_mail_client();
         if !self.active_client_id.is_some_and(|id| self.index(id).is_some()) {
             self.active_client_id = self.clients.last().map(|c| c.id);
         }
@@ -481,7 +500,7 @@ impl Store {
         let mut clients = std::collections::HashSet::new();
         let mut tabs = std::collections::HashSet::new();
         for c in &mut self.clients {
-            if !clients.insert(c.id) && !c.is_search() {
+            if !clients.insert(c.id) && !c.is_system() {
                 c.id = Uuid::new_v4();
                 clients.insert(c.id);
                 c.name = format!("{} (recovered)", c.name);
@@ -503,7 +522,53 @@ impl Store {
         // the rest's duplicate pages.
         let mut seen_search = false;
         self.clients.retain(|c| !(c.is_search() || c.id == GOOGLE_SEARCH_ID) || !std::mem::replace(&mut seen_search, true));
+        let mut seen_mail = false;
+        self.clients.retain(|c| !(c.is_mail() || c.id == MAIL_ID) || !std::mem::replace(&mut seen_mail, true));
         fixed
+    }
+
+    /// The permanent Email workspace: always present, pinned right after
+    /// Search, always the system id; every tab of it is a Mail tab. A new
+    /// one starts on the email chooser (Gmail, Outlook, Zoho Mail...).
+    pub fn ensure_mail_client(&mut self) {
+        let existing = self.clients.iter().position(|c| c.id == MAIL_ID || c.is_mail());
+        let mut c = match existing {
+            Some(i) => self.clients.remove(i),
+            None => {
+                let tab = mail_tab();
+                Client {
+                    id: MAIL_ID,
+                    name: String::new(),
+                    color_hex: String::new(),
+                    active_tab_id: Some(tab.id),
+                    tabs: vec![tab],
+                    kind: None,
+                    created_at: Some(-REFERENCE_DATE_OFFSET),
+                    symbol_name: None,
+                    keep_signed_in: None,
+                    session_days: None,
+                    data_centre: None,
+                }
+            }
+        };
+        c.id = MAIL_ID;
+        c.kind = Some(ClientKind::Mail);
+        c.name = "Email".into();
+        c.color_hex = MAIL_COLOR.into();
+        c.symbol_name = None;
+        c.data_centre = None;
+        for t in &mut c.tabs {
+            t.workspace = Some(Workspace::Mail);
+            t.origin_client = None;
+        }
+        if c.tabs.is_empty() {
+            c.tabs.push(mail_tab());
+        }
+        if !c.tabs.iter().any(|t| Some(t.id) == c.active_tab_id) {
+            c.active_tab_id = c.tabs.first().map(|t| t.id);
+        }
+        let at = self.clients.iter().position(|x| x.is_search()).map_or(0, |i| i + 1);
+        self.clients.insert(at, c);
     }
 
     /// The permanent Google Search workspace: always present, always first,
@@ -599,10 +664,11 @@ impl Store {
     // ---- ordering ----------------------------------------------------------
 
     /// The clients in the order the sidebar draws them: the Search row pinned
-    /// first, the rest in the chosen sort.
+    /// first, then Email, the rest in the chosen sort.
     pub fn ordered(&self) -> Vec<&Client> {
         let mut pinned: Vec<&Client> = self.clients.iter().filter(|c| c.is_search()).collect();
-        let mut rest: Vec<&Client> = self.clients.iter().filter(|c| !c.is_search()).collect();
+        pinned.extend(self.clients.iter().filter(|c| c.is_mail()));
+        let mut rest: Vec<&Client> = self.clients.iter().filter(|c| !c.is_system()).collect();
         sort_clients(&mut rest, self.sort_mode);
         pinned.append(&mut rest);
         pinned
@@ -630,7 +696,7 @@ impl Store {
         if id == target {
             return false;
         }
-        let pinned = |c: Option<&Client>| c.is_none_or(Client::is_search);
+        let pinned = |c: Option<&Client>| c.is_none_or(Client::is_system);
         if pinned(self.client(id)) || pinned(self.client(target)) {
             return false;
         }
@@ -645,7 +711,7 @@ impl Store {
     }
 
     pub fn move_client_by(&mut self, id: Uuid, offset: isize) -> bool {
-        let movable: Vec<Uuid> = self.ordered().iter().filter(|c| !c.is_search()).map(|c| c.id).collect();
+        let movable: Vec<Uuid> = self.ordered().iter().filter(|c| !c.is_system()).map(|c| c.id).collect();
         let Some(pos) = movable.iter().position(|c| *c == id) else { return false };
         let dst = pos as isize + offset;
         if dst < 0 || dst as usize >= movable.len() || offset == 0 {
@@ -655,7 +721,7 @@ impl Store {
     }
 
     pub fn can_move_client(&self, id: Uuid, offset: isize) -> bool {
-        let movable: Vec<Uuid> = self.ordered().iter().filter(|c| !c.is_search()).map(|c| c.id).collect();
+        let movable: Vec<Uuid> = self.ordered().iter().filter(|c| !c.is_system()).map(|c| c.id).collect();
         movable.iter().position(|c| *c == id).is_some_and(|p| {
             let d = p as isize + offset;
             d >= 0 && (d as usize) < movable.len()
@@ -675,7 +741,7 @@ impl Store {
 
     pub fn delete_client(&mut self, id: Uuid) -> Vec<Effect> {
         let Some(i) = self.index(id) else { return vec![] };
-        if self.clients[i].is_search() {
+        if self.clients[i].is_system() {
             return vec![];
         }
         let c = self.clients.remove(i);
@@ -733,9 +799,10 @@ impl Store {
         true
     }
 
-    /// The real clients in sidebar order (the pinned Search row left out).
+    /// The real clients in sidebar order (the pinned Search and Email rows
+    /// left out).
     pub fn client_ids_in_order(&self) -> Vec<Uuid> {
-        self.ordered().iter().filter(|c| !c.is_search()).map(|c| c.id).collect()
+        self.ordered().iter().filter(|c| !c.is_system()).map(|c| c.id).collect()
     }
 
     /// The client `dir` places from the one in front, in sidebar order
@@ -752,7 +819,7 @@ impl Store {
     /// Apply the customise sheet in one go.
     pub fn update_client(&mut self, id: Uuid, name: &str, color: &str, symbol: Option<String>) -> bool {
         let Some(c) = self.client_mut(id) else { return false };
-        if c.is_search() {
+        if c.is_system() {
             return false;
         }
         let trimmed = name.trim();
@@ -771,9 +838,11 @@ impl Store {
     pub fn add_tab(&mut self, client_id: Uuid, url: Option<String>, title: Option<String>, workspace: Option<Workspace>, activate: bool) -> Option<Uuid> {
         let c = self.client_mut(client_id)?;
         let search = c.is_search();
+        let mail = c.is_mail();
         let url = url.or_else(|| search.then(|| GOOGLE_SEARCH_HOME.to_string()));
-        let title = title.unwrap_or_else(|| if search { "Google Search".into() } else { default_title() });
-        let workspace = workspace.or(search.then_some(Workspace::GoogleSearch));
+        let title = title.unwrap_or_else(|| if search { "Google Search".into() } else if mail { MAIL_TITLE.into() } else { default_title() });
+        // Every tab of the Email workspace is a Mail tab (its own sign-ins).
+        let workspace = if mail { Some(Workspace::Mail) } else { workspace.or(search.then_some(Workspace::GoogleSearch)).filter(|w| *w != Workspace::Mail) };
         let tab = Tab { url, title, workspace, ..Tab::default() };
         let id = tab.id;
         match c.active_index() {
@@ -790,6 +859,7 @@ impl Store {
     /// one after another from a page line up in the order they were clicked.
     pub fn add_tab_after(&mut self, client_id: Uuid, after: Uuid, url: String, title: String, workspace: Option<Workspace>) -> Option<Uuid> {
         let c = self.client_mut(client_id)?;
+        let workspace = if c.is_mail() { Some(Workspace::Mail) } else { workspace.filter(|w| *w != Workspace::Mail) };
         let i = c.tabs.iter().position(|t| t.id == after)?;
         let tab = Tab { url: Some(url), title, workspace, ..Tab::default() };
         let id = tab.id;
@@ -818,7 +888,7 @@ impl Store {
         let Some(i) = c.tabs.iter().position(|t| t.id == tab_id) else { return vec![] };
         let tab = c.tabs.remove(i);
         if c.tabs.is_empty() {
-            let t = if c.is_search() { search_tab(GOOGLE_SEARCH_HOME) } else { Tab::default() };
+            let t = if c.is_search() { search_tab(GOOGLE_SEARCH_HOME) } else if c.is_mail() { mail_tab() } else { Tab::default() };
             c.active_tab_id = Some(t.id);
             c.tabs.push(t);
         } else if c.active_tab_id == Some(tab_id) {
@@ -863,7 +933,7 @@ impl Store {
             title: normalized_page_title(Some(title)).unwrap_or_else(|| "PDF".into()),
             pdf_path: Some(pdf_path.to_string()),
             pdf_source_url: source_url,
-            workspace: c.is_search().then_some(Workspace::GoogleSearch),
+            workspace: if c.is_search() { Some(Workspace::GoogleSearch) } else if c.is_mail() { Some(Workspace::Mail) } else { None },
             ..Tab::default()
         };
         let id = tab.id;
@@ -907,13 +977,15 @@ impl Store {
 
     /// Point a tab at a new page, discarding its old web view and page state.
     pub fn navigate_tab(&mut self, tab_id: Uuid, url: Option<String>, workspace: Option<Workspace>) -> Vec<Effect> {
+        let in_mail = self.clients.iter().any(|c| c.is_mail() && c.tabs.iter().any(|t| t.id == tab_id));
+        let workspace = if in_mail { Some(Workspace::Mail) } else { workspace.filter(|w| *w != Workspace::Mail) };
         let Some(t) = self.find_tab_mut(tab_id) else { return vec![] };
         let mut effects = vec![Effect::DropTab(tab_id)];
         if let Some(p) = t.pdf_path.take() {
             effects.push(Effect::RemoveFile(p));
         }
         t.pdf_source_url = None;
-        t.title = if url.is_some() { fallback_title(url.as_deref()) } else { default_title() };
+        t.title = if url.is_some() { fallback_title(url.as_deref()) } else if in_mail { MAIL_TITLE.into() } else { default_title() };
         t.url = url;
         t.workspace = workspace;
         effects
@@ -930,7 +1002,7 @@ impl Store {
     /// tab's client. True when that changed what is saved.
     pub fn learn_data_centre(&mut self, tab_id: Uuid, url: &str) -> bool {
         let Some(dc) = policy::parse(url).and_then(|u| policy::data_centre_of(&u)) else { return false };
-        let Some(c) = self.clients.iter_mut().find(|c| !c.is_search() && c.tabs.iter().any(|t| t.id == tab_id)) else { return false };
+        let Some(c) = self.clients.iter_mut().find(|c| !c.is_system() && c.tabs.iter().any(|t| t.id == tab_id)) else { return false };
         if c.data_centre.as_deref() == Some(dc) {
             return false;
         }
@@ -952,6 +1024,9 @@ impl Store {
     /// Open a Zoho/Meet page that came from Search as a normal tab of the
     /// client, reusing a tab already showing it.
     pub fn open_in_client_workspace(&mut self, client_id: Uuid, url: &url::Url, title: Option<String>) {
+        if self.client(client_id).is_none_or(Client::is_system) {
+            return;
+        }
         let key = policy::page_key(url);
         if let Some(c) = self.client_mut(client_id)
             && let Some(existing) = c.tabs.iter().find(|t| t.effective_workspace() == Workspace::Zoho && t.parsed_url().is_some_and(|u| policy::page_key(&u) == key))
@@ -982,7 +1057,7 @@ impl Store {
     /// Otherwise a new meeting starts at once, in this client's idle Meet
     /// tab if it has one, else in a new tab.
     pub fn open_google_meet_in(&mut self, id: Uuid, calling: &[Uuid]) -> Option<Vec<Effect>> {
-        if self.client(id)?.is_search() {
+        if self.client(id)?.is_system() {
             return None;
         }
         self.active_client_id = Some(id);
@@ -1010,14 +1085,14 @@ impl Store {
     /// The profile a Search tab was started from, if it still exists.
     pub fn search_origin(&self, tab_id: Uuid) -> Option<Uuid> {
         let origin = self.find_tab(tab_id)?.origin_client?;
-        self.client(origin).filter(|c| !c.is_search()).map(|c| c.id)
+        self.client(origin).filter(|c| !c.is_system()).map(|c| c.id)
     }
 
     /// Open Google Search. `origin` is the profile it was started from
     /// (None when started from the Search workspace itself, which keeps the
     /// tab's existing origin).
     pub fn open_google_search(&mut self, destination: &url::Url, origin: Option<Uuid>) -> Vec<Effect> {
-        let origin = origin.filter(|o| *o != GOOGLE_SEARCH_ID);
+        let origin = origin.filter(|o| *o != GOOGLE_SEARCH_ID && *o != MAIL_ID);
         self.ensure_search_client();
         self.active_client_id = Some(GOOGLE_SEARCH_ID);
         let target = self.client(GOOGLE_SEARCH_ID).and_then(|c| c.tabs.iter().find(|t| t.pdf_path.is_none() && t.is_google_search_tab()).map(|t| t.id));
@@ -1116,6 +1191,14 @@ impl Store {
     }
 }
 
+/// Title of an Email tab still on the email chooser.
+pub const MAIL_TITLE: &str = "Email";
+
+/// A tab of the Email workspace on its chooser (Gmail, Outlook, Zoho Mail…).
+fn mail_tab() -> Tab {
+    Tab { title: MAIL_TITLE.into(), workspace: Some(Workspace::Mail), ..Tab::default() }
+}
+
 fn search_tab(url: &str) -> Tab {
     Tab::with_url(url, "Google Search", Some(Workspace::GoogleSearch))
 }
@@ -1174,6 +1257,48 @@ pub const PROFILE_COLORS: &[(&str, &str)] = &[
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_email_workspace_is_pinned_after_search_and_keeps_its_tabs_in_mail() {
+        let store = Store::from_json(SWIFT_SAMPLE.as_bytes()).unwrap();
+        let order: Vec<Uuid> = store.ordered().iter().map(|c| c.id).collect();
+        assert_eq!(order[0], GOOGLE_SEARCH_ID);
+        assert_eq!(order[1], MAIL_ID);
+        let mail = store.client(MAIL_ID).unwrap();
+        assert!(mail.is_mail() && mail.is_system() && mail.name == "Email");
+        assert_eq!(mail.tabs.len(), 1);
+        assert!(mail.tabs[0].url.is_none(), "starts on the email chooser");
+        assert_eq!(mail.tabs[0].workspace, Some(Workspace::Mail));
+        assert!(!store.client_ids_in_order().contains(&MAIL_ID), "never numbered or offered as a client");
+        let acme = store.clients.iter().find(|c| c.name == "Acme").unwrap();
+        assert_eq!(acme.tabs[0].url.as_deref(), Some("https://crm.zoho.com/crm/org1/tab/Leads"), "clients are untouched");
+
+        let mut store = store;
+        let gmail = store.add_tab(MAIL_ID, Some("https://mail.google.com/".into()), None, Some(Workspace::GoogleSearch), true).unwrap();
+        assert_eq!(store.find_tab(gmail).unwrap().effective_workspace(), Workspace::Mail, "a Mail tab whatever the caller says");
+        store.navigate_tab(gmail, Some("https://www.google.com/search?q=x".into()), Some(Workspace::GoogleSearch));
+        assert_eq!(store.find_tab(gmail).unwrap().effective_workspace(), Workspace::Mail);
+        let acme_id = store.clients.iter().find(|c| c.name == "Acme").unwrap().id;
+        let t = store.add_tab(acme_id, Some("https://crm.zoho.com/".into()), None, Some(Workspace::Mail), true).unwrap();
+        assert_eq!(store.find_tab(t).unwrap().effective_workspace(), Workspace::Zoho, "a client never gets a Mail tab");
+
+        // Saved and read back (one Email row, same tabs); never deletable.
+        let again = Store::from_json(&store.to_json()).unwrap();
+        assert_eq!(again.clients.iter().filter(|c| c.is_mail()).count(), 1);
+        assert_eq!(again.client(MAIL_ID).unwrap().tabs.len(), 2);
+        let mut again = again;
+        assert!(again.delete_client(MAIL_ID).is_empty());
+        assert!(!again.move_client_over(acme_id, MAIL_ID), "pinned");
+        // Closing its last tab leaves a chooser tab.
+        let mut one = again;
+        for id in one.client(MAIL_ID).unwrap().tabs.iter().map(|t| t.id).collect::<Vec<_>>() {
+            one.close_tab(MAIL_ID, id);
+        }
+        let left = &one.client(MAIL_ID).unwrap().tabs;
+        assert!(left.len() == 1 && left[0].url.is_none() && left[0].workspace == Some(Workspace::Mail));
+        // Meet and Zoho pages from Search never land in the Email row.
+        assert!(one.open_google_meet_in(MAIL_ID, &[]).is_none());
+    }
+
     use super::*;
 
     const SWIFT_SAMPLE: &str = r##"{"version":4,"activeClientId":"EF893E42-DD8A-4C7E-9A63-1F6C3B0E2F11","sortMode":"manual","clients":[
@@ -1185,8 +1310,8 @@ mod tests {
     #[test]
     fn reads_and_round_trips_the_swift_session_file() {
         let store = Store::from_json(SWIFT_SAMPLE.as_bytes()).unwrap();
-        assert_eq!(store.clients.len(), 2);
-        let acme = &store.clients[1];
+        assert_eq!(store.clients.len(), 3, "Search, Email (added) and Acme");
+        let acme = &store.clients[2];
         assert_eq!(acme.name, "Acme");
         assert_eq!(acme.tabs[0].url.as_deref(), Some("https://crm.zoho.com/crm/org1/tab/Leads"));
         assert_eq!(acme.symbol_name.as_deref(), Some("hammer.fill"));
@@ -1223,26 +1348,26 @@ mod tests {
     fn reads_the_bare_array_format() {
         let store = Store::from_json(br#"[{"id":"EF893E42-DD8A-4C7E-9A63-1F6C3B0E2F11","name":"Old","tabs":[]}]"#).unwrap();
         assert!(store.clients[0].is_search(), "search client is created and pinned first");
-        assert_eq!(store.clients[1].tabs.len(), 1, "empty tab list is repaired");
-        assert!(store.clients[1].created_at.is_some());
+        assert_eq!(store.clients[2].tabs.len(), 1, "empty tab list is repaired");
+        assert!(store.clients[2].created_at.is_some());
     }
 
     #[test]
     fn sign_in_pages_do_not_replace_the_remembered_page() {
         let mut store = Store::from_json(SWIFT_SAMPLE.as_bytes()).unwrap();
-        let tab = store.clients[1].tabs[0].id;
+        let tab = store.clients[2].tabs[0].id;
         assert!(!store.update_tab_meta(tab, Some("https://accounts.zoho.com/signin?serviceurl=x"), Some("Zoho Accounts")));
-        assert_eq!(store.clients[1].tabs[0].url.as_deref(), Some("https://crm.zoho.com/crm/org1/tab/Leads"));
-        assert_eq!(store.clients[1].tabs[0].title, "Leads");
+        assert_eq!(store.clients[2].tabs[0].url.as_deref(), Some("https://crm.zoho.com/crm/org1/tab/Leads"));
+        assert_eq!(store.clients[2].tabs[0].title, "Leads");
         assert!(store.update_tab_meta(tab, Some("https://crm.zoho.com/crm/org1/tab/Deals"), Some("Deals")));
-        assert_eq!(store.clients[1].tabs[0].url.as_deref(), Some("https://crm.zoho.com/crm/org1/tab/Deals"));
+        assert_eq!(store.clients[2].tabs[0].url.as_deref(), Some("https://crm.zoho.com/crm/org1/tab/Deals"));
     }
 
     #[test]
     fn tabs_saved_on_the_sign_in_form_are_sent_back_to_their_page() {
         let json = r#"[{"id":"EF893E42-DD8A-4C7E-9A63-1F6C3B0E2F11","name":"E&V","tabs":[{"id":"11111111-2222-3333-4444-555555555555","url":"https://accounts.zoho.com/signin?servicename=ZohoCRM&context=&serviceurl=https%3A%2F%2Fcrm.zoho.com%2Fcrm%2Forg1%2Ftab%2FLeads","title":"Zoho Accounts"}]}]"#;
         let store = Store::from_json(json.as_bytes()).unwrap();
-        let t = &store.clients[1].tabs[0];
+        let t = &store.clients[2].tabs[0];
         assert_eq!(t.url.as_deref(), Some("https://crm.zoho.com/crm/org1/tab/Leads"));
         assert_eq!(t.title, "Zoho CRM");
     }
@@ -1515,37 +1640,37 @@ mod tests {
         let mut store = Store::from_json(SWIFT_SAMPLE.as_bytes()).unwrap();
         let json = String::from_utf8(store.to_json()).unwrap();
         assert!(!json.contains("keepSignedIn") && !json.contains("originClientId"), "absent unless set: the Swift app reads this file unchanged");
-        store.clients[1].keep_signed_in = Some(false);
-        store.clients[1].session_days = Some(30);
+        store.clients[2].keep_signed_in = Some(false);
+        store.clients[2].session_days = Some(30);
         let again = Store::from_json(&store.to_json()).unwrap();
-        assert_eq!(again.clients[1].retention(), crate::session::Retention { keep: false, days: 30 });
+        assert_eq!(again.clients[2].retention(), crate::session::Retention { keep: false, days: 30 });
     }
 
     #[test]
     fn data_centre_is_learned_saved_and_optional() {
         let mut store = Store::from_json(SWIFT_SAMPLE.as_bytes()).unwrap();
         assert!(!String::from_utf8(store.to_json()).unwrap().contains("zohoDataCentre"), "absent until learned");
-        let tab = store.clients[1].tabs[0].id;
+        let tab = store.clients[2].tabs[0].id;
         assert!(!store.learn_data_centre(tab, "https://www.zoho.com/crm/"), "the marketing site says nothing");
         assert!(store.learn_data_centre(tab, "https://crm.zoho.eu/crm/org1/tab/Leads"));
         assert!(!store.learn_data_centre(tab, "https://books.zoho.eu/app"), "unchanged");
         let json = store.to_json();
         assert!(String::from_utf8(json.clone()).unwrap().contains(r#""zohoDataCentre":"zoho.eu""#));
         let again = Store::from_json(&json).unwrap();
-        assert_eq!(again.clients[1].data_centre.as_deref(), Some("zoho.eu"));
+        assert_eq!(again.clients[2].data_centre.as_deref(), Some("zoho.eu"));
         // 1.5.0 has no such field: unknown keys are ignored when it reads
         // the file (same serde rules as here), and every other field is
         // unchanged.
         let v: serde_json::Value = serde_json::from_slice(&json).unwrap();
         let mut without = v.clone();
-        without["clients"][1].as_object_mut().unwrap().remove("zohoDataCentre");
+        without["clients"][2].as_object_mut().unwrap().remove("zohoDataCentre");
         let old = Store::from_json(&serde_json::to_vec(&without).unwrap()).unwrap();
-        assert_eq!(old.clients[1].data_centre, None);
-        assert_eq!(old.clients[1].tabs, again.clients[1].tabs);
+        assert_eq!(old.clients[2].data_centre, None);
+        assert_eq!(old.clients[2].tabs, again.clients[2].tabs);
         let mut extra = v;
-        extra["clients"][1]["someFutureField"] = serde_json::json!(true);
+        extra["clients"][2]["someFutureField"] = serde_json::json!(true);
         assert!(Store::from_json(&serde_json::to_vec(&extra).unwrap()).is_ok(), "unknown keys never fail a load");
-        let launcher_tab = store.clients[1].tabs[1].id;
+        let launcher_tab = store.clients[2].tabs[1].id;
         store.open_app(launcher_tab, &ZOHO_APPS[0]);
         assert_eq!(
             store.find_tab(launcher_tab).unwrap().url.as_deref(),

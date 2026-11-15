@@ -176,12 +176,12 @@ fn actions() -> Retained<AnyObject> {
 }
 
 fn profiles() -> Vec<(Uuid, String)> {
-    app::store(|s| s.ordered().iter().filter(|c| !c.is_search()).map(|c| (c.id, c.name.clone())).collect())
+    app::store(|s| s.ordered().iter().filter(|c| !c.is_system()).map(|c| (c.id, c.name.clone())).collect())
 }
 
 pub fn show() {
     if SELECTED.get().is_none_or(|id| app::store(|s| s.client(id).is_none())) {
-        SELECTED.set(app::store(|s| s.active_client().filter(|c| !c.is_search()).map(|c| c.id)).or_else(|| profiles().first().map(|p| p.0)));
+        SELECTED.set(app::store(|s| s.active_client().filter(|c| !c.is_system()).map(|c| c.id)).or_else(|| profiles().first().map(|p| p.0)));
     }
     let window = WINDOW.with_borrow_mut(|w| {
         w.get_or_insert_with(|| {
@@ -446,7 +446,7 @@ fn rebuild() {
     // ---- keyboard ---------------------------------------------------------
     b.heading("Keyboard & mouse");
     b.checkbox("Control-A selects all (as on Windows); off: start of line", settings::get(|s| s.control_a_selects_all), sel!(toggleSetting:), 1);
-    b.checkbox("Web pages keep ⌘D, ⌘S, ⌘K and ⇧⌘S while they have the keyboard", settings::get(|s| s.page_owns_editor_shortcuts), sel!(toggleSetting:), 2);
+    b.checkbox("Web pages get keyboard shortcuts first (Zoho Writer, Sheet, Gmail…); the app keeps ⌘T, ⌘W, ⌘Q, tab switching, ⌃S and copy/paste", settings::get(|s| s.page_owns_editor_shortcuts), sel!(toggleSetting:), 2);
     b.text("The app's own versions stay available: Toggle Sidebar ⌃S, Google Search ⌥⌘K, Download Current Page ⌥⌘S, Duplicate Tab from the File menu.", true);
     b.checkbox("Clicks in an inactive window go to the page", settings::get(|s| s.first_click_reaches_page), sel!(toggleSetting:), 4);
     b.text("Off: the first click only brings ZClients to the front, as in Safari.", true);
@@ -571,7 +571,7 @@ pub fn diagnostics_text() -> String {
     let rows: Vec<(usize, bool, u32, usize, bool)> = app::store(|s| {
         s.clients
             .iter()
-            .filter(|c| !c.is_search())
+            .filter(|c| !c.is_system())
             .map(|c| (c.tabs.len(), c.retention().keep, c.retention().days, c.tabs.iter().filter(|t| t.pdf_path.is_some()).count(), keychain::login_exists(c.id)))
             .collect()
     });

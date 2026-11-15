@@ -322,7 +322,7 @@ fn apply_login_change(id: Uuid, change: LoginChange) {
 }
 
 pub fn confirm_delete_client(id: Uuid) {
-    let Some(name) = store(|s| s.client(id).filter(|c| !c.is_search()).map(|c| c.name.clone())) else { return };
+    let Some(name) = store(|s| s.client(id).filter(|c| !c.is_system()).map(|c| c.name.clone())) else { return };
     let (button, _) = web::run_alert(
         &format!("Delete “{name}”?"),
         "This signs the client out and removes its tabs, website data (cookies and storage), saved session, saved login and file previews from this Mac. Files in your Downloads folder are not touched.",
@@ -386,7 +386,7 @@ pub fn set_sort(mode: SortMode) {
 
 /// Zoho's sign-in page reported credentials the user just submitted.
 pub fn offer_to_save_login(client: Uuid, email: String, password: String) {
-    let Some(name) = store(|s| s.client(client).filter(|c| !c.is_search()).map(|c| c.name.clone())) else { return };
+    let Some(name) = store(|s| s.client(client).filter(|c| !c.is_system()).map(|c| c.name.clone())) else { return };
     let new = keychain::Login { email, password };
     let existing = keychain::read_login(client);
     if existing.as_ref() == Some(&new) || DECLINED_LOGIN.with_borrow(|d| d.contains(&client)) {
@@ -526,7 +526,7 @@ pub fn open_meet() {
 
 /// Ask the user to pick one of the real profiles.
 pub fn choose_profile(question: &str) -> Option<Uuid> {
-    let profiles: Vec<(Uuid, String)> = store(|s| s.ordered().iter().filter(|c| !c.is_search()).map(|c| (c.id, c.name.clone())).collect());
+    let profiles: Vec<(Uuid, String)> = store(|s| s.ordered().iter().filter(|c| !c.is_system()).map(|c| (c.id, c.name.clone())).collect());
     match profiles.len() {
         0 => None,
         1 => Some(profiles[0].0),
@@ -555,7 +555,7 @@ pub fn open_from_search(search_tab: Option<Uuid>, url: Url) {
 }
 
 pub fn open_in_client_workspace(client: Uuid, url: Url) {
-    if client == GOOGLE_SEARCH_ID {
+    if client == GOOGLE_SEARCH_ID || client == crate::model::MAIL_ID {
         return open_from_search(None, url);
     }
     mutate(ALL, |s| s.open_in_client_workspace(client, &url, None));
@@ -571,7 +571,10 @@ thread_local! {
 /// and the tab starts loading straight away, as in any browser; several
 /// background tabs from one page line up in the order they were clicked.
 pub fn open_new_tab_from_page(client: Uuid, ws: Workspace, url: Url, opener: Option<Uuid>, background: bool) {
-    let ws = if policy::is_google_search(&url) {
+    // The Email workspace keeps everything its pages open, Google included.
+    let ws = if ws == Workspace::Mail {
+        Workspace::Mail
+    } else if policy::is_google_search(&url) {
         Workspace::GoogleSearch
     } else if ws == Workspace::GoogleSearch && policy::search_route(&url) == policy::SearchRoute::Client {
         Workspace::Zoho
@@ -703,6 +706,19 @@ pub fn address_entered(text: &str) {
         return load_destination(u);
     }
     open_search(text);
+}
+
+/// The Email chooser picked a webmail: load it in the tab in front.
+pub fn open_in_active_tab(url: Url) {
+    load_destination(url);
+}
+
+/// Go › Email (⇧⌘E): the pinned Email workspace.
+pub fn open_mail() {
+    mutate(ALL, |s| {
+        s.ensure_mail_client();
+        s.select_client(crate::model::MAIL_ID)
+    });
 }
 
 fn load_destination(url: Url) {
