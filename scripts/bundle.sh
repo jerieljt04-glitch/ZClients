@@ -28,7 +28,7 @@ lipo -create target/aarch64-apple-darwin/release/zclients-rs target/x86_64-apple
 ARCHS="$(lipo -archs "$APP/Contents/MacOS/ZClients")"
 [[ "$ARCHS" == *arm64* && "$ARCHS" == *x86_64* ]] || { echo "not universal: $ARCHS" >&2; exit 1; }
 
-for ICON in ../zoho-workspace-manager/build/ZPort.icns /Applications/ZClients.app/Contents/Resources/ZClients.icns backup/ZClients-Swift.app/Contents/Resources/ZClients.icns; do
+for ICON in assets/ZClients.icns ../zoho-workspace-manager/build/ZPort.icns /Applications/ZClients.app/Contents/Resources/ZClients.icns backup/ZClients-Swift.app/Contents/Resources/ZClients.icns; do
   if [ -f "$ICON" ]; then cp "$ICON" "$APP/Contents/Resources/ZClients.icns"; break; fi
 done
 

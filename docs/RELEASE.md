@@ -59,6 +59,28 @@ In CI, import the Developer ID certificate into a temporary keychain created
 for the job (random password generated in the job, deleted afterwards), only
 in a protected environment for tagged builds.
 
+## GitHub Releases (what people download today)
+
+`.github/workflows/release.yml` builds the universal Mac app on a macOS runner,
+signs it **ad hoc** (hardened runtime, same bundle id and entitlements, checked by
+`scripts/verify-signature.sh`), packs `ZClients-<version>-mac.dmg` (drag to
+Applications) plus its `.sha256`, and publishes a GitHub Release whose notes
+explain the one-time "Open Anyway" step and list the tagged commit's message as
+"What's new".
+
+* New version: bump `Cargo.toml`, commit, then
+  `git tag -a vX.Y.Z -m "ZClients X.Y.Z" && git push origin vX.Y.Z`.
+* Existing tag: Actions › release › Run workflow, or
+  `gh workflow run release.yml -f tag=vX.Y.Z` (re-running replaces the files).
+* The tag must equal `Cargo.toml`'s version or the job stops.
+* The repository is private: only people with access to it (collaborators)
+  can see and download releases. Add someone under Settings › Collaborators.
+* Mac only. The app is AppKit + WebKit; a Windows build needs a separate port.
+* The owner's own Mac keeps using `./build.sh`: an ad-hoc-signed download is a
+  different signer, so macOS would re-ask for camera/mic and Keychain access.
+* Once there is a Developer ID, switch this workflow to `scripts/release.sh`
+  (notarized, no Gatekeeper warning).
+
 ## Updates
 
 ZClients has no self-updater. A signed update mechanism (e.g. Sparkle 2 with

@@ -1,0 +1,120 @@
+name: release
+# Builds the Mac app for a version tag and publishes it as a GitHub Release
+# (ZClients-<version>-mac.dmg + .sha256). The repository is private, so only
+# people with access to it can see or download releases.
+#
+#   git tag -a v2.7.0 -m "..." && git push origin v2.7.0   → release v2.7.0
+#   Actions › release › Run workflow (tag: v2.6.0)          → (re)build an existing tag
+#
+# The app is signed ad hoc (no Apple Developer ID), so macOS asks people to
+# confirm it once on first open — the release notes say how. See docs/RELEASE.md.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to release, e.g. v2.6.0
+        required: true
+permissions:
+  contents: write
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+jobs:
+  mac:
+    runs-on: macos-15
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check the tag name
+        run: '[[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "not a version tag: $TAG" >&2; exit 1; }'
+
+      - uses: actions/checkout@v5
+        with:
+          ref: refs/tags/${{ env.TAG }}
+          fetch-depth: 0
+
+      - name: Tag matches Cargo.toml
+        run: |
+          VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          [ "v$VERSION" = "$TAG" ] || { echo "tag $TAG but Cargo.toml says $VERSION" >&2; exit 1; }
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      # Tags made before the icon lived in the repo take the icon and the
+      # packaging script from this workflow's commit; the app source is the tag's.
+      - name: Packaging files for older tags
+        run: |
+          if [ ! -f assets/ZClients.icns ]; then
+            git checkout "$GITHUB_SHA" -- assets/ZClients.icns scripts/bundle.sh
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+
+      - name: Tests
+        run: cargo test --locked --quiet
+
+      - name: Build and sign the app
+        run: |
+          APP="$RUNNER_TEMP/dmg/ZClients.app"
+          mkdir -p "$RUNNER_TEMP/dmg"
+          scripts/bundle.sh "$APP" ZClients com.zport.swift
+          [ -f "$APP/Contents/Resources/Assets.car" ] || { echo "app has no icon" >&2; exit 1; }
+          xattr -cr "$APP"
+          codesign --force --options runtime --timestamp=none --identifier com.zport.swift \
+            --entitlements ZClients.entitlements --sign - "$APP"
+          scripts/verify-signature.sh "$APP" com.zport.swift
+
+      - name: Disk image
+        run: |
+          ln -s /Applications "$RUNNER_TEMP/dmg/Applications"
+          mkdir -p dist
+          DMG="dist/ZClients-$VERSION-mac.dmg"
+          for TRY in 1 2 3; do
+            hdiutil create -volname "ZClients $VERSION" -srcfolder "$RUNNER_TEMP/dmg" \
+              -fs HFS+ -format UDZO -ov "$DMG" && break
+            [ "$TRY" = 3 ] && exit 1
+            sleep 5
+          done
+          hdiutil verify "$DMG"
+          (cd dist && shasum -a 256 "ZClients-$VERSION-mac.dmg" > "ZClients-$VERSION-mac.dmg.sha256")
+
+      - name: Release notes
+        run: |
+          {
+            echo "## Download"
+            echo
+            echo "**Mac** (macOS 14 Sonoma or later, Apple Silicon and Intel): \`ZClients-$VERSION-mac.dmg\` below."
+            echo
+            echo "**Windows:** not available yet. ZClients is built on macOS-only parts; a Windows version is planned separately."
+            echo
+            echo "## Install on a Mac"
+            echo
+            echo "1. Download \`ZClients-$VERSION-mac.dmg\` and open it."
+            echo "2. Drag **ZClients** onto **Applications**, then eject the disk image."
+            echo "3. Open ZClients from Applications. The first time, macOS says it can't verify the developer, because the app isn't signed with an Apple Developer ID:"
+            echo "   - **macOS 15 Sequoia or later:** click **Done**, open **System Settings › Privacy & Security**, scroll down to *\"ZClients\" was blocked*, click **Open Anyway** and confirm with your password."
+            echo "   - **macOS 14 Sonoma:** right-click ZClients in Applications, choose **Open**, then **Open** again."
+            echo
+            echo "   You only need to do this once per version."
+            echo
+            echo "Updating: quit ZClients and replace it in Applications. Profiles and sign-ins are kept. macOS may ask again for camera/microphone access and once for Keychain access (click **Always Allow**)."
+            echo
+            echo "Check the download (optional): \`shasum -a 256 ZClients-$VERSION-mac.dmg\` must match the \`.sha256\` file."
+            echo
+            echo "## What's new"
+            echo
+            git log -1 --format=%B "$TAG^{commit}" | grep -vi '^co-authored-by:'
+          } > "$RUNNER_TEMP/notes.md"
+
+      - name: Publish
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+            gh release edit "$TAG" --notes-file "$RUNNER_TEMP/notes.md"
+          else
+            gh release create "$TAG" dist/* --verify-tag --title "ZClients $VERSION" \
+              --notes-file "$RUNNER_TEMP/notes.md"
+          fi

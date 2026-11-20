@@ -4,6 +4,13 @@ One Mac app for many signed-in Zoho profiles. Native AppKit + WebKit, driven
 from Rust through the `objc2` bindings — no web view is spent on the app's own
 interface.
 
+## Download
+
+Mac builds are on the repository's [Releases](../../releases) page (macOS 14+,
+Apple Silicon and Intel); install steps are in each release's notes. Releases
+are made by `.github/workflows/release.yml` from version tags — see
+`docs/RELEASE.md`.
+
 ## Build
 
 ```sh
